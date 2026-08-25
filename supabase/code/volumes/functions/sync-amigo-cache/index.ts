@@ -13,7 +13,7 @@
 //    d. Mark stale rows (que estavam scheduled mas sumiram do Amigo) como 'canceled_remote'
 // 2. Processa sync_jobs pendentes (refresh on-demand).
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.50.0";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",

@@ -11,7 +11,7 @@
 // "responder/confirmar" seguido da palavra afirmativa — o orphan-ACK guard do
 // webhook trataria a resposta como confirmação externa e a silenciaria. Por
 // isso o texto usa "me diga *quero*". Há teste de regressão cobrindo isso.
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.50.0";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",

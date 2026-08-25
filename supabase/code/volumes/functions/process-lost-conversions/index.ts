@@ -10,7 +10,7 @@
 // hora do envio: já marcou? atendente entrou? conversa ativa? follow-up de outro
 // sistema nas últimas 24h? ticket com humano? — qualquer um cancela/adia.
 // Envio no MESMO contrato que funciona: channelId+whatsappId+externalKey+isClosed.
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.50.0";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",

@@ -5,7 +5,7 @@
 //   2) o email está cadastrado em clinic_staff da clínica dele;
 // e então usa a API admin: cria o usuário JÁ CONFIRMADO com a senha dada, ou,
 // se já existe, redefine a senha e confirma. Zero emails envolvidos.
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.50.0";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",

@@ -1,4 +1,4 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.50.0";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 // Janela de silêncio 20h–7h (SP): nada de mensagem de madrugada/noite. Mesma
 // regra e mesmos limites do motor da lista de espera — lá isso já valia, aqui
