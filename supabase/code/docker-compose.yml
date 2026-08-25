@@ -440,6 +440,20 @@ services:
       SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
       # TODO: Allow configuring VERIFY_JWT per function.
       VERIFY_JWT: "${FUNCTIONS_VERIFY_JWT}"
+      # ── Julia (CBT Ortopedia) ────────────────────────────────────
+      # O edge-runtime NAO usa env_file: so chega no container o que
+      # estiver listado aqui. Definir no .env sem mapear nesta lista
+      # nao tem efeito, e a falha e silenciosa.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      DEEPINFRA_API_KEY: ${DEEPINFRA_API_KEY}
+      # Precisa ser IGUAL a app.settings.cron_secret no banco: e a
+      # igualdade desses dois lados que autoriza a chamada do pg_cron.
+      CRON_SECRET: ${CRON_SECRET}
+      # Protecao dos primeiros dias: o guard de atendente humano procura
+      # manual_reply em webhook_messages, que comeca vazia no backend
+      # novo. Sem isto ele declara todo ticket aberto como abandonado e
+      # responde por cima da atendente. 0 NAO desliga (Number("0") e falsy).
+      HUMAN_TICKET_STALE_HOURS: "${HUMAN_TICKET_STALE_HOURS:-87600}"
     command: [ "start", "--main-service", "/home/deno/functions/main" ]
 
   analytics:
