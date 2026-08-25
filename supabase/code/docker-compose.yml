@@ -180,6 +180,20 @@ services:
       GOTRUE_MAILER_URLPATHS_CONFIRMATION: ${MAILER_URLPATHS_CONFIRMATION}
       GOTRUE_MAILER_URLPATHS_RECOVERY: ${MAILER_URLPATHS_RECOVERY}
       GOTRUE_MAILER_URLPATHS_EMAIL_CHANGE: ${MAILER_URLPATHS_EMAIL_CHANGE}
+      # ── E-mails em portugues (Julia / CBT Ortopedia) ──────────────────────
+      # Sem isto o GoTrue manda os templates de fabrica, em ingles, assinados
+      # como "Supabase Auth". Os arquivos sao servidos pelo proprio painel; se a
+      # URL nao responder, o GoTrue cai no template padrao — degrada, nao quebra.
+      GOTRUE_MAILER_SUBJECTS_RECOVERY: ${MAILER_SUBJECTS_RECOVERY:-Redefinir sua senha}
+      GOTRUE_MAILER_SUBJECTS_CONFIRMATION: ${MAILER_SUBJECTS_CONFIRMATION:-Confirme seu e-mail}
+      GOTRUE_MAILER_SUBJECTS_INVITE: ${MAILER_SUBJECTS_INVITE:-Seu acesso ao painel}
+      GOTRUE_MAILER_SUBJECTS_EMAIL_CHANGE: ${MAILER_SUBJECTS_EMAIL_CHANGE:-Confirme seu novo e-mail}
+      GOTRUE_MAILER_SUBJECTS_MAGIC_LINK: ${MAILER_SUBJECTS_MAGIC_LINK:-Seu link de acesso}
+      GOTRUE_MAILER_TEMPLATES_RECOVERY: ${MAILER_TEMPLATES_BASE:-https://juliacbt.cbthub.com.br/email}/recovery.html
+      GOTRUE_MAILER_TEMPLATES_CONFIRMATION: ${MAILER_TEMPLATES_BASE:-https://juliacbt.cbthub.com.br/email}/confirmation.html
+      GOTRUE_MAILER_TEMPLATES_INVITE: ${MAILER_TEMPLATES_BASE:-https://juliacbt.cbthub.com.br/email}/invite.html
+      GOTRUE_MAILER_TEMPLATES_EMAIL_CHANGE: ${MAILER_TEMPLATES_BASE:-https://juliacbt.cbthub.com.br/email}/email_change.html
+      GOTRUE_MAILER_TEMPLATES_MAGIC_LINK: ${MAILER_TEMPLATES_BASE:-https://juliacbt.cbthub.com.br/email}/magic_link.html
 
       GOTRUE_EXTERNAL_PHONE_ENABLED: ${ENABLE_PHONE_SIGNUP}
       GOTRUE_SMS_AUTOCONFIRM: ${ENABLE_PHONE_AUTOCONFIRM}
