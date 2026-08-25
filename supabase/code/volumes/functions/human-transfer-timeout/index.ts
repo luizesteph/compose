@@ -105,6 +105,25 @@ function stripAccents(s: string): string {
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
+  // GUARD DE CRON — sem ele esta função executava com um POST vazio de qualquer
+  // origem. Em 25/08 um teste assim disparou 7 avisos de WhatsApp para pacientes
+  // reais, sobre transferências de 4 a 8 dias antes. O header x-cron-secret já
+  // estava declarado no CORS, o que dava aparência de proteção; ninguém o lia.
+  //
+  // Mesmo formato das outras seis funções de cron: aceita o segredo compartilhado
+  // OU uma chamada que já passou pelo gateway com apikey/Authorization (o Kong
+  // valida a chave antes de chegar aqui).
+  const cronSecret = req.headers.get("x-cron-secret");
+  const expectedSecret = Deno.env.get("CRON_SECRET");
+  const hasApiKey = !!(req.headers.get("apikey") || req.headers.get("authorization"));
+  const cronSecretOk = !!cronSecret && !!expectedSecret && cronSecret === expectedSecret;
+  if (!cronSecretOk && !hasApiKey) {
+    return new Response(JSON.stringify({ error: "Unauthorized" }), {
+      status: 401,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+
   const supabase = createClient(
     Deno.env.get("SUPABASE_URL") ?? "",
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
