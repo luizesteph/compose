@@ -408,6 +408,26 @@ export async function checkTicketIsHumanOwned(
   return { isHumanOwned: true, status: "api_error_blocked", userId: null, userName: "" };
 }
 
+// ALVO DIRIGIDO x ESCOLHA GENERICA (26/08, corrige c30bf5c).
+// c30bf5c assumiu que `forceReassign` marcava "tenho um alvo explicito por regra
+// clinica". Nao marcava: `falar_com_atendente` e o helper TransferirComDono passam
+// forceReassign=true SEMPRE, inclusive quando a atendente saiu da hierarquia do
+// custom_notes (reason=preferred_order/rodizio). Resultado medido em 26/08: 28
+// transferencias voltaram "status":"open" contra 4 "pending" — a fila que o dono
+// pediu praticamente nao existia, e a primeira da hierarquia acumulava os casos.
+//
+// Dirigido e o que tem DONO DO ASSUNTO ou nome pedido pelo paciente. O resto e
+// escolha generica da Julia e vai para a fila de pendentes.
+export function ehAlvoDirigido(reason?: string | null): boolean {
+  const r = String(reason || "");
+  return (
+    r.startsWith("requested_by_name:") ||
+    r.startsWith("specialty:") ||
+    r.startsWith("specialty_keep_offline:") ||
+    r.startsWith("routing_rule:")
+  );
+}
+
 export async function transferTicketToHuman(opts: {
   baseUrl: string;
   apiId: string;
@@ -421,8 +441,11 @@ export async function transferTicketToHuman(opts: {
   // re-atribui. Seguro: o pipeline so chega aqui com a IA ativa, ou seja, o
   // dono atual esta stale (guard humano de 8h ja teria silenciado a IA).
   forceReassign?: boolean;
+  // Alvo escolhido por REGRA CLINICA ou por nome pedido pelo paciente (ver
+  // ehAlvoDirigido). So estes mantem a atribuicao; o resto vai para a fila.
+  alvoDirigido?: boolean;
 }): Promise<TransferResult> {
-  const { baseUrl, apiId, bearerToken, phone, userId, channelId, forceReassign } = opts;
+  const { baseUrl, apiId, bearerToken, phone, userId, channelId, forceReassign, alvoDirigido } = opts;
 
   const buildLookupPayload = () => ({
     number: phone,
@@ -453,11 +476,12 @@ export async function transferTicketToHuman(opts: {
     // para quem domina o assunto — jogar na fila geral faria o paciente de
     // cirurgia cair com quem nao trata cirurgia.
     //
-    // forceReassign ja e o sinal de "tenho um alvo explicito": e o que as regras
-    // de palavra-chave passam. Sem ele, a transferencia e generica e vai para a
-    // fila. Essas dirigidas tem 1h de prazo antes de voltarem para a fila, contra
-    // 10 min das demais — ver prazoDeRespostaEmMinutos em _shared/atendimento.
-    const paraFila = modoFilaLigado && !(forceReassign && userId);
+    // NAO use forceReassign como sinal de alvo dirigido (erro de c30bf5c): ele so
+    // diz "pode sobrescrever dona stale" e vem ligado em quase todo caminho. Quem
+    // marca regra clinica / nome pedido e `alvoDirigido` — ver ehAlvoDirigido.
+    // As dirigidas tem 1h de prazo antes de voltarem para a fila, contra 10 min
+    // das demais — ver prazoDeRespostaEmMinutos em _shared/atendimento.
+    const paraFila = modoFilaLigado && !(alvoDirigido && userId);
 
     const payload: Record<string, unknown> = {
       ticketId: Number(ticketId),

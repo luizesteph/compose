@@ -48,6 +48,7 @@ import {
   sendAvanceaiReply,
   checkTicketIsHumanOwned,
   transferTicketToHuman,
+  ehAlvoDirigido,
 } from "./avanceai.ts";
 import {
   sanitizeReply,
@@ -2562,6 +2563,9 @@ async function transferirComDono(
       userId: selecionada.id,
       channelId: args.channelId ?? null,
       forceReassign: true,
+      // Só é dirigida quando a escolha veio de regra clínica / nome pedido.
+      // preferred_order é escolha genérica da Julia e vai para a fila.
+      alvoDirigido: ehAlvoDirigido(choice.reason),
     });
     if (!transferResult.ok) {
       console.error(
@@ -3195,6 +3199,7 @@ async function executeAction(
                     channelId,
                     // Alvo escolhido por regra/balanceamento: re-atribui dona stale
                     forceReassign: true,
+                    alvoDirigido: ehAlvoDirigido(choice.reason),
                   });
                   if (transferResult.ok) {
                     console.log(
@@ -8597,6 +8602,9 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             // Alvo explicito (regra/pedido): re-atribui mesmo se o ticket estiver
             // com outra dona stale (caso : preso na Lais, regra=Vania)
             forceReassign: true,
+            // Dirigida só quando o paciente pediu o nome ou uma regra de palavra-chave
+            // resolveu o alvo. Sem isso é rodízio da hierarquia — vai para a fila.
+            alvoDirigido: !!(routingRuleMatched || requestedName),
           });
 
           if (!transferResult.ok) {
@@ -8614,6 +8622,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               userId: selectedUser.id,
               channelId,
               forceReassign: true,
+              alvoDirigido: !!(routingRuleMatched || requestedName),
             });
             if (!transferResult.ok) {
               console.error(
@@ -9111,6 +9120,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                     // Alvo por regra (exame->Vania / infiltracao->Lidiane): re-atribui
                     // dona stale (caso preso na Lais)
                     forceReassign: true,
+                    alvoDirigido: ehAlvoDirigido(choice.reason),
                   });
 
                   if (transferResult.ok) {
@@ -9225,6 +9235,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               userId: _fisTarget,
               channelId,
               forceReassign: !!_fisTarget,
+              alvoDirigido: !!_fisTarget,
             });
           } catch (e) {
             console.error(`[Fisio] transferência falhou: ${(e as Error).message}`);
@@ -9339,6 +9350,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                     // Alvo por regra (exame->Vania / infiltracao->Lidiane): re-atribui
                     // dona stale (caso preso na Lais)
                     forceReassign: true,
+                    alvoDirigido: ehAlvoDirigido(choice.reason),
                   });
 
                   if (transferResult.ok) {
@@ -12141,6 +12153,7 @@ Deno.serve(async (req) => {
               channelId: resolvedChannelId,
               // Só força quando a regra resolveu um alvo (atendente online)
               forceReassign: !!transferUserId,
+              alvoDirigido: !!transferUserId,
             });
 
             if (mediaTransferResult.ok) {
