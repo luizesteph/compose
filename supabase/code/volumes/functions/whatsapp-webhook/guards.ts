@@ -481,3 +481,8 @@ export function validateBookingDate(
   }
   return { allowed: true };
 }
+
+// As regras de atendimento humano moraram aqui por um tempo; foram para
+// _shared/atendimento.ts quando o cron human-transfer-timeout passou a precisar
+// das mesmas funções. Re-exportadas para não quebrar quem já importava daqui.
+export { exigeRespostaDaAtendente, prazoDeRespostaEmMinutos } from "../_shared/atendimento.ts";

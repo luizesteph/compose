@@ -17,6 +17,7 @@
 //       - Insert routing_log entry for audit
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { exigeRespostaDaAtendente, prazoDeRespostaEmMinutos } from "../_shared/atendimento.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -100,6 +101,132 @@ async function transferTicket(baseUrl: string, apiId: string, bearerToken: strin
 
 function stripAccents(s: string): string {
   return s.normalize("NFD").replace(/[̀-ͯ]/g, "");
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FASE 2 — DEVOLUÇÃO À FILA POR INATIVIDADE (pedido do dono, 25/08)
+// ─────────────────────────────────────────────────────────────────────────────
+// Diferente da Fase 1 (que reatribui uma transferência que a Julia iniciou),
+// esta olha o atendimento JÁ EM CURSO: a atendente pegou o ticket, o paciente
+// perguntou, e ninguém respondeu.
+//
+// Regra do dono: 10 min para a equipe, 60 para Vânia e Lidiane. Só conta se a
+// última mensagem do paciente EXIGE resposta — "obrigada" e documento sem texto
+// não devolvem nada.
+//
+// Desligada por padrão (DEVOLVER_FILA_ENABLED). Ligar é uma variável de
+// ambiente, não um deploy — e desligar no meio de um expediente ruim também.
+//
+// FAIL-CLOSED de propósito: qualquer erro (showticket fora do ar, ticket sem id,
+// credencial faltando) PULA aquele ticket em vez de devolver. Devolver por
+// engano tira o paciente de quem está resolvendo o caso dele.
+async function devolverInativosAFila(
+  supabase: any,
+  clinicTokenId: string,
+  creds: { baseUrl: string; apiId: string; bearerToken: string },
+  prazoPadrao: number,
+  prazoEstendido: number,
+): Promise<{ avaliados: number; devolvidos: number; detalhes: string[] }> {
+  const out = { avaliados: 0, devolvidos: 0, detalhes: [] as string[] };
+
+  // Conversas com atendente humana e ticket aberto. `ticket_status` é mantido
+  // pelo refresh-ticket-status; se estiver velho, o showticket abaixo confere.
+  const { data: convs } = await supabase
+    .from("chat_conversations")
+    .select("id, phone, assigned_agent_name, ticket_status, last_message_at")
+    .eq("clinic_token_id", clinicTokenId)
+    .eq("ticket_status", "open")
+    .not("assigned_agent_name", "is", null)
+    .limit(200);
+
+  for (const c of (convs || [])) {
+    const nome = String(c.assigned_agent_name || "").trim();
+    if (!nome) continue;
+
+    // Última mensagem DO PACIENTE nesta conversa.
+    const { data: ultimas } = await supabase
+      .from("webhook_messages")
+      .select("id, direction, ai_intent, message_text, created_at, raw_payload")
+      .eq("conversation_id", c.id)
+      .order("created_at", { ascending: false })
+      .limit(15);
+
+    const msgs = (ultimas || []);
+    const ultimaDoPaciente = msgs.find((m: any) => m.direction === "incoming");
+    if (!ultimaDoPaciente) continue;
+
+    // Alguém respondeu DEPOIS dela? Conta tanto a atendente (manual_reply)
+    // quanto a própria Julia — se a IA respondeu, o paciente não está no vácuo.
+    const respondeuDepois = msgs.some((m: any) =>
+      m.direction === "outgoing" && new Date(m.created_at) > new Date(ultimaDoPaciente.created_at)
+    );
+    if (respondeuDepois) continue;
+
+    out.avaliados++;
+
+    // A mensagem pede resposta? "obrigada" e mídia sem texto não pedem.
+    const temMidia = !!(ultimaDoPaciente.raw_payload?.mediaUrl || ultimaDoPaciente.raw_payload?.mediaType);
+    if (!exigeRespostaDaAtendente(ultimaDoPaciente.message_text, temMidia)) continue;
+
+    const prazoMin = prazoDeRespostaEmMinutos(nome, prazoPadrao, prazoEstendido);
+    const esperandoMin = (Date.now() - new Date(ultimaDoPaciente.created_at).getTime()) / 60000;
+    if (esperandoMin < prazoMin) continue;
+
+    // Confere no Z-PRO antes de mexer: o banco pode estar defasado, e a
+    // atendente pode ter respondido por um caminho que não gerou webhook.
+    let ticketId: number | null = null;
+    try {
+      const tel = String(c.phone || "").replace(/\D/g, "");
+      const full = tel.length <= 11 ? `55${tel}` : tel;
+      const r = await fetch(`${creds.baseUrl}/v2/api/external/${creds.apiId}/showticket`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${creds.bearerToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ number: full }),
+      });
+      if (!r.ok) continue;                              // fail-closed
+      const d = await r.json();
+      if (String(d?.status || "") !== "open") continue; // já saiu do atendimento
+      ticketId = Number(d?.id ?? d?.ticketId ?? 0) || null;
+    } catch { continue; }
+    if (!ticketId) continue;
+
+    // Devolve para a fila: status pending, sem dono.
+    try {
+      const r = await fetch(`${creds.baseUrl}/v2/api/external/${creds.apiId}/updateticketinfo`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${creds.bearerToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ ticketId, status: "pending", userId: null }),
+      });
+      if (!r.ok) {
+        out.detalhes.push(`ticket ${ticketId}: updateticketinfo ${r.status}`);
+        continue;
+      }
+      out.devolvidos++;
+      out.detalhes.push(`ticket ${ticketId} (${nome}, ${Math.round(esperandoMin)}min) → fila`);
+
+      await supabase.from("chat_conversations")
+        .update({ assigned_agent_name: null, ticket_status: "pending" })
+        .eq("id", c.id);
+
+      // Trilha de auditoria: sem isto ninguém entende por que o ticket voltou.
+      await supabase.from("transfer_audit").insert({
+        clinic_token_id: clinicTokenId,
+        conversation_id: c.id,
+        phone: c.phone,
+        from_attendant: nome,
+        to_attendant: null,              // volta para a fila, sem dono
+        initiated_by: "sistema",
+        trigger: "inatividade",
+        reason: "devolvido_a_fila",
+        detail: `${nome} sem responder ha ${Math.round(esperandoMin)}min (prazo ${prazoMin}min)`,
+      } as any).then(() => {}, () => {});   // auditoria nunca derruba a ação
+    } catch (e) {
+      out.detalhes.push(`ticket ${ticketId}: ${(e as Error).message.slice(0, 80)}`);
+    }
+  }
+
+  return out;
 }
 
 Deno.serve(async (req) => {
@@ -331,6 +458,35 @@ Deno.serve(async (req) => {
         summary.errors++;
       }
     }
+
+      // ── FASE 2: devolução à fila por inatividade ────────────────────────────
+      // Roda independente da Fase 1: aquela percorre pending_human_transfers
+      // (transferências que a Julia iniciou) e pode não ter linha nenhuma; esta
+      // olha o atendimento EM CURSO, que existe mesmo sem transferência pendente.
+      if ((Deno.env.get("DEVOLVER_FILA_ENABLED") || "").toLowerCase() === "true") {
+        const prazoPadrao = Number(Deno.env.get("DEVOLVER_FILA_MINUTOS") || "10") || 10;
+        const prazoEstendido = Number(Deno.env.get("DEVOLVER_FILA_MINUTOS_ESTENDIDO") || "60") || 60;
+        const { data: clinicas } = await supabase
+          .from("clinic_tokens")
+          .select("id, avanceai_base_url, avanceai_api_id, avanceai_bearer_token");
+        for (const cl of (clinicas || [])) {
+          if (!cl.avanceai_base_url || !cl.avanceai_api_id || !cl.avanceai_bearer_token) continue;
+          try {
+            const r = await devolverInativosAFila(
+              supabase,
+              cl.id,
+              { baseUrl: cl.avanceai_base_url, apiId: cl.avanceai_api_id, bearerToken: cl.avanceai_bearer_token },
+              prazoPadrao,
+              prazoEstendido,
+            );
+            (summary as any).fila_avaliados = ((summary as any).fila_avaliados || 0) + r.avaliados;
+            (summary as any).fila_devolvidos = ((summary as any).fila_devolvidos || 0) + r.devolvidos;
+            if (r.detalhes.length) console.log(`[devolver-fila] ${r.detalhes.join(" | ")}`);
+          } catch (e) {
+            console.error(`[devolver-fila] clinica ${cl.id}: ${(e as Error).message}`);
+          }
+        }
+      }
 
     return new Response(JSON.stringify({ ok: true, summary }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
