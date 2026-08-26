@@ -13891,9 +13891,22 @@ Deno.serve(async (req) => {
 
         // Inject proactively identified patient data into classification
         if (identifiedPatient) {
-          if (!classification.cpf && identifiedPatient.cpf) {
-            classification.cpf = identifiedPatient.cpf;
-            console.log(`[Webhook] Injected proactive CPF: ${identifiedPatient.cpf}`);
+          // CPF MASCARADO NAO E CPF (ver cpfLimpoOuVazio). Este caminho — a injecao
+          // proativa do paciente identificado pelo telefone — era o UNICO dos quatro
+          // que nao filtrava, e por ele passavam os 32% de cadastros com CPF vindo
+          // mascarado da propria Amigo ("***.018.028-**"). O sistema entao mandava
+          // patients/exists?cpf=018028, a API recusava ("Cpf deve ter exatamente 11
+          // caracteres") e o paciente da casa ouvia "nao encontrei seu cadastro".
+          //
+          // Medido em 26/08: a API do Amigo devolve o CPF mascarado para TODOS os
+          // pacientes, inclusive os que temos limpos no cache — nao ha o que
+          // recuperar. Vazio e melhor que podre: vazio o sistema sabe pedir.
+          const _cpfIdent = cpfLimpoOuVazio(identifiedPatient.cpf);
+          if (!classification.cpf && _cpfIdent) {
+            classification.cpf = _cpfIdent;
+            console.log(`[Webhook] Injected proactive CPF: ${_cpfIdent}`);
+          } else if (!classification.cpf && identifiedPatient.cpf) {
+            console.log(`[Webhook] CPF do cache descartado (mascarado/invalido) — vai pedir ao paciente`);
           }
           if (!classification.patient_full_name && identifiedPatient.name) {
             (classification as any).patient_name = firstName(identifiedPatient.name);
