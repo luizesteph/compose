@@ -446,7 +446,18 @@ export async function transferTicketToHuman(opts: {
     const _envTransf = typeof (globalThis as any).Deno !== "undefined"
       ? String((globalThis as any).Deno.env.get("TRANSFERIR_PARA_FILA") || "")
       : "";
-    const paraFila = _envTransf.toLowerCase() !== "false";
+    const modoFilaLigado = _envTransf.toLowerCase() !== "false";
+
+    // EXCECAO (pedido do dono, 26/08): transferencia DIRIGIDA por regra clinica
+    // continua atribuindo. Cirurgia, pos-operatorio, infiltracao e aplicacao vao
+    // para quem domina o assunto — jogar na fila geral faria o paciente de
+    // cirurgia cair com quem nao trata cirurgia.
+    //
+    // forceReassign ja e o sinal de "tenho um alvo explicito": e o que as regras
+    // de palavra-chave passam. Sem ele, a transferencia e generica e vai para a
+    // fila. Essas dirigidas tem 1h de prazo antes de voltarem para a fila, contra
+    // 10 min das demais — ver prazoDeRespostaEmMinutos em _shared/atendimento.
+    const paraFila = modoFilaLigado && !(forceReassign && userId);
 
     const payload: Record<string, unknown> = {
       ticketId: Number(ticketId),

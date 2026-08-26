@@ -9546,11 +9546,13 @@ async function upsertConversation(
 // FAIL-SAFE on persistent error: treat as UNKNOWN and BLOCK AI (never allow through on doubt)
 
 // ── Unified human-agent guard (BUG-2 FIX) ──
-// Combines four signals — any positive blocks the AI:
+// Combines five signals — any positive blocks the AI:
 //   1. raw payload from AvanceAI: status="open" + userId>0
 //   2. recent manual_reply (≤2h) on the same conversation_id
 //   3. recent skip with reason "Ticket com atendente humano%" (≤30min)
 //   4. live showticket API via checkTicketIsHumanOwned (fail-safe = block on error)
+//   5. handoff recente em transfer_audit (≤24h) — pega o ticket que voltou para a
+//      FILA (pending, sem dono), que nenhum dos outros quatro enxerga
 // This MUST run on every webhook regardless of test mode — that was the original bug.
 async function isHumanActive(
   supabaseClient: any,
@@ -9609,6 +9611,46 @@ async function isHumanActive(
       /* non-blocking */
     }
   }
+
+  // Signal 5: a conversa JA FOI ENTREGUE a gente (pedido do dono, 26/08)
+  // ─────────────────────────────────────────────────────────────────────────
+  // Os sinais 1 e 4 perguntam "o ticket tem dono?". Com a transferencia indo
+  // para a FILA (status=pending, sem userId), a resposta e NAO — e a IA voltaria
+  // a responder por cima de um paciente que ja esta esperando atendente.
+  //
+  // Pior no caso da devolucao por inatividade: a atendente pegou, o paciente
+  // perguntou, ela nao respondeu, o ticket voltou para a fila. Nao existe
+  // manual_reply (ela nunca digitou), entao o sinal 2 tambem nao pega. Sem este
+  // sinal, a Julia entraria exatamente no paciente que ja esta mal atendido.
+  //
+  // transfer_audit registra TODO handoff — transferencia da Julia e devolucao a
+  // fila. Enquanto houver registro recente, a conversa e de gente.
+  //
+  // 24h e o padrao: cobre o expediente inteiro e o dia seguinte cedo, sem prender
+  // o paciente para sempre. HANDOFF_BLOQUEIA_IA_HORAS ajusta sem deploy.
+  if (conversationId && supabaseClient) {
+    try {
+      const horas = Number(Deno.env.get("HANDOFF_BLOQUEIA_IA_HORAS") || "24") || 24;
+      const desde = new Date(Date.now() - horas * 60 * 60 * 1000).toISOString();
+      const { data: handoff } = await supabaseClient
+        .from("transfer_audit")
+        .select("created_at, reason")
+        .eq("conversation_id", conversationId)
+        .gte("created_at", desde)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (handoff) {
+        return {
+          blocked: true,
+          reason: `handoff_ativo(${String(handoff.reason || "transferido")},<${horas}h)`,
+        };
+      }
+    } catch (_) {
+      /* non-blocking: os outros sinais continuam valendo */
+    }
+  }
+
 
   // Signal 4: live showticket API (fail-safe = block on any error)
   if (avanceaiBaseUrl && avanceaiApiId && avanceaiBearerToken && phone) {
