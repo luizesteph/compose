@@ -2256,6 +2256,22 @@ async function getRoutingConfig(
 
 // Records a pending human transfer for timeout tracking. Idempotent per phone+clinic:
 // if there's already a pending one, increments attempts_count instead of inserting.
+// QUEM O AVISO DE 15 MIN VAI CITAR (26/08).
+// Quando a transferência foi para a FILA de pendentes ninguém é dona. Gravar o
+// nome de quem *teria* sido escolhida faz o human-transfer-timeout mandar ao
+// paciente "a Fulana está finalizando outro atendimento e já já te responde" —
+// uma promessa sobre um ticket que a Fulana não tem. O parêntese é a sentinela
+// que aquele executor já lê (`_semDona`) para mandar a versão honesta: o caso
+// continua na fila. Mesmo marcador que o caminho de urgência usa.
+function avisoDaDona(
+  dirigida: boolean,
+  u: { name?: string; id?: unknown } | null | undefined,
+): { attendantName: string; attendantId: string | null } {
+  return dirigida && u?.name
+    ? { attendantName: String(u.name), attendantId: u.id != null ? String(u.id) : null }
+    : { attendantName: "(fila geral)", attendantId: null };
+}
+
 async function recordPendingHumanTransfer(
   supabase: any,
   args: {
@@ -2593,8 +2609,7 @@ async function transferirComDono(
         conversationId: args.conversationId ?? null,
         phone: telefone,
         intent: args.intent,
-        attendantName: selecionada.name,
-        attendantId: String(selecionada.id),
+        ...avisoDaDona(ehAlvoDirigido(choice.reason), selecionada),
         timeoutMinutes: routingConfig.human_response_timeout_minutes,
       });
     }
@@ -3212,8 +3227,7 @@ async function executeAction(
                           ((globalThis as any).__currentConversationId as string | undefined) || null,
                         phone: formattedPhone,
                         intent: "widget_outage_transfer",
-                        attendantName: selectedUser.name,
-                        attendantId: String(selectedUser.id),
+                        ...avisoDaDona(ehAlvoDirigido(choice.reason), selectedUser),
                         timeoutMinutes: routingConfig.human_response_timeout_minutes,
                       });
                     }
@@ -8654,8 +8668,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               conversationId: ((globalThis as any).__currentConversationId as string | undefined) || null,
               phone: formattedPhone,
               intent: "falar_com_atendente",
-              attendantName: selectedUser.name,
-              attendantId: String(selectedUser.id),
+              ...avisoDaDona(!!(routingRuleMatched || requestedName), selectedUser),
               timeoutMinutes: (await getRoutingConfig(supabaseClient, clinicTokenId)).human_response_timeout_minutes,
             });
           }
@@ -8675,7 +8688,9 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             clinicTokenId,
             conversationId: conversationIdParam,
             phone: senderPhone,
-            toAttendant: selectedUser.name,
+            // Sem alvo dirigido o ticket foi para a FILA — a aba Transferências
+            // não pode dizer que foi para uma pessoa que não o recebeu.
+            toAttendant: routingRuleMatched || requestedName ? selectedUser.name : null,
             initiatedBy: "julia",
             trigger: "pedido_paciente",
             reason: _stickyPicked
@@ -9133,8 +9148,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                         conversationId: ((globalThis as any).__currentConversationId as string | undefined) || null,
                         phone: formattedPhone,
                         intent: "solicitar_infiltracao",
-                        attendantName: selectedUser.name,
-                        attendantId: String(selectedUser.id),
+                        ...avisoDaDona(ehAlvoDirigido(choice.reason), selectedUser),
                         timeoutMinutes: routingConfig.human_response_timeout_minutes,
                       });
                     }
@@ -9363,8 +9377,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                         conversationId: ((globalThis as any).__currentConversationId as string | undefined) || null,
                         phone: formattedPhone,
                         intent: "solicitar_exame",
-                        attendantName: selectedUser.name,
-                        attendantId: String(selectedUser.id),
+                        ...avisoDaDona(ehAlvoDirigido(choice.reason), selectedUser),
                         timeoutMinutes: routingConfig.human_response_timeout_minutes,
                       });
                     }
