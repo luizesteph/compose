@@ -434,9 +434,26 @@ export async function transferTicketToHuman(opts: {
     source: "showticket" | "showallticket",
   ): Promise<TransferResult> => {
     const updateUrl = `${baseUrl}/v2/api/external/${apiId}/updateticketinfo`;
+
+    // PEDIDO DO DONO (26/08): transferencia NAO atribui mais ninguem — o ticket vai
+    // para a FILA DE PENDENTES e quem estiver livre pega. Antes ia com status "open"
+    // + userId, o que prendia o paciente a uma pessoa; se ela nao visse, ninguem mais
+    // via. Mesma filosofia da devolucao por inatividade: a fila e a fonte.
+    //
+    // TRANSFERIR_PARA_FILA=false volta ao comportamento antigo, sem deploy.
+    // typeof (globalThis as any).Deno: este modulo e STRICT e a suite roda em Node,
+    // onde Deno nao existe. Mesmo padrao de _shared/llm.ts.
+    const _envTransf = typeof (globalThis as any).Deno !== "undefined"
+      ? String((globalThis as any).Deno.env.get("TRANSFERIR_PARA_FILA") || "")
+      : "";
+    const paraFila = _envTransf.toLowerCase() !== "false";
+
     const payload: Record<string, unknown> = {
       ticketId: Number(ticketId),
-      status: "open",
+      status: paraFila ? "pending" : "open",
+      // Os bots ficam desligados nos DOIS modos: o ponto da transferencia e tirar a
+      // Julia do caminho. Ticket voltando com chatgptStatus ativo faria a IA
+      // responder por cima de quem pegasse da fila.
       chatgptStatus: false,
       n8nStatus: false,
       typebotStatus: false,
@@ -444,7 +461,9 @@ export async function transferTicketToHuman(opts: {
       difyStatus: false,
     };
 
-    if (userId) payload.userId = Number(userId);
+    // No modo fila o ticket fica SEM dono de proposito — mandar userId anularia a
+    // mudanca, porque o Z-PRO atribuiria e tiraria da fila.
+    if (userId && !paraFila) payload.userId = Number(userId);
     if (channelId) {
       payload.channelId = Number(channelId);
       payload.whatsappId = Number(channelId);
