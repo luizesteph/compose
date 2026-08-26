@@ -12767,10 +12767,42 @@ Deno.serve(async (req) => {
             .gte("created_at", cutoff5min)
             .limit(1);
           if (recentSuccess && recentSuccess.length > 0) {
-            recentBookingCompleted = true;
-            console.log(
-              "[Webhook] ✅ Recent booking detected (last 10 min) — will suppress scheduling context injection",
-            );
+            // BUG 25/08 (primeira noite na infra propria): ENVIAR O LINK DO WIDGET
+            // grava incoming com ai_intent="agendar" + action_status="success" — que e
+            // exatamente o que a busca acima procura. So que link enviado NAO e consulta
+            // marcada: o paciente que responde "quero por aqui" (prefere o chat ao link)
+            // batia no POST-BOOKING GUARD, virava unknown, e em 4 mensagens o circuit
+            // breaker transferia para humano. Aconteceu ao vivo no 1o teste do dono.
+            //
+            // Por que nao exigir booked_event_id (a auditoria real de booking): nao ha
+            // booking de verdade no banco novo para confirmar que ele cai na INCOMING, e
+            // apostar errado desarmaria o guard que impede agendamento duplicado — bug
+            // pior que este.
+            //
+            // Correcao cirurgica: se a ultima resposta nossa foi o link do widget, nada
+            // foi marcado, entao o guard nao arma.
+            let apenasLinkDoWidget = false;
+            try {
+              const { data: ultimaSaida } = await supabase
+                .from("webhook_messages")
+                .select("ai_intent")
+                .eq("conversation_id", conversationId)
+                .eq("direction", "outgoing")
+                .order("created_at", { ascending: false })
+                .limit(1);
+              apenasLinkDoWidget = String(ultimaSaida?.[0]?.ai_intent || "") === "widget_link_sent";
+            } catch { /* na duvida, mantem o guard armado */ }
+
+            if (apenasLinkDoWidget) {
+              console.log(
+                "[Webhook] \u21a9\ufe0f Recent 'agendar' era ENVIO DE LINK do widget, nao marcacao — guard NAO arma",
+              );
+            } else {
+              recentBookingCompleted = true;
+              console.log(
+                "[Webhook] \u2705 Recent booking detected (last 10 min) — will suppress scheduling context injection",
+              );
+            }
           }
         } catch (rbErr) {
           console.log(`[Webhook] Recent booking check error (non-blocking): ${(rbErr as Error).message}`);
