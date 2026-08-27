@@ -21,6 +21,10 @@ import {
   WAITLIST_DECLINE_RE,
   pickEventForBooking,
   detectUrgency,
+  classificarUrgencia,
+  campoPedidoNoCadastro,
+  classificarPedidoDeFisioterapia,
+  PEDIDO_DE_ATENDENTE_RE,
   isClosingThanks,
   isValidCpf,
   isWeekendISO,
@@ -66,6 +70,8 @@ import {
   matchInsuranceGroup,
   pickPlanFromGroup,
   toInsuranceId,
+  validarAfirmacaoDeConvenio,
+  textoDeConvenioNaoConfirmado,
 } from "./insurance.ts";
 // @ts-nocheck
 // TODO(FASE 2): remove this directive and address ~50 structural TS errors
@@ -1777,7 +1783,7 @@ NUNCA classifique como falar_com_atendente: "ok", "obrigada", "obrigado", "aguar
 - "Quero fazer uma infiltração" / "Preciso de infiltração" / "Gostaria de agendar uma infiltração" / "Infiltração no joelho" / "Infiltração no ombro" → solicitar_infiltracao (NÃO classifique como 'agendar'. Infiltração NÃO é consulta.)
 - "Quero solicitar um exame" / "Preciso de um exame" / "Quero fazer exame sem consulta" / "Solicitar exame" / "Preciso fazer um exame" / "Quero pedir um exame" → solicitar_exame (NÃO classifique como 'agendar'. Solicitação de exame sem consulta NÃO é agendamento.)
 - Extraia patient_full_name (nome completo informado), insurance_choice (convênio escolhido ou "particular"), patient_birth_date (data de nascimento, APENAS se o paciente informar espontaneamente), patient_address (endereço completo ou CEP informado) e attendant_name (nome da atendente desejada, quando especificado)
-- ⚠️ patient_full_name: APENAS auto-identificação de quem escreve. NUNCA extraia nome de TERCEIRO citado ("meu marido Francisco", "minha mãe Maria", "é para meu filho") — nesses casos deixe vazio.`;
+- ⚠️ patient_full_name é o nome de QUEM VAI SER ATENDIDO, que nem sempre é quem escreve. Extraia em DOIS casos: (a) auto-identificação ("Meu nome é Maria Silva", "Sou João da Costa"); (b) a última mensagem da Julia PEDIU o nome completo para cadastro/agendamento — aí extraia o nome que vier, MESMO sendo de outra pessoa (marido, mãe, filho), porque é DELE o cadastro. Deixe vazio só quando um terceiro aparece de passagem, sem nenhum pedido de nome ("meu marido está com dor", "vou levar minha mãe") — aí o nome não é resposta a nada.`;
 
   // Tema 1: quando a clinica usa script dinamico, o defaultPrompt inteiro era
   // substituido — e com ele sumiam os exemplos/regras de reagendar. Anexamos sempre
@@ -1916,7 +1922,7 @@ NUNCA classifique como falar_com_atendente: "ok", "obrigada", "obrigado", "aguar
                 patient_full_name: {
                   type: "string",
                   description:
-                    "Nome completo do paciente - extraia APENAS quando quem escreve se AUTO-identifica ('Meu nome é Maria Silva', 'Sou João da Costa', 'Aqui é a Ana') ou está respondendo a um pedido de nome no cadastro. NUNCA extraia nomes de TERCEIROS mencionados na conversa ('meu marido Francisco', 'minha mãe Maria', 'a consulta é para o meu filho Pedro') — nesses casos deixe VAZIO. Nome de terceiro NÃO é o nome do interlocutor.",
+                    "Nome completo de QUEM VAI SER ATENDIDO — que nem sempre é quem escreve. Extraia em dois casos: (a) quem escreve se AUTO-identifica ('Meu nome é Maria Silva', 'Sou João da Costa', 'Aqui é a Ana'); (b) a ÚLTIMA mensagem da Julia pediu o nome completo para cadastro/agendamento — nesse caso extraia o nome que vier, MESMO sendo de outra pessoa ('Paulo José Rosito Fonseca' depois de 'me informe o nome completo do paciente'), porque o cadastro é DELE. Deixe VAZIO apenas quando um terceiro é citado de passagem, sem pedido de nome ('meu marido está com dor', 'vou levar minha mãe no médico') — aí o nome não responde a nada.",
                 },
                 insurance_choice: {
                   type: "string",
@@ -2651,6 +2657,13 @@ async function transferirComDono(
 const URGENCIA_ACOLHIMENTO =
   "Recebi sua mensagem e já sinalizei seu caso como prioridade aqui. 🙏 Se for uma emergência, por favor não espere por uma resposta por aqui: procure um pronto-socorro.";
 
+// PEDIDO DE ENCAIXE (26/08). Mesmo caminho, mesma pressa, SEM pronto-socorro:
+// quem pergunta "consegue um encaixe?" está falando de agenda cheia, não de
+// emergência. Não promete prazo e não cita nome de atendente, igual ao texto
+// clínico — só troca o que assustava.
+const ENCAIXE_ACOLHIMENTO =
+  "Recebi seu pedido de encaixe! 🙏 Já passei para a nossa equipe verificar essa possibilidade na agenda.";
+
 async function enviarAcolhimentoUrgencia(
   supabase: any,
   args: {
@@ -2666,8 +2679,11 @@ async function enviarAcolhimentoUrgencia(
     conversationId?: string | null;
     contactName?: string | null;
     messageId?: string | null;
+    // Texto a enviar. Sem ele, o clínico — o caminho antigo continua o padrão.
+    mensagem?: string | null;
   },
 ): Promise<boolean> {
+  const _texto = args.mensagem || URGENCIA_ACOLHIMENTO;
   if (args.isTestMode) return false;
   if (!args.baseUrl || !args.apiId || !args.bearerToken || !args.phone) {
     // ERROR de proposito: paciente em urgencia sem canal resolvido e' o caso que
@@ -2684,7 +2700,7 @@ async function enviarAcolhimentoUrgencia(
       args.apiId,
       args.bearerToken,
       args.phone,
-      URGENCIA_ACOLHIMENTO,
+      _texto,
       args.channelId ?? null,
     );
   } catch (e) {
@@ -2703,7 +2719,7 @@ async function enviarAcolhimentoUrgencia(
       conversation_id: args.conversationId ?? null,
       sender_phone: args.phone,
       sender_name: args.contactName ?? null,
-      message_text: URGENCIA_ACOLHIMENTO,
+      message_text: _texto,
       direction: "outgoing",
       action_status: "success",
       ai_intent: "urgency_ack",
@@ -2711,7 +2727,7 @@ async function enviarAcolhimentoUrgencia(
     if (args.messageId) {
       await supabase
         .from("webhook_messages")
-        .update({ ai_response: URGENCIA_ACOLHIMENTO })
+        .update({ ai_response: _texto })
         .eq("id", args.messageId);
     }
     if (args.userId) {
@@ -2721,7 +2737,7 @@ async function enviarAcolhimentoUrgencia(
         args.clinicTokenId ?? null,
         args.phone,
         args.contactName || "",
-        URGENCIA_ACOLHIMENTO,
+        _texto,
         "outgoing",
       );
     }
@@ -9213,9 +9229,20 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           }
         }
 
+        // A PALAVRA "fisio" NÃO É A INTENÇÃO (26/08). Os três disparos do dia
+        // foram todos errados: dois queriam GUIA do ortopedista para fazer fisio
+        // em OUTRO lugar, e um queria tirar dúvida de exercício com a
+        // fisioterapeuta. Mandar tabela de preço para quem pede receita é vender
+        // o que ninguém pediu — e some com o pedido real no meio do texto.
+        const _intFisio = classificarPedidoDeFisioterapia(currentMessageText || "");
+        console.log(`[Webhook] solicitar_fisioterapia - intenção=${_intFisio}`);
         const fisioScript =
-          "Nossa fisioterapia funciona pelo sistema de reembolso: sessão avulsa por R$ 180 ou pacote de 10 sessões por R$ 1.500 (em até 3x), com *avaliação gratuita*. 😊 " +
-          "Emitimos nota fiscal e relatório certinhos para você solicitar o reembolso ao seu plano. Vou te passar para nossa equipe agendar sua avaliação!";
+          _intFisio === "pedido_medico"
+            ? "Pedido, guia ou renovação de sessões quem emite é o médico. 🙏 Vou te passar para nossa equipe verificar isso com o doutor."
+            : _intFisio === "falar_com_fisio"
+              ? "Vou te passar para nossa equipe, que fala direto com a fisioterapeuta e te retorna por aqui. 🙏"
+              : "Nossa fisioterapia funciona pelo sistema de reembolso: sessão avulsa por R$ 180 ou pacote de 10 sessões por R$ 1.500 (em até 3x), com *avaliação gratuita*. 😊 " +
+                "Emitimos nota fiscal e relatório certinhos para você solicitar o reembolso ao seu plano. Vou te passar para nossa equipe agendar sua avaliação!";
 
         if (avanceaiConfig && senderPhone && !isTestMode) {
           let _fisPhone = senderPhone.replace(/\D/g, "");
@@ -12553,6 +12580,13 @@ Deno.serve(async (req) => {
           // valores + avaliacao gratuita + transferencia (deterministico, sem LLM).
           console.log(`[Webhook] ⚡ HARDCODED KEYWORD OVERRIDE: "fisio" detected → forcing solicitar_fisioterapia`);
           keywordForcedIntent = { intent: "solicitar_fisioterapia", attendant_name: "" };
+        } else if (PEDIDO_DE_ATENDENTE_RE.test(msgSearchHardcoded)) {
+          // 26/08: a mensagem "Atendente", sozinha, caiu em unknown_intent — a
+          // própria saudação diz "se preferir falar com um atendente, é só me
+          // pedir". Os padrões de frustração exigem uma segunda palavra
+          // ("atendente humano", "atendente agora") e o LLM não classificou.
+          console.log(`[Webhook] ⚡ HARDCODED KEYWORD OVERRIDE: pedido de atendente → forcing falar_com_atendente`);
+          keywordForcedIntent = { intent: "falar_com_atendente", attendant_name: "" };
         }
       }
 
@@ -12584,11 +12618,15 @@ Deno.serve(async (req) => {
       if (!keywordForcedIntent) {
         // Tema 5: usa helper compartilhado (mesmo regex roda no channel-disabled guard
         // pra cobrir Amostra 3 do relatorio 24/06).
-        const isUrgent = detectUrgency(finalMessage);
+        // "clinica" | "agenda" | null. O roteamento é IGUAL nos dois primeiros
+        // (humano na hora); só o texto muda — ver classificarUrgencia.
+        const _tipoUrg = classificarUrgencia(finalMessage);
+        const isUrgent = _tipoUrg !== null;
+        const _ehEncaixe = _tipoUrg === "agenda";
 
         if (isUrgent) {
           console.log(
-            `[Webhook] 🚨 URGENCY DETECTED in message — transferring to human IMMEDIATELY (Regra 4)`,
+            `[Webhook] 🚨 URGENCY DETECTED (tipo=${_tipoUrg}) — transferring to human IMMEDIATELY (Regra 4)`,
           );
 
           // ACOLHIMENTO ANTES DA TRANSFERENCIA (semana 10-14/08) — o porque
@@ -12597,6 +12635,7 @@ Deno.serve(async (req) => {
             baseUrl: avanceaiBaseUrl, apiId: avanceaiApiId, bearerToken: avanceaiBearerToken, phone,
             channelId: resolvedChannelId, isTestMode, userId, webhookId: webhook.id, clinicTokenId,
             conversationId, contactName: name, messageId,
+            mensagem: _ehEncaixe ? ENCAIXE_ACOLHIMENTO : URGENCIA_ACOLHIMENTO,
           });
 
           // Deixado de propósito SEM consumidor: a segunda mensagem de urgência
@@ -12620,7 +12659,7 @@ Deno.serve(async (req) => {
               clinicTokenId,
               conversationId,
               phone,
-              intent: "urgencia",
+              intent: _ehEncaixe ? "encaixe" : "urgencia",
               baseUrl: avanceaiBaseUrl,
               apiId: avanceaiApiId,
               bearerToken: avanceaiBearerToken,
@@ -12675,7 +12714,7 @@ Deno.serve(async (req) => {
                   clinicTokenId,
                   conversationId,
                   phone: _telUrg,
-                  intent: "urgencia",
+                  intent: _ehEncaixe ? "encaixe" : "urgencia",
                   // Sentinela lida pelo human-transfer-timeout: sem este marcador o
                   // aviso de 15 min diria "a Fulana esta finalizando outro
                   // atendimento" para um caso que nao tem Fulana nenhuma.
@@ -12692,14 +12731,16 @@ Deno.serve(async (req) => {
           await supabase
             .from("webhook_messages")
             .update({
-              action_status: "transferred_urgency",
-              action_error: "Sinal de urgência/emergência detectado — transferido para humano (Regra 4)",
-              ai_intent: "urgency_transfer",
+              action_status: _ehEncaixe ? "transferred_encaixe" : "transferred_urgency",
+              action_error: _ehEncaixe
+                ? "Pedido de encaixe na agenda — transferido para humano (Regra 4, sem alerta clínico)"
+                : "Sinal de urgência/emergência detectado — transferido para humano (Regra 4)",
+              ai_intent: _ehEncaixe ? "encaixe_transfer" : "urgency_transfer",
             })
             .eq("id", messageId);
           await auditTransfer(supabase, {
             clinicTokenId, conversationId, phone,
-            initiatedBy: "julia", trigger: "urgencia",
+            initiatedBy: "julia", trigger: _ehEncaixe ? "encaixe" : "urgencia",
             reason: "regra_4_deteccao_deterministica",
             detail: (finalMessage || "").slice(0, 120),
           });
@@ -12713,7 +12754,15 @@ Deno.serve(async (req) => {
             // designado (equipe offline), dizer "alguém vai te responder em
             // instantes" a um paciente com dor é a pior promessa possível: ele
             // para de procurar ajuda contando com uma resposta que não vem.
-            const urgencyReply = _cdUrg.closedToday && _cdUrg.reopenISO
+            const urgencyReply = _ehEncaixe
+              // ENCAIXE: nenhuma das três frases abaixo serve — todas mandam o
+              // paciente para o pronto-socorro. Aqui o assunto é agenda cheia.
+              ? (_cdUrg.closedToday && _cdUrg.reopenISO
+                  ? `Recebi seu pedido de encaixe! 🙏 Hoje nossa clínica está fechada${_cdUrg.reason ? ` (${_cdUrg.reason})` : ""} — deixei registrado aqui e nossa equipe verifica a agenda assim que voltarmos, em ${formatDateLabel(_cdUrg.reopenISO)}.`
+                  : _urgT.ok
+                    ? `Já passei seu pedido de encaixe para ${_urgT.attendantName || "nossa equipe"}, que verifica a agenda e te responde por aqui. 🙏`
+                    : "Deixei seu pedido de encaixe registrado aqui. 🙏 Nossa equipe verifica a agenda e te responde assim que alguém estiver disponível.")
+              : _cdUrg.closedToday && _cdUrg.reopenISO
               ? `Pelo que você descreveu, parece urgente. 🙏 Hoje nossa clínica está fechada${_cdUrg.reason ? ` (${_cdUrg.reason})` : ""} — se você está com uma emergência, procure um pronto-socorro ou UPA agora mesmo. Seu caso já ficou registrado aqui e nossa equipe te retorna assim que voltarmos, em ${formatDateLabel(_cdUrg.reopenISO)}.`
               : _urgT.ok
                 ? `Pelo que você descreveu, parece urgente. 🙏 Já passei seu caso para ${_urgT.attendantName || "nossa equipe"}, que te responde por aqui. Se for emergência grave, procure também um pronto-socorro próximo.`
@@ -14291,6 +14340,83 @@ Deno.serve(async (req) => {
         }
       }
 
+      // REGRA 8 (caso Lilian 26/08): a Julia pediu o MESMO dado 6 vezes seguidas.
+      // A paciente marcava para o marido; o classificador tinha ordem explicita de
+      // NUNCA extrair nome de terceiro, e o cadastro exigia esse nome. Ela mandou
+      // "Paulo Jose Rosito Fonseca" seis vezes, ouviu "tivemos uma pequena
+      // instabilidade no sistema" (nao houve), esperou 45 minutos e a Laiz salvou
+      // na mao. O prompt foi corrigido — este contador existe porque prompt falha.
+      //
+      // Conta pelo CAMPO pedido, lido de action_error (texto do codigo, fixo), e
+      // nao pela frase enviada: o anti-duplicata compara texto e o LLM reescrevia
+      // a pergunta a cada volta, entao o loop passou inteiro por baixo dele.
+      if (conversationId && actionResult.status === "needs_info") {
+        const _campo = campoPedidoNoCadastro(String(actionResult.error || ""));
+        if (_campo) {
+          try {
+            const _since20 = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+            const { data: _rowsCampo } = await supabase
+              .from("webhook_messages")
+              .select("action_error")
+              .eq("conversation_id", conversationId)
+              .eq("direction", "incoming")
+              .eq("action_status", "needs_info")
+              .gte("created_at", _since20)
+              .limit(30);
+            // o update logo acima ja gravou a ocorrencia ATUAL — >= 3 e' a terceira
+            // vez pedindo a mesma coisa, e a terceira ja e' uma a mais do que devia.
+            const _vezes = (_rowsCampo || []).filter(
+              (r: any) => campoPedidoNoCadastro(String(r.action_error || "")) === _campo,
+            ).length;
+            if (_vezes >= 3) {
+              console.log(`[Webhook] ⛔ REGRA 8: pedi "${_campo}" ${_vezes}x em 20min — parando e passando pra humano`);
+              const _r8Msg =
+                "Pra não te fazer repetir de novo, vou passar pra uma colega da equipe finalizar isso com você. 🙏 Só um instante!";
+              if (avanceaiBaseUrl && avanceaiApiId && avanceaiBearerToken && phone && !isTestMode) {
+                try {
+                  await sendAvanceaiReply(avanceaiBaseUrl, avanceaiApiId, avanceaiBearerToken, phone, _r8Msg, resolvedChannelId);
+                } catch (e) {
+                  console.error(`[Regra8] escalate reply failed: ${(e as Error).message}`);
+                }
+                try {
+                  // sem alvo dirigido: vai para a fila de pendentes, como as demais
+                  await transferTicketToHuman({
+                    baseUrl: avanceaiBaseUrl,
+                    apiId: avanceaiApiId,
+                    bearerToken: avanceaiBearerToken,
+                    phone,
+                    channelId: resolvedChannelId,
+                  });
+                } catch (e) {
+                  console.error(`[Regra8] escalate transfer failed: ${(e as Error).message}`);
+                }
+              }
+              if (clinicTokenId) {
+                await auditTransfer(supabase, {
+                  clinicTokenId, conversationId, phone,
+                  initiatedBy: "julia", trigger: "loop_cadastro",
+                  reason: `pediu_${_campo}_${_vezes}x_em_20min`,
+                  detail: (finalMessage || "").slice(0, 120),
+                });
+              }
+              await supabase
+                .from("webhook_messages")
+                .update({
+                  action_status: "registration_loop_escalated",
+                  action_error: `Regra 8: campo "${_campo}" pedido ${_vezes}x em 20min — transferido pra humano`,
+                })
+                .eq("id", messageId);
+              return new Response(
+                JSON.stringify({ status: "transferred", reason: "registration_loop", campo: _campo, count: _vezes }),
+                { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+              );
+            }
+          } catch (e) {
+            console.log(`[Regra8] contador de campo falhou (non-blocking): ${(e as Error).message}`);
+          }
+        }
+      }
+
       // Auto-reply via WhatsApp using AI-generated response with dynamic script
       // In test mode, generate the response but skip sending via AvanceAI
       // Bonus (bug ReferenceError): verifiedScheduleFlag era declarado DENTRO do ramo
@@ -14676,6 +14802,75 @@ Deno.serve(async (req) => {
           verifiedScheduleFlag = true;
         }
 
+
+        // === GUARD DE CONVÊNIO: afirmar cobertura é PROIBIDO fora da tabela ===
+        // Caso Rafael (26/08): "Convênio: Plano Bradesco Empresarial - Saúde Top"
+        // e a Julia respondeu "confirmei sua consulta ... pelo seu convênio
+        // Bradesco ✅". "Saúde Top" não é "Top Nacional". A regra já existia no
+        // custom_notes; era prompt, e prompt falha. Mesma ideia do
+        // anti-alucinação de horário: o texto sai e alguém determinístico confere.
+        {
+          // O plano aparece no que o PACIENTE escreveu, não no que a Julia gerou —
+          // e nem sempre na mensagem atual. No caso Rafael ele mandou o plano às
+          // 15:29:01 e a afirmação saiu às 15:30:16, depois de dois "Sim".
+          // Passo 1 é de graça (mensagem atual); só quando ele reprova é que
+          // vamos ao banco buscar o histórico, para não pagar SELECT em toda
+          // resposta que menciona um convênio.
+          let _vConv = validarAfirmacaoDeConvenio(replyText, finalMessage || "");
+          if (!_vConv.ok && conversationId) {
+            try {
+              const { data: _histConv } = await supabase
+                .from("webhook_messages")
+                .select("message_text")
+                .eq("conversation_id", conversationId)
+                .eq("direction", "incoming")
+                .order("created_at", { ascending: false })
+                .limit(12);
+              const _ctxConv = [finalMessage || "", ...(_histConv || []).map((r: any) => String(r.message_text || ""))]
+                .join("\n");
+              _vConv = validarAfirmacaoDeConvenio(replyText, _ctxConv);
+            } catch (e) {
+              // Fail-closed: sem histórico, a afirmação continua bloqueada. Mandar
+              // o paciente para a equipe é o erro barato; dizer "seu convênio está
+              // confirmado" sem poder checar é o caro.
+              console.log(`[GuardConvenio] histórico indisponível (${(e as Error).message}) — mantendo o bloqueio`);
+            }
+          }
+          if (!_vConv.ok) {
+            console.log(
+              `[GuardConvenio] ⛔ afirmação de cobertura bloqueada — convenio=${_vConv.convenio} motivo=${_vConv.motivo}`,
+            );
+            replyText = textoDeConvenioNaoConfirmado(_vConv);
+            if (avanceaiBaseUrl && avanceaiApiId && avanceaiBearerToken && phone && !isTestMode) {
+              try {
+                // sem alvo dirigido: fila de pendentes, como as demais
+                await transferTicketToHuman({
+                  baseUrl: avanceaiBaseUrl,
+                  apiId: avanceaiApiId,
+                  bearerToken: avanceaiBearerToken,
+                  phone,
+                  channelId: resolvedChannelId,
+                });
+              } catch (e) {
+                console.error(`[GuardConvenio] transferência falhou: ${(e as Error).message}`);
+              }
+            }
+            if (clinicTokenId) {
+              await auditTransfer(supabase, {
+                clinicTokenId, conversationId, phone,
+                initiatedBy: "julia", trigger: "convenio_nao_confirmado",
+                reason: `${_vConv.convenio}:${_vConv.motivo}`,
+                detail: (finalMessage || "").slice(0, 120),
+              });
+            }
+            try {
+              await supabase
+                .from("webhook_messages")
+                .update({ action_error: `Guard de convênio: ${_vConv.convenio} (${_vConv.motivo}) — afirmação substituída` })
+                .eq("id", messageId);
+            } catch { /* non-blocking */ }
+          }
+        }
 
         // === SANITIZE REPLY: validate format before sending ===
         const sanitized = sanitizeReply(replyText);

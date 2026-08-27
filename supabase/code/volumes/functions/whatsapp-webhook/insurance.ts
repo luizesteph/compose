@@ -263,3 +263,77 @@ export function pickPlanFromGroup(
   const first = valid[0];
   return { id: toInsuranceId(first.id) as string, name: String(first.name ?? first.nome ?? "") };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GUARD DETERMINÍSTICO DE CONVÊNIO (26/08)
+// ─────────────────────────────────────────────────────────────────────────────
+// Caso Rafael (26/08 15:29): o paciente escreveu "Convênio: Plano Bradesco
+// Empresarial - Saúde Top" e a Julia respondeu "Consegui confirmar sua consulta
+// com o Dr. Hugo ... pelo seu convênio Bradesco. ✅". "Saúde Top" NÃO é "Top
+// Nacional" nem "Top Nacional Plus" — os dois únicos planos Bradesco que a
+// clínica atende. Quem descobre isso é o paciente na recepção.
+//
+// A regra existia no custom_notes ("Sempre pergunte o plano antes de responder",
+// "É PROIBIDO afirmar que atendemos um plano que não está na tabela"). Era
+// instrução de prompt, e prompt falha. Este guard é a mesma ideia do
+// anti-alucinação de horário: o texto sai, e alguém determinístico confere.
+//
+// Ele NÃO bloqueia pergunta ("qual é o seu plano do Bradesco?") — só AFIRMAÇÃO.
+
+/** Convênios em que o plano decide, e o que aceita cada um. */
+const CONVENIOS_COM_PLANO: Array<{
+  chave: string;
+  nomeRe: RegExp;
+  planoAceitoRe: RegExp | null; // null = nunca afirmar (Porto Seguro)
+  motivo: "plano_nao_qualificado" | "sempre_confirmar";
+}> = [
+  { chave: "Bradesco", nomeRe: /\bbradesco\b/i, planoAceitoRe: /\btop\s*nacional\b/i, motivo: "plano_nao_qualificado" },
+  {
+    chave: "Notre Dame / Hapvida",
+    nomeRe: /\b(notre\s*dame|notredame|hapvida)\b/i,
+    // 900 e 1000 — \b para não casar "1000" dentro de "10000"
+    planoAceitoRe: /\b(900|1000)\b/,
+    motivo: "plano_nao_qualificado",
+  },
+  { chave: "Porto Seguro", nomeRe: /\bporto\s*seguro\b/i, planoAceitoRe: null, motivo: "sempre_confirmar" },
+];
+
+// "atendemos", "aceitamos", "cobre", "pelo seu convênio", "confirmada ... convênio".
+const AFIRMA_COBERTURA_RE =
+  /\b(atendemos|aceitamos|cobre|coberto|cobertura\s+(ok|confirmada)|pel[oa]\s+(seu\s+)?(conv[êe]nio|plano)|com\s+o\s+seu\s+(conv[êe]nio|plano)|conv[êe]nio\s+(ok|confirmad[oa]|aceito))\b/i;
+
+// Se a frase é PERGUNTA sobre o plano, está seguindo a regra — não é afirmação.
+const PERGUNTA_PLANO_RE = /\bqual\s+([ée]\s+)?(o\s+)?(seu\s+)?plano\b|\bme\s+confirma\s+qual\b/i;
+
+export type VeredictoConvenio =
+  | { ok: true }
+  | { ok: false; convenio: string; motivo: "plano_nao_qualificado" | "sempre_confirmar" };
+
+/**
+ * `resposta`  — o texto que a Julia vai enviar.
+ * `contexto`  — o que o paciente escreveu na conversa (é aí que o plano aparece).
+ */
+export function validarAfirmacaoDeConvenio(resposta: string, contexto: string): VeredictoConvenio {
+  const r = String(resposta || "");
+  if (!r) return { ok: true };
+  if (!AFIRMA_COBERTURA_RE.test(r)) return { ok: true };
+  if (PERGUNTA_PLANO_RE.test(r)) return { ok: true };
+
+  const tudo = `${contexto || ""}\n${r}`;
+  for (const c of CONVENIOS_COM_PLANO) {
+    // o convênio precisa estar na PRÓPRIA resposta: citar Bradesco só no
+    // histórico não faz da frase atual uma afirmação sobre ele.
+    if (!c.nomeRe.test(r)) continue;
+    if (c.planoAceitoRe === null) return { ok: false, convenio: c.chave, motivo: c.motivo };
+    if (!c.planoAceitoRe.test(tudo)) return { ok: false, convenio: c.chave, motivo: c.motivo };
+  }
+  return { ok: true };
+}
+
+/** Texto que substitui a afirmação indevida. Sai da regra do dono, no custom_notes. */
+export function textoDeConvenioNaoConfirmado(v: Extract<VeredictoConvenio, { ok: false }>): string {
+  if (v.motivo === "sempre_confirmar") {
+    return `Sobre a ${v.convenio}: preciso confirmar a cobertura com a nossa equipe antes de agendar. 🙏 Já estou chamando alguém pra te ajudar.`;
+  }
+  return `Esse plano eu preciso confirmar com a equipe antes de agendar. 🙏 Já estou chamando alguém pra te ajudar.`;
+}

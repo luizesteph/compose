@@ -4,6 +4,16 @@
 // preflight (npm run check) e importavel diretamente pelos testes do vitest.
 // Regra: nada aqui pode tocar Deno.env, Supabase, ou estado global — puras.
 
+// PEDIDO DE ENCAIXE NÃO É EMERGÊNCIA (26/08).
+// Este padrão fica DENTRO de URGENCY_PATTERNS de propósito — quem pede encaixe
+// precisa de gente, porque a agenda online já não tem vaga. O que ele não pode
+// é levar junto o texto do pronto-socorro. Em 26/08 as 3 únicas urgências do dia
+// foram exatamente isto ("será que conseguiria um encaixe?", "prefiro encaixe
+// com dr. Luiz Gustavo", "Encaixe"), e uma paciente teve que responder "não é
+// urgente". Nome próprio em vez de índice: a lista cresce, e um `i === 8`
+// quebraria em silêncio na próxima inserção.
+export const URGENCIA_AGENDA_RE = /\b(encaix(e|ar|amento)|hoje\s+(mesmo|ainda)|agora\s+mesmo)\b/i;
+
 export const URGENCY_PATTERNS: RegExp[] = [
   /\b(emerg[eê]nc[íi]a|urg[eê]ncia|urgente)\b/i,
   /\b(p[\s.]*s[\s.]*|pronto[\s-]?socorro)\b/i,
@@ -15,7 +25,7 @@ export const URGENCY_PATTERNS: RegExp[] = [
   /\bn[aã]o\s+(consigo|aguento|aguent[oa]|t[oô]\s+aguentando)\b/i,
   /\b(fratur(a|ei|ou)|quebr(ei|ou|ada?)|machuqu(ei|ou)|trinc(ou|ada?))\b/i,
   /\b(lux(ei|ou|ada?)|deslocou|tor(ci|ceu)|fissura(d[oa])?)\b/i,
-  /\b(encaix(e|ar|amento)|hoje\s+(mesmo|ainda)|agora\s+mesmo)\b/i,
+  URGENCIA_AGENDA_RE,
   /\bn[aã]o\s+(consigo|posso)\s+(andar|caminhar|levantar|mexer|dobrar)\b/i,
   /\b(travou|travado|paralisad[oa])\b/i,
   // Tema 5 (Amostra 3 — alagamento): impossibilidade de deslocamento
@@ -292,19 +302,103 @@ const NAO_CONSIGO_DE_AGENDA_RE =
 const AGENDA_CONTEXTO_RE =
   /\b(hor[aá]rio|hora|dia|data|semana|manh[aã]|tarde|noite|agenda|remarcar|reagendar|mudar|trocar|outro)\b/i;
 
+// Um único lugar decide se o padrão i realmente dispara — detectUrgency e
+// classificarUrgencia PRECISAM concordar, senão a mensagem diria uma coisa e o
+// roteamento faria outra.
+function padraoDeUrgenciaDispara(p: RegExp, i: number, t: string): boolean {
+  if (!p.test(t)) return false;
+  // i === 0 é o padrão da palavra "urgente/urgência/emergência"
+  if (i === 0 && URGENCIA_NEGADA_RE.test(t)) return false;
+  // o padrão "não consigo/aguento" só vale se NÃO for sobre agenda
+  if (p.source.includes("consigo|aguento") && NAO_CONSIGO_DE_AGENDA_RE.test(t) && AGENDA_CONTEXTO_RE.test(t)) {
+    // "não aguento" continua urgente mesmo falando de horário — é dor, não agenda
+    if (!/\baguent/i.test(t)) return false;
+  }
+  return true;
+}
+
+// QUAL DADO O CADASTRO ESTA PEDINDO (26/08) ─────────────────────────────────
+// Casa com as frases GERADAS PELO CODIGO em action_error — não com o texto que
+// sai para o paciente. É essa a diferença que faz este contador funcionar onde o
+// anti-duplicata falhou: em 26/08 a Julia pediu o mesmo nome 6 vezes, e as 6
+// perguntas chegaram ao paciente reescritas pelo LLM ("me confirme mais uma
+// vez", "poderia enviar novamente", "para eu conseguir validar")... o guard
+// compara texto, o texto mudava, e o loop passou batido. action_error é fixo.
+export function campoPedidoNoCadastro(texto: unknown): "nome" | "cpf" | "nascimento" | null {
+  const t = String(texto ?? "").toLowerCase();
+  if (!t) return null;
+  if (/nome\s+completo/.test(t)) return "nome";
+  if (/data\s+de\s+nascimento|nascimento/.test(t)) return "nascimento";
+  if (/\bcpf\b/.test(t)) return "cpf";
+  return null;
+}
+
+// FISIOTERAPIA: AGENDAR SESSAO x PEDIDO MEDICO (26/08) ──────────────────────
+// A palavra "fisio" forcava o script comercial (R$ 180 / R$ 1.500) — a INTENCAO
+// nao era olhada. Em 26/08 os TRES disparos do dia estavam errados, e nenhum
+// queria comprar fisioterapia:
+//
+//   "Poderia me passar o contato do Andrew? dúvida ... sobre os exercícios"
+//   "a fisioterapeuta pediu para fazer mais sessoes mas precisaria o pedido medico"
+//   "Poderiam pedir ao Dr. Luiz Gustavo mais 10 sessões de fisioterapia"
+//
+// Os dois ultimos queriam GUIA do ortopedista, para fazer fisio em outro lugar.
+// Mandar tabela de preco para quem pede receita e' vender o que ninguem pediu.
+export type IntencaoFisio = "agendar" | "pedido_medico" | "falar_com_fisio";
+
+const FISIO_PEDIDO_MEDICO_RE =
+  /\b(pedido\s+(m[ée]dic[oa]|do\s+m[ée]dico)|guia|solicita[çc][ãa]o\s+(m[ée]dica|do\s+m[ée]dico)|receita|encaminhamento|renova(r|[çc][ãa]o)|relat[óo]rio|laudo)\b/i;
+// "mais 10 sessões", "mais sessoes" — quem ja faz fisio e precisa de mais sessoes
+// esta pedindo autorizacao, nao comprando pacote.
+const FISIO_MAIS_SESSOES_RE = /\bmais\s+(\d+\s+)?sess[õo]es?\b/i;
+// "pedir ao Dr. X", "solicitar para o doutor"
+const FISIO_PEDIR_AO_MEDICO_RE = /\b(pedir|solicitar|pede)\b[\s\S]{0,20}\b(ao|para\s+o|pro|com\s+o)\s+(dr\.?|doutor|m[ée]dic[oa])/i;
+// duvida sobre exercicio, ou querer falar com a propria fisioterapeuta
+const FISIO_FALAR_RE =
+  /\bexerc[íi]cios?\b|\b(falar|conversar|d[úu]vida|contato)\b[\s\S]{0,45}\b(fisio\w*|fisioterapeut[ao])/i;
+
+export function classificarPedidoDeFisioterapia(texto: unknown): IntencaoFisio {
+  const t = String(texto ?? "");
+  if (!t) return "agendar";
+  if (FISIO_PEDIDO_MEDICO_RE.test(t) || FISIO_MAIS_SESSOES_RE.test(t) || FISIO_PEDIR_AO_MEDICO_RE.test(t)) {
+    return "pedido_medico";
+  }
+  if (FISIO_FALAR_RE.test(t)) return "falar_com_fisio";
+  return "agendar";
+}
+
+// "ATENDENTE", SOZINHO, E UM PEDIDO (26/08) ──────────────────────────────────
+// A saudacao da Julia termina com "se preferir falar com um atendente, e so me
+// pedir a qualquer momento". Em 26/08 um paciente escreveu exatamente
+// "Atendente" e a mensagem caiu em unknown_intent: os padroes de frustracao
+// exigem uma segunda palavra ("atendente humano", "atendente agora") e o LLM
+// tambem nao pegou.
+//
+// Deliberadamente ESTREITO. "a atendente me disse", "falei com a atendente
+// ontem" NAO podem virar transferencia — por isso a forma curta exige que a
+// mensagem seja praticamente so' a palavra. Texto ja vem sem acento (stripAccents).
+export const PEDIDO_DE_ATENDENTE_RE =
+  /^\s*(atendente|atendimento humano|humano|pessoa de verdade)[\s!.?]*$/i;
+
 export function detectUrgency(text: string): boolean {
   const t = text || "";
-  return URGENCY_PATTERNS.some((p, i) => {
-    if (!p.test(t)) return false;
-    // i === 0 é o padrão da palavra "urgente/urgência/emergência"
-    if (i === 0 && URGENCIA_NEGADA_RE.test(t)) return false;
-    // i === 8 (índice do padrão "não consigo/aguento") só vale se NÃO for sobre agenda
-    if (p.source.includes("consigo|aguento") && NAO_CONSIGO_DE_AGENDA_RE.test(t) && AGENDA_CONTEXTO_RE.test(t)) {
-      // "não aguento" continua urgente mesmo falando de horário — é dor, não agenda
-      if (!/\baguent/i.test(t)) return false;
-    }
-    return true;
-  });
+  return URGENCY_PATTERNS.some((p, i) => padraoDeUrgenciaDispara(p, i, t));
+}
+
+// "clinica" | "agenda" | null — o ROTEAMENTO é o mesmo para os dois primeiros
+// (vai para humano na hora); o que muda é o texto que o paciente recebe.
+// Qualquer sinal clínico vence a agenda na mesma frase: "preciso de um encaixe,
+// estou com muita dor" é clínico.
+export function classificarUrgencia(text: string): "clinica" | "agenda" | null {
+  const t = text || "";
+  let agenda = false;
+  for (let i = 0; i < URGENCY_PATTERNS.length; i++) {
+    const p = URGENCY_PATTERNS[i];
+    if (!padraoDeUrgenciaDispara(p, i, t)) continue;
+    if (p === URGENCIA_AGENDA_RE) { agenda = true; continue; }
+    return "clinica";
+  }
+  return agenda ? "agenda" : null;
 }
 
 // Validação real de CPF (dígitos verificadores mod-11). É o que distingue um CPF
