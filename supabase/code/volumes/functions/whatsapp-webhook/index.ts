@@ -1922,7 +1922,7 @@ NUNCA classifique como falar_com_atendente: "ok", "obrigada", "obrigado", "aguar
                 patient_full_name: {
                   type: "string",
                   description:
-                    "Nome completo de QUEM VAI SER ATENDIDO — que nem sempre é quem escreve. Extraia em dois casos: (a) quem escreve se AUTO-identifica ('Meu nome é Maria Silva', 'Sou João da Costa', 'Aqui é a Ana'); (b) a ÚLTIMA mensagem da Julia pediu o nome completo para cadastro/agendamento — nesse caso extraia o nome que vier, MESMO sendo de outra pessoa ('Paulo José Rosito Fonseca' depois de 'me informe o nome completo do paciente'), porque o cadastro é DELE. Deixe VAZIO apenas quando um terceiro é citado de passagem, sem pedido de nome ('meu marido está com dor', 'vou levar minha mãe no médico') — aí o nome não responde a nada.",
+                    "Nome completo de QUEM VAI SER ATENDIDO — que nem sempre é quem escreve. Extraia em dois casos: (a) quem escreve se AUTO-identifica ('Meu nome é Maria Silva', 'Sou João da Costa', 'Aqui é a Ana'); (b) a ÚLTIMA mensagem da Julia pediu o nome completo para cadastro/agendamento — nesse caso extraia o nome que vier, MESMO sendo de outra pessoa ('Carlos Mendes Ferreira' depois de 'me informe o nome completo do paciente'), porque o cadastro é DELE. Deixe VAZIO apenas quando um terceiro é citado de passagem, sem pedido de nome ('meu marido está com dor', 'vou levar minha mãe no médico') — aí o nome não responde a nada.",
                 },
                 insurance_choice: {
                   type: "string",
@@ -14340,10 +14340,10 @@ Deno.serve(async (req) => {
         }
       }
 
-      // REGRA 8 (caso Lilian 26/08): a Julia pediu o MESMO dado 6 vezes seguidas.
+      // REGRA 8 (caso 26/08): a Julia pediu o MESMO dado 6 vezes seguidas.
       // A paciente marcava para o marido; o classificador tinha ordem explicita de
       // NUNCA extrair nome de terceiro, e o cadastro exigia esse nome. Ela mandou
-      // "Paulo Jose Rosito Fonseca" seis vezes, ouviu "tivemos uma pequena
+      // "<paciente>" seis vezes, ouviu "tivemos uma pequena
       // instabilidade no sistema" (nao houve), esperou 45 minutos e a Laiz salvou
       // na mao. O prompt foi corrigido — este contador existe porque prompt falha.
       //
