@@ -478,6 +478,19 @@ services:
       # novo. Sem isto ele declara todo ticket aberto como abandonado e
       # responde por cima da atendente. 0 NAO desliga (Number("0") e falsy).
       HUMAN_TICKET_STALE_HOURS: "${HUMAN_TICKET_STALE_HOURS:-87600}"
+      # ── Fila de pendentes (regras de atendimento, 26/08) ──────────
+      # Ligar a devolucao por inatividade: a atendente que pegou o caso e
+      # nao respondeu no prazo perde o ticket, que volta para a fila.
+      DEVOLVER_FILA_ENABLED: "${DEVOLVER_FILA_ENABLED:-false}"
+      # Prazo padrao em minutos. Vania e Lidiane tem 1h, por regra no
+      # codigo (_shared/atendimento.ts), nao por variavel.
+      DEVOLVER_FILA_MINUTOS: "${DEVOLVER_FILA_MINUTOS:-10}"
+      # Transferencia generica deixa o ticket em PENDENTES, sem dona.
+      # "false" volta ao comportamento antigo (atribui alguem).
+      TRANSFERIR_PARA_FILA: "${TRANSFERIR_PARA_FILA:-true}"
+      # Depois de um handoff a IA fica fora da conversa por N horas,
+      # inclusive se o ticket voltar para a fila.
+      HANDOFF_BLOQUEIA_IA_HORAS: "${HANDOFF_BLOQUEIA_IA_HORAS:-24}"
     command: [ "start", "--main-service", "/home/deno/functions/main" ]
 
   analytics:
