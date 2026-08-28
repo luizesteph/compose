@@ -23,6 +23,8 @@ import {
   detectUrgency,
   classificarUrgencia,
   campoPedidoNoCadastro,
+  ehNegativaDeHorario,
+  pedeQualquerData,
   classificarPedidoDeFisioterapia,
   PEDIDO_DE_ATENDENTE_RE,
   isClosingThanks,
@@ -464,6 +466,16 @@ function _fmtBR(iso: string): string {
   return `${d}/${m}`;
 }
 
+// BASE DO LINK DO WIDGET (28/08). Era `https://schedulo-migo.lovable.app`
+// hardcoded em dois lugares. A clínica está saindo do Lovable, e um fallback
+// apontando para um app que vai ser desligado é uma bomba-relógio: só aparece
+// quando `widget_config.custom_url` faltar, que é justamente o dia ruim.
+// WIDGET_BASE_URL troca sem deploy.
+const WIDGET_BASE_URL =
+  (typeof (globalThis as any).Deno !== "undefined"
+    ? String((globalThis as any).Deno.env.get("WIDGET_BASE_URL") || "")
+    : "") || "https://juliacbt.cbthub.com.br";
+
 const _widgetUrlCache = new Map<string, { url: string; exp: number }>();
 async function getWidgetUrl(sb: any, clinicId: string | null | undefined): Promise<string> {
   if (!sb || !clinicId) return "";
@@ -481,7 +493,7 @@ async function getWidgetUrl(sb: any, clinicId: string | null | undefined): Promi
     const url = data
       ? cfg?.custom_url
         ? String(cfg.custom_url)
-        : `https://schedulo-migo.lovable.app/agendar/${(data as any).widget_key}`
+        : `${WIDGET_BASE_URL}/agendar/${(data as any).widget_key}`
       : "";
     _widgetUrlCache.set(clinicId, { url, exp: Date.now() + 5 * 60_000 });
     return url;
@@ -3398,7 +3410,7 @@ async function executeAction(
                 const widgetConfig = (widget as any).widget_config as Record<string, unknown> | null;
                 const widgetUrl = widgetConfig?.custom_url
                   ? String(widgetConfig.custom_url)
-                  : `https://schedulo-migo.lovable.app/agendar/${widget.widget_key}`;
+                  : `${WIDGET_BASE_URL}/agendar/${widget.widget_key}`;
                 console.log(
                   `[Webhook] agendar - ✅ Sending widget link to ${senderPhone || "?"} (clinic=${clinicTokenId}, convId=${currentConvId || "n/a"})`,
                 );
@@ -9241,6 +9253,10 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             ? "Pedido, guia ou renovação de sessões quem emite é o médico. 🙏 Vou te passar para nossa equipe verificar isso com o doutor."
             : _intFisio === "falar_com_fisio"
               ? "Vou te passar para nossa equipe, que fala direto com a fisioterapeuta e te retorna por aqui. 🙏"
+            : _intFisio === "sessao_em_curso"
+              // Quem JÁ faz fisio aqui não pode receber tabela de preço: ele não
+              // está comprando nada, está falando da sessão dele.
+              ? "Já passei para nossa equipe, que cuida da agenda da fisioterapia e te responde por aqui. 🙏"
               : "Nossa fisioterapia funciona pelo sistema de reembolso: sessão avulsa por R$ 180 ou pacote de 10 sessões por R$ 1.500 (em até 3x), com *avaliação gratuita*. 😊 " +
                 "Emitimos nota fiscal e relatório certinhos para você solicitar o reembolso ao seu plano. Vou te passar para nossa equipe agendar sua avaliação!";
 
@@ -13917,12 +13933,32 @@ Deno.serve(async (req) => {
 
         const outroMedicoRegex =
           /\b(outro\s*(m[eé]dico|doutor|dr|profissional)|qualquer\s*(m[eé]dico|doutor|dr|profissional|um)|pode\s*ser\s*outro|tanto\s*faz|n[aã]o\s*tenho\s*prefer[eê]ncia|mais\s*r[aá]pido\s*poss[ií]vel)\b/i;
-        if (outroMedicoRegex.test(finalMessage)) {
+        // "tanto faz o DIA" fala do dia, nao do médico (28/08). O regex acima casa
+        // "tanto faz" e limpava o médico — o oposto do que a paciente pediu: ela
+        // queria manter o Dr. Luiz Gustavo e abrir a data.
+        const _tantoFazEhSobreODia =
+          /\b(tanto\s*faz|qualquer|nao\s*tenho\s*prefer[eê]ncia|n[aã]o\s*tenho\s*prefer[eê]ncia)\b[\s\S]{0,12}\b(dia|data|hor[aá]rio)\b/i
+            .test(finalMessage);
+        if (outroMedicoRegex.test(finalMessage) && !_tantoFazEhSobreODia) {
           console.log(
             `[Webhook] "Outro médico" detected in message. Clearing doctor_name="${classification.doctor_name}" and subspecialty="${classification.subspecialty}" to trigger multi-doctor search.`,
           );
           classification.doctor_name = "";
           classification.subspecialty = "";
+        }
+
+        // === "TANTO FAZ O DIA" APAGA A DATA GRUDADA (28/08) ===
+        // Caso 15:48-15:51: a paciente pediu "4a feira da semana que vem" (02/09),
+        // ouviu "sem horários", disse "veja as datas disponíveis" e depois "tanto
+        // faz o dia" — e a Julia procurou em 02/09 as TRÊS vezes, porque o
+        // classificador preserva a data do histórico. A agenda tinha vaga (a
+        // Mardila marcou 09/09 na mão 70 minutos depois).
+        if (classification.date && pedeQualquerData(finalMessage)) {
+          console.log(
+            `[Webhook] 📅 paciente pediu qualquer data — limpando date="${classification.date}" e preferred_weekday="${classification.preferred_weekday || ""}" para buscar a próxima vaga`,
+          );
+          classification.date = "";
+          classification.preferred_weekday = "";
         }
 
         // POST-CLASSIFICATION: Detect doctor switch mid-conversation and clear stale date/time
@@ -14284,9 +14320,11 @@ Deno.serve(async (req) => {
       if (
         conversationId &&
         actionResult.status === "needs_info" &&
-        /n[aã]o (tem|encontrei) hor[aá]rios dispon|n[aã]o foram encontrados hor[aá]rios/i.test(
-          String(actionResult.error || "") + " " + String(actionResult.response || ""),
-        )
+        // 28/08: era um regex procurando "não tem/encontrei horários disponíveis",
+        // mas o executeAction escreve "Sem horários com X em DD/MM" — nunca casou,
+        // e a Regra 7 estava MORTA desde que o texto mudou. Helper testado contra
+        // as frases reais do fonte.
+        ehNegativaDeHorario(String(actionResult.error || "") + " " + String(actionResult.response || ""))
       ) {
         try {
           const _since45 = new Date(Date.now() - 45 * 60 * 1000).toISOString();
@@ -14299,7 +14337,7 @@ Deno.serve(async (req) => {
             .gte("created_at", _since45)
             .limit(20);
           const _emptyCount = (_emptyRows || []).filter((r: any) =>
-            /n[aã]o (tem|encontrei) hor[aá]rios dispon|n[aã]o foram encontrados hor[aá]rios/i.test(String(r.action_error || "")),
+            ehNegativaDeHorario(String(r.action_error || "")),
           ).length;
           if (_emptyCount >= 2) {
             console.log(`[Webhook] ⛔ REGRA 7: ${_emptyCount} negativas de horario em 45min — transferindo pra humano`);

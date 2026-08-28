@@ -344,7 +344,7 @@ export function campoPedidoNoCadastro(texto: unknown): "nome" | "cpf" | "nascime
 //
 // Os dois ultimos queriam GUIA do ortopedista, para fazer fisio em outro lugar.
 // Mandar tabela de preco para quem pede receita e' vender o que ninguem pediu.
-export type IntencaoFisio = "agendar" | "pedido_medico" | "falar_com_fisio";
+export type IntencaoFisio = "agendar" | "pedido_medico" | "falar_com_fisio" | "sessao_em_curso";
 
 const FISIO_PEDIDO_MEDICO_RE =
   /\b(pedido\s+(m[ée]dic[oa]|do\s+m[ée]dico)|guia|solicita[çc][ãa]o\s+(m[ée]dica|do\s+m[ée]dico)|receita|encaminhamento|renova(r|[çc][ãa]o)|relat[óo]rio|laudo)\b/i;
@@ -357,9 +357,22 @@ const FISIO_PEDIR_AO_MEDICO_RE = /\b(pedir|solicitar|pede)\b[\s\S]{0,20}\b(ao|pa
 const FISIO_FALAR_RE =
   /\bexerc[íi]cios?\b|\b(falar|conversar|d[úu]vida|contato)\b[\s\S]{0,45}\b(fisio\w*|fisioterapeut[ao])/i;
 
+// QUARTA CATEGORIA (28/08): QUEM JA FAZ FISIO AQUI.
+// "Posso ir a sessão as 9 de fisioterapia?" recebeu a tabela de preco. A paciente
+// nao estava comprando nada — ela ja faz fisio na casa e perguntou da sessao DELA.
+// O sinal e a referencia DEFINIDA a uma sessao que ja existe ("a sessao das 9",
+// "minha sessao", "a sessao de hoje") junto de um verbo de comparecimento. Nao
+// pode casar "quero marcar uma sessao", que e agendamento de verdade.
+const FISIO_SESSAO_MINHA_RE =
+  /\b(minha|meu)\s+(sess[ãa]o|hor[áa]rio|fisio)\b|\ba\s+sess[ãa]o\s+(d[aeo]s?\s+)?(hoje|amanh[ãa]|\d{1,2}\s*(h|:|hs)?\d{0,2})\b/i;
+const FISIO_COMPARECIMENTO_RE =
+  /\b(posso\s+ir|vou\s+(me\s+)?atrasar|vou\s+chegar|consigo\s+chegar|vou\s+faltar|n[ãa]o\s+vou\s+poder\s+ir|remarcar\s+(a|minha)\s+sess[ãa]o|cancelar\s+(a|minha)\s+sess[ãa]o|que\s+horas?\s+[ée]\s+(a\s+)?(minha|a)\s+sess[ãa]o)\b/i;
+
 export function classificarPedidoDeFisioterapia(texto: unknown): IntencaoFisio {
   const t = String(texto ?? "");
   if (!t) return "agendar";
+  // vem ANTES do pedido medico: "remarcar minha sessão" nao e pedido de guia.
+  if (FISIO_COMPARECIMENTO_RE.test(t) || FISIO_SESSAO_MINHA_RE.test(t)) return "sessao_em_curso";
   if (FISIO_PEDIDO_MEDICO_RE.test(t) || FISIO_MAIS_SESSOES_RE.test(t) || FISIO_PEDIR_AO_MEDICO_RE.test(t)) {
     return "pedido_medico";
   }
@@ -379,6 +392,47 @@ export function classificarPedidoDeFisioterapia(texto: unknown): IntencaoFisio {
 // mensagem seja praticamente so' a palavra. Texto ja vem sem acento (stripAccents).
 export const PEDIDO_DE_ATENDENTE_RE =
   /^\s*(atendente|atendimento humano|humano|pessoa de verdade)[\s!.?]*$/i;
+
+// NEGATIVA DE HORARIO — A REGRA 7 PROCURAVA UMA FRASE QUE NAO EXISTE (28/08) ──
+// A Regra 7 nasceu para o caso do paciente que tentou 6 datas, ouviu 6 negativas
+// e nunca foi transferido. Ela conta `action_error` procurando "nao tem/encontrei
+// horarios disponiveis" — mas o codigo escreve "Sem horarios com X em DD/MM".
+// As duas nunca casaram, entao a Regra 7 estava MORTA.
+//
+// Caso 28/08 15:48-15:51: paciente nova, cadastrada, pediu "4a feira da semana
+// que vem" -> sem horarios; "ok, veja as datas disponiveis" -> a MESMA data de
+// novo; "tanto faz o dia, preferencia apos as 11" -> a mesma data outra vez. O
+// contador devia ter escalado na segunda. Quem salvou foi a Mardila, na mao, com
+// um horario que existia (09/09 11h20).
+//
+// Casar por frase e fragil — foi o que quebrou. Estas tres formas sao as que o
+// executeAction realmente produz, e a suite compara com o fonte para nao
+// deixar a lista envelhecer de novo.
+export function ehNegativaDeHorario(texto: unknown): boolean {
+  const t = String(texto ?? "");
+  if (!t) return false;
+  return (
+    /\bsem\s+hor[aá]rios?\b/i.test(t) ||
+    /n[aã]o\s+(tem|h[aá]|encontrei|foram\s+encontrados)\s+hor[aá]rios/i.test(t)
+  );
+}
+
+// "TANTO FAZ O DIA" APAGA A DATA (28/08) ────────────────────────────────────
+// No mesmo caso: a paciente disse "veja as datas disponiveis" e depois "tanto
+// faz o dia", e a Julia continuou procurando em 02/09 — a data que ela mesma
+// tinha extraido duas mensagens antes. Data grudada vira negativa repetida numa
+// agenda que TEM vaga.
+export function pedeQualquerData(texto: unknown): boolean {
+  const t = String(texto ?? "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+  if (!t) return false;
+  return (
+    /\btanto\s+faz\b/.test(t) ||
+    /\bqualquer\s+(dia|data|hor[a]?rio)\b/.test(t) ||
+    /\b(ve|veja|vejo|mostra|me\s+passa|quais|que)\b[\s\S]{0,25}\b(datas?|dias?|hor[a]?rios?)\s+(disponive|livre|que\s+tem|dispon)/.test(t) ||
+    /\bo\s+(mais\s+)?(rapido|proximo|cedo)\b/.test(t) ||
+    /\bprimeira\s+(data|vaga)\b/.test(t)
+  );
+}
 
 export function detectUrgency(text: string): boolean {
   const t = text || "";
