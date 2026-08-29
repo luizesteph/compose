@@ -544,7 +544,7 @@ Deno.serve(async (req) => {
     const _corteAceite = new Date(Date.now() - ESPERA_ACEITE_MIN * 60_000).toISOString();
     const { data: _aceitos } = await supabase
       .from("waitlist_entries")
-      .select("id, phone, patient_name, doctor_id, doctor_name, requested_date, offered_slot, accepted_at, conversation_id, clinic_token_id, created_at, clinic_tokens:clinic_token_id (token, waitlist_enabled, avanceai_base_url, avanceai_api_id, avanceai_bearer_token, avanceai_active_channel)")
+      .select("id, phone, patient_name, doctor_id, doctor_name, requested_date, offered_slot, accepted_at, book_fail_count, conversation_id, clinic_token_id, created_at, clinic_tokens:clinic_token_id (token, waitlist_enabled, avanceai_base_url, avanceai_api_id, avanceai_bearer_token, avanceai_active_channel)")
       .eq("status", "accepted")
       .not("accepted_at", "is", null)
       .lte("accepted_at", _corteAceite)
@@ -629,9 +629,19 @@ Deno.serve(async (req) => {
           // preenchida por outra pessoa entre a oferta e o aceite — nao ia
           // funcionar nunca, e a paciente passou o dia achando que foi antecipada.
           // Quem disse "quero" merece resposta em meia hora, nao no dia seguinte.
+          // VAGA TOMADA NAO E FALHA TRANSITORIA (29/08). O Amigo responde, com
+          // todas as letras, "O horario selecionado nao esta disponivel." — e ele
+          // nunca vai mudar de ideia. Insistir 3 vezes so' faz o paciente esperar
+          // meia hora por uma resposta que ja existe na primeira tentativa.
+          // O contador continua valendo para o que E transitorio (Amigo fora do
+          // ar, timeout, 5xx).
+          const _vagaTomada = /n[ãa]o est[áa] dispon[íi]vel|already\s+booked|hor[áa]rio\s+(j[áa]\s+)?ocupad/i
+            .test(r.detalhe);
           const _falhas = Number((w as { book_fail_count?: number }).book_fail_count || 0) + 1;
-          errorsDetail.push(`aceite ${String(w.id).slice(0, 8)} (${_falhas}/3): reagendar falhou — ${r.detalhe}`.slice(0, 200));
-          if (_falhas < 3) {
+          errorsDetail.push(
+            `aceite ${String(w.id).slice(0, 8)} (${_vagaTomada ? "vaga tomada" : `${_falhas}/3`}): reagendar falhou — ${r.detalhe}`.slice(0, 200),
+          );
+          if (!_vagaTomada && _falhas < 3) {
             await supabase.from("waitlist_entries")
               .update({ book_fail_count: _falhas, updated_at: nowIso })
               .eq("id", w.id);
@@ -645,7 +655,9 @@ Deno.serve(async (req) => {
             clinic_token_id: w.clinic_token_id, entry_id: w.id, conversation_id: w.conversation_id,
             phone: w.phone, patient_name: w.patient_name, doctor_name: w.doctor_name,
             event_type: "oferta_expirada",
-            detail: `${w.patient_name || "Paciente"} aceitou a vaga de ${ddmm(slotData)} às ${slotHora}, mas não consegui efetivar em 3 tentativas (${r.detalhe.slice(0, 90)}). Devolvi para a fila e avisei.`,
+            detail: _vagaTomada
+              ? `${w.patient_name || "Paciente"} aceitou a vaga de ${ddmm(slotData)} às ${slotHora}, mas ela já tinha sido preenchida por outra pessoa. Devolvi para a fila e avisei na hora.`
+              : `${w.patient_name || "Paciente"} aceitou a vaga de ${ddmm(slotData)} às ${slotHora}, mas não consegui efetivar em 3 tentativas (${r.detalhe.slice(0, 90)}). Devolvi para a fila e avisei.`,
           });
           const _alvoFalha = await resolveSendTarget(supabase, w.clinic_token_id, w.phone, w.clinic_tokens);
           if (_alvoFalha) {
@@ -655,8 +667,10 @@ Deno.serve(async (req) => {
               _alvoFalha.creds,
               w.phone,
               `Oi! Sobre a vaga de *${ddmm(slotData)} às ${slotHora}* com *${w.doctor_name}*: ` +
-                `infelizmente ela foi preenchida antes de eu conseguir confirmar. 🙏\n\n` +
-                `Sua consulta que já estava marcada continua valendo, e você segue na fila ` +
+                (_vagaTomada
+                  ? `infelizmente ela foi preenchida por outra pessoa antes de eu conseguir confirmar. 🙏`
+                  : `não consegui confirmar por aqui. 🙏`) +
+                `\n\nSua consulta que já estava marcada continua valendo, e você segue na fila ` +
                 `para a próxima vaga que abrir. Se quiser falar com alguém da equipe, é só me pedir.`,
               _alvoFalha.channelId,
             );
