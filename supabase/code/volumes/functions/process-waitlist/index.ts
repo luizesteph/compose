@@ -108,6 +108,16 @@ async function amigoPut(
   body: Record<string, unknown>,
 ): Promise<{ ok: boolean; status: number; detalhe: string }> {
   let ultimo = { ok: false, status: 0, detalhe: "sem resposta" };
+  // A BASE QUE NAO TEM A ROTA NAO PODE FALAR PELAS OUTRAS (29/08).
+  // API_URLS = [amigobot-api, api.amigoapp]. So a PRIMEIRA tem /attendances/{id}/
+  // reschedule; a segunda responde 404 "Route Not found." para qualquer coisa.
+  // Como este laco devolvia `ultimo` — o resultado da ULTIMA base —, o erro REAL
+  // da primeira era sobrescrito por um 404 generico. Foi exatamente o que
+  // aconteceu no aceite de 28/08: passamos horas achando que a rota tinha sumido,
+  // quando ela responde ATTENDANCE_NOT_FOUND normalmente (verificado com id
+  // inexistente). Guardamos a primeira resposta de APLICACAO e e ela que fala.
+  let aplicacao: { ok: boolean; status: number; detalhe: string } | null = null;
+  const ehRotaInexistente = (txt: string) => /route not found/i.test(txt);
   for (const base of API_URLS) {
     try {
       const controller = new AbortController();
@@ -125,14 +135,17 @@ async function amigoPut(
       clearTimeout(timeoutId);
       const txt = (await res.text()).slice(0, 160);
       if (res.ok) return { ok: true, status: res.status, detalhe: "" };
-      ultimo = { ok: false, status: res.status, detalhe: `HTTP ${res.status}: ${txt}` };
-      console.log(`[Waitlist] amigoPut ${base}/${endpoint} -> ${res.status}`);
+      const atual = { ok: false, status: res.status, detalhe: `HTTP ${res.status}: ${txt}` };
+      if (!aplicacao && !ehRotaInexistente(txt)) aplicacao = atual;
+      ultimo = atual;
+      console.log(`[Waitlist] amigoPut ${base}/${endpoint} -> ${res.status} ${txt.slice(0, 80)}`);
     } catch (e) {
       ultimo = { ok: false, status: 0, detalhe: `exceção: ${(e as Error).message.slice(0, 120)}` };
       console.log(`[Waitlist] amigoPut ${base}/${endpoint} erro: ${(e as Error).message}`);
     }
   }
-  return ultimo;
+  // Prefere quem realmente respondeu sobre o RECURSO; "Route Not found" e ruido.
+  return aplicacao ?? ultimo;
 }
 
 // Reagenda uma consulta existente para data/hora nova. Cadeia idêntica à do
@@ -610,12 +623,49 @@ Deno.serve(async (req) => {
 
         const r = await amigoReagendar(attId, companyId, tok, `${slotData} ${slotHora}`);
         if (!r.ok) {
-          errorsDetail.push(`aceite ${String(w.id).slice(0, 8)}: reagendar falhou — ${r.detalhe}`.slice(0, 180));
-          continue; // segue 'accepted': a vaga continua reservada e tenta de novo
+          // TRES TENTATIVAS E CHEGA (29/08). Antes isto era `continue` puro: a
+          // entrada ficava em 'accepted' tentando de 10 em 10 minutos e so' saia
+          // 24h depois, pelo prazo de validade. No caso de 28/08 a vaga tinha sido
+          // preenchida por outra pessoa entre a oferta e o aceite — nao ia
+          // funcionar nunca, e a paciente passou o dia achando que foi antecipada.
+          // Quem disse "quero" merece resposta em meia hora, nao no dia seguinte.
+          const _falhas = Number((w as { book_fail_count?: number }).book_fail_count || 0) + 1;
+          errorsDetail.push(`aceite ${String(w.id).slice(0, 8)} (${_falhas}/3): reagendar falhou — ${r.detalhe}`.slice(0, 200));
+          if (_falhas < 3) {
+            await supabase.from("waitlist_entries")
+              .update({ book_fail_count: _falhas, updated_at: nowIso })
+              .eq("id", w.id);
+            continue; // ainda pode ser instabilidade do Amigo — tenta de novo
+          }
+          await supabase.from("waitlist_entries")
+            .update({ status: "waiting", accepted_at: null, book_fail_count: 0,
+                      requeued_at: nowIso, updated_at: nowIso })
+            .eq("id", w.id);
+          await logWaitlistEvent(supabase, {
+            clinic_token_id: w.clinic_token_id, entry_id: w.id, conversation_id: w.conversation_id,
+            phone: w.phone, patient_name: w.patient_name, doctor_name: w.doctor_name,
+            event_type: "oferta_expirada",
+            detail: `${w.patient_name || "Paciente"} aceitou a vaga de ${ddmm(slotData)} às ${slotHora}, mas não consegui efetivar em 3 tentativas (${r.detalhe.slice(0, 90)}). Devolvi para a fila e avisei.`,
+          });
+          const _alvoFalha = await resolveSendTarget(supabase, w.clinic_token_id, w.phone, w.clinic_tokens);
+          if (_alvoFalha) {
+            // Sem promessa de prazo e sem culpar o paciente: o que houve e o que
+            // continua valendo. A consulta original NAO foi tocada.
+            await sendWhats(
+              _alvoFalha.creds,
+              w.phone,
+              `Oi! Sobre a vaga de *${ddmm(slotData)} às ${slotHora}* com *${w.doctor_name}*: ` +
+                `infelizmente ela foi preenchida antes de eu conseguir confirmar. 🙏\n\n` +
+                `Sua consulta que já estava marcada continua valendo, e você segue na fila ` +
+                `para a próxima vaga que abrir. Se quiser falar com alguém da equipe, é só me pedir.`,
+              _alvoFalha.channelId,
+            );
+          }
+          continue;
         }
 
         await supabase.from("waitlist_entries")
-          .update({ status: "booked", accepted_at: null, updated_at: nowIso })
+          .update({ status: "booked", accepted_at: null, book_fail_count: 0, updated_at: nowIso })
           .eq("id", w.id);
         await logWaitlistEvent(supabase, {
           clinic_token_id: w.clinic_token_id, entry_id: w.id, conversation_id: w.conversation_id,
