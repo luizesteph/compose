@@ -1,5 +1,23 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
+// DE ONDE VEIO O AGENDAMENTO DO SITE (28/08) ─────────────────────────────────
+// O link que a Julia manda no WhatsApp carrega
+// `?utm_source=julia&utm_medium=whatsapp&utm_campaign=atendimento-ia`, mas o UTM
+// morria na página: o widget roda em iframe CROSS-ORIGIN e não enxerga a query
+// string de quem o embute. Resultado: todo agendamento do site era
+// `booking_source: "widget"`, sem distinguir quem veio de uma conversa da Julia
+// de quem achou a página no Google.
+//
+// Agora a página repassa o UTM no src do iframe e ele chega até aqui.
+// Sanitizado de propósito: isto vai para uma coluna do banco e vem da URL, que
+// é digitável por qualquer um.
+export function origemDoAgendamento(utmSource: unknown): string {
+  const bruto = String(utmSource ?? "").toLowerCase().trim();
+  const limpo = bruto.replace(/[^a-z0-9_-]/g, "").slice(0, 24);
+  return limpo ? `widget_${limpo}` : "widget";
+}
+
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
@@ -297,9 +315,15 @@ Deno.serve(async (req) => {
         const patientPhone = attendanceBody.patient_phone;
         const patientName = attendanceBody.patient_name;
         const doctorName = attendanceBody.doctor_name;
+        // UTM da página que embute o widget — só para atribuição, NUNCA vai para
+        // o Amigo (por isso o delete, igual aos outros campos de uso interno).
+        const _utmWidget =
+          attendanceBody.utm && typeof attendanceBody.utm === "object" ? attendanceBody.utm : null;
+        const _origemWidget = origemDoAgendamento(_utmWidget?.source);
         delete attendanceBody.patient_phone;
         delete attendanceBody.patient_name;
         delete attendanceBody.doctor_name;
+        delete attendanceBody.utm;
 
         // Só id numérico vale como convênio. O <Select> do formulário usa value="none"
         // para "Particular", e esse texto chegava aqui como insurance_id.
@@ -512,11 +536,12 @@ Deno.serve(async (req) => {
               direction: "incoming",
               ai_intent: "agendar",
               action_status: "success",
-              booking_source: "widget",
+              booking_source: _origemWidget,
               ai_entities: {
                 doctor_name: doctorName || null,
                 start_date: startDate,
-                source: "widget",
+                source: _origemWidget,
+                ...(_utmWidget ? { utm: _utmWidget } : {}),
                 ...(_wlInviteCtx ? { waitlist_invite: _wlInviteCtx } : {}),
               },
             });
