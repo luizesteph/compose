@@ -793,7 +793,7 @@ Deno.serve(async (req) => {
           // vaga" — com a rotação nova isso deixou de ser verdade (a próxima vaga vai
           // para quem está atrás). Promessa que o sistema não cumpre é o tipo de erro
           // que já custou caro aqui, então o texto passa a descrever o que acontece.
-          : `Não deu tempo de confirmar a vaga com ${e.doctor_name} (a oferta vale 3h), então passei essa para o próximo da lista. 🙏\n\n` +
+          : `Não deu tempo de confirmar a vaga com ${e.doctor_name}, então passei essa para o próximo da lista. 🙏\n\n` +
             `Você *continua na lista de espera* e volta a receber quando abrir a próxima vaga que der certo para você!`;
         const target = await resolveSendTarget(supabase, e.clinic_token_id, e.phone, creds);
         const send = target
@@ -1125,8 +1125,20 @@ Deno.serve(async (req) => {
         const msg =
           `Boa notícia${nome ? `, ${nome}` : ""}! 🎉 Abriu uma vaga com *${first.doctor_name}*:\n\n` +
           `📅 ${formatDateLabelPt(goodSlot.date)} às *${goodSlot.time}*\n\n` +
-          `Quer antecipar? Me diga *quero* dentro de 3 horas que eu remarco sua consulta para esse horário. ` +
-          `Se preferir manter como está, me diga *não posso* que passo a vaga para o próximo da lista. 😊`;
+          // A OFERTA NAO RESERVA A VAGA (29/08). O texto antigo dizia "me diga
+          // *quero* dentro de 3 horas que eu remarco" — e isso e uma promessa que
+          // o sistema nao consegue cumprir: a agenda do Amigo continua aberta para
+          // a recepcao, para o site e para os outros canais, e a vaga pode ser
+          // levada por qualquer um nesse intervalo. Foi o que aconteceu em 28/08:
+          // a paciente respondeu "quero" em 59 minutos, dentro do prazo, e a vaga
+          // ja tinha ido. A resposta dela foi "Entao por que avisa q tem 3 horas
+          // para responder???" — e ela estava certa.
+          //
+          // As 3 horas continuam existindo como PRAZO DA FILA (depois disso a vaga
+          // vai para o proximo), mas param de ser vendidas como reserva.
+          `Quer antecipar? Me diga *quero* que eu já remarco sua consulta. ` +
+          `⚠️ A vaga é por ordem de chegada e não fica reservada — responda logo, porque ela pode ser preenchida por outra pessoa. ` +
+          `Se preferir manter como está, me diga *não posso* que passo para o próximo da lista. 😊`;
 
         // Marca notified ANTES do envio (auditoria 10/07): se o update falhasse
         // após o envio, o paciente recebia a MESMA oferta a cada 10min. Se o
