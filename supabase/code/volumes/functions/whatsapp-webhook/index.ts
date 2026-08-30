@@ -54,7 +54,6 @@ import {
   sendAvanceaiReply,
   checkTicketIsHumanOwned,
   transferTicketToHuman,
-  ehAlvoDirigido,
 } from "./avanceai.ts";
 import {
   sanitizeReply,
@@ -2311,13 +2310,13 @@ async function getRoutingConfig(
 // uma promessa sobre um ticket que a Fulana não tem. O parêntese é a sentinela
 // que aquele executor já lê (`_semDona`) para mandar a versão honesta: o caso
 // continua na fila. Mesmo marcador que o caminho de urgência usa.
-function avisoDaDona(
-  dirigida: boolean,
-  u: { name?: string; id?: unknown } | null | undefined,
-): { attendantName: string; attendantId: string | null } {
-  return dirigida && u?.name
-    ? { attendantName: String(u.name), attendantId: u.id != null ? String(u.id) : null }
-    : { attendantName: "(fila geral)", attendantId: null };
+// Desde 30/08 nenhuma transferencia atribui: o ticket fica pendente, sem dona.
+// Entao o pendente registrado aqui — que e o que o human-transfer-timeout le para
+// montar o aviso de 15 min ao paciente — nunca pode nomear ninguem. Nomear quem
+// so *teria* sido escolhida transformava a fila numa promessa falsa.
+// A sentinela com parentese e a mesma que o timeout ja sabe ler.
+function avisoSemDona(): { attendantName: string; attendantId: string | null } {
+  return { attendantName: "(fila geral)", attendantId: null };
 }
 
 async function recordPendingHumanTransfer(
@@ -2628,8 +2627,6 @@ async function transferirComDono(
       channelId: args.channelId ?? null,
       forceReassign: true,
       // Só é dirigida quando a escolha veio de regra clínica / nome pedido.
-      // preferred_order é escolha genérica da Julia e vai para a fila.
-      alvoDirigido: ehAlvoDirigido(choice.reason),
     });
     if (!transferResult.ok) {
       console.error(
@@ -2657,7 +2654,7 @@ async function transferirComDono(
         conversationId: args.conversationId ?? null,
         phone: telefone,
         intent: args.intent,
-        ...avisoDaDona(ehAlvoDirigido(choice.reason), selecionada),
+        ...avisoSemDona(),
         timeoutMinutes: routingConfig.human_response_timeout_minutes,
       });
     }
@@ -3272,7 +3269,6 @@ async function executeAction(
                     channelId,
                     // Alvo escolhido por regra/balanceamento: re-atribui dona stale
                     forceReassign: true,
-                    alvoDirigido: ehAlvoDirigido(choice.reason),
                   });
                   if (transferResult.ok) {
                     console.log(
@@ -3285,7 +3281,7 @@ async function executeAction(
                           ((globalThis as any).__currentConversationId as string | undefined) || null,
                         phone: formattedPhone,
                         intent: "widget_outage_transfer",
-                        ...avisoDaDona(ehAlvoDirigido(choice.reason), selectedUser),
+                        ...avisoSemDona(),
                         timeoutMinutes: routingConfig.human_response_timeout_minutes,
                       });
                     }
@@ -8465,13 +8461,6 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             : undefined;
           let selectedUser: { id: number; name: string } | null = null;
           let routingRuleMatched = false;
-          // DIRIGIDA DE VERDADE (30/08). Comeca acompanhando "regra bateu ou o
-          // paciente pediu o nome", mas os galhos de fallback abaixo a desligam:
-          // quando o alvo esta offline ou nem existe, quem sobra e a primeira da
-          // hierarquia — escolha generica da Julia, e escolha generica vai para a
-          // fila. Antes o flag continuava ligado e o ticket era cravado numa
-          // generalista, o oposto do combinado.
-          let alvoDirigidoDeVerdade = false;
 
           // Check routing rules against conversation - prioritize current message
           if (!requestedName && routingRules && routingRules.length > 0) {
@@ -8530,9 +8519,6 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               // Fuzzy match among online users
               selectedUser = fuzzyFindUser(users, requestedName!);
             }
-            // Achou o alvo pedido, online: ESTA e dirigida de verdade e mantem a
-            // atribuicao. So aqui — os fallbacks abaixo devolvem o flag para false.
-            if (selectedUser) alvoDirigidoDeVerdade = true;
             if (!selectedUser) {
               if (routingRuleMatched) {
                 // Routing rule target not found among ONLINE users — NEVER transfer to offline
@@ -8549,12 +8535,6 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                     const preferredOrder = parseTransferOrder(customNotes);
                     selectedUser =
                       preferredOrder.length > 0 ? selectAttendantByPriority(users, preferredOrder) : users[0];
-                    // DEIXA DE SER DIRIGIDA AQUI (30/08). Quem a regra pedia esta
-                    // offline; quem sobrou e a primeira da hierarquia, ou seja, uma
-                    // escolha generica da Julia. Mantendo o alvo dirigido, o ticket
-                    // era CRAVADO nessa generalista em vez de ir para a fila — o
-                    // oposto do combinado, e com o rotulo errado no historico.
-                    alvoDirigidoDeVerdade = false;
                     console.log(`[Webhook] falar_com_atendente - Fallback to online attendant: ${selectedUser.name} (vai para a FILA: alvo da regra offline)`);
                   } else {
                     return {
@@ -8569,9 +8549,6 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                     `[Webhook] falar_com_atendente - Routing rule target "${requestedName}" not found at all, auto-selecting first available online (vai para a FILA)`,
                   );
                   selectedUser = users[0] || null;
-                  // Mesma razao do galho de cima: o alvo da regra nem existe, entao
-                  // isto e escolha generica e pertence a fila.
-                  alvoDirigidoDeVerdade = false;
                 }
               } else {
                 // Check if the person exists but is offline (exact + fuzzy)
@@ -8667,7 +8644,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             console.log(`[Webhook] falar_com_atendente - Test mode: simulating transfer to ${selectedUser.name}`);
             return {
               status: "success",
-              response: `Transferido para ${selectedUser.name}`,
+              response: "Encaminhado para a fila de pendentes",
             };
           }
 
@@ -8694,8 +8671,6 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             // com outra dona stale (caso : preso na Lais, regra=Vania)
             forceReassign: true,
             // Dirigida só quando o paciente pediu o nome ou uma regra de palavra-chave
-            // resolveu o alvo. Sem isso é rodízio da hierarquia — vai para a fila.
-            alvoDirigido: alvoDirigidoDeVerdade,
           });
 
           if (!transferResult.ok) {
@@ -8713,7 +8688,6 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               userId: selectedUser.id,
               channelId,
               forceReassign: true,
-              alvoDirigido: alvoDirigidoDeVerdade,
             });
             if (!transferResult.ok) {
               console.error(
@@ -8745,7 +8719,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               conversationId: ((globalThis as any).__currentConversationId as string | undefined) || null,
               phone: formattedPhone,
               intent: "falar_com_atendente",
-              ...avisoDaDona(!!(routingRuleMatched || requestedName), selectedUser),
+              ...avisoSemDona(),
               timeoutMinutes: (await getRoutingConfig(supabaseClient, clinicTokenId)).human_response_timeout_minutes,
             });
           }
@@ -8779,7 +8753,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           });
           return {
             status: "success",
-            response: `Transferido para ${selectedUser.name}`,
+            response: "Encaminhado para a fila de pendentes",
           };
         } catch (e) {
           console.error(`[Webhook] falar_com_atendente - Error:`, e);
@@ -9193,7 +9167,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                 if (isTestMode) {
                   return {
                     status: "success",
-                    response: `Infiltração solicitada. Documentos necessários informados. Transferido para ${selectedUser.name}.`,
+                    response: "Infiltração solicitada. Documentos necessários informados. Encaminhado para a fila de pendentes.",
                   };
                 }
 
@@ -9212,7 +9186,6 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                     // Alvo por regra (exame->Vania / infiltracao->Lidiane): re-atribui
                     // dona stale (caso preso na Lais)
                     forceReassign: true,
-                    alvoDirigido: ehAlvoDirigido(choice.reason),
                   });
 
                   if (transferResult.ok) {
@@ -9225,7 +9198,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                         conversationId: ((globalThis as any).__currentConversationId as string | undefined) || null,
                         phone: formattedPhone,
                         intent: "solicitar_infiltracao",
-                        ...avisoDaDona(ehAlvoDirigido(choice.reason), selectedUser),
+                        ...avisoSemDona(),
                         timeoutMinutes: routingConfig.human_response_timeout_minutes,
                       });
                     }
@@ -9244,7 +9217,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
 
                 return {
                   status: "transferred_infiltracao",
-                  response: `Transferido para ${selectedUser.name}`,
+                  response: "Encaminhado para a fila de pendentes",
                   error:
                     "O paciente solicitou infiltração e já está cadastrado. Informe que pode enviar as ressonâncias/documentos por aqui mesmo, que estamos encaminhando para a Lidiane (ou atendente) que dará continuidade. NÃO peça dados cadastrais. NÃO tente agendar consulta.",
                 };
@@ -9341,7 +9314,6 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               userId: _fisTarget,
               channelId,
               forceReassign: !!_fisTarget,
-              alvoDirigido: !!_fisTarget,
             });
           } catch (e) {
             console.error(`[Fisio] transferência falhou: ${(e as Error).message}`);
@@ -9437,7 +9409,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                 if (isTestMode) {
                   return {
                     status: "transferred_exame",
-                    response: `Exame solicitado. Transferido para ${selectedUser.name}.`,
+                    response: "Exame solicitado. Encaminhado para a fila de pendentes.",
                   };
                 }
 
@@ -9456,7 +9428,6 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                     // Alvo por regra (exame->Vania / infiltracao->Lidiane): re-atribui
                     // dona stale (caso preso na Lais)
                     forceReassign: true,
-                    alvoDirigido: ehAlvoDirigido(choice.reason),
                   });
 
                   if (transferResult.ok) {
@@ -9469,7 +9440,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                         conversationId: ((globalThis as any).__currentConversationId as string | undefined) || null,
                         phone: formattedPhone,
                         intent: "solicitar_exame",
-                        ...avisoDaDona(ehAlvoDirigido(choice.reason), selectedUser),
+                        ...avisoSemDona(),
                         timeoutMinutes: routingConfig.human_response_timeout_minutes,
                       });
                     }
@@ -9488,7 +9459,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
 
                 return {
                   status: "transferred_exame",
-                  response: `Transferido para ${selectedUser.name}`,
+                  response: "Encaminhado para a fila de pendentes",
                   error:
                     "O paciente solicitou um exame. Informe que estamos encaminhando para uma atendente que dará continuidade ao pedido de exame. NÃO tente agendar consulta.",
                 };
@@ -12258,7 +12229,6 @@ Deno.serve(async (req) => {
               channelId: resolvedChannelId,
               // Só força quando a regra resolveu um alvo (atendente online)
               forceReassign: !!transferUserId,
-              alvoDirigido: !!transferUserId,
             });
 
             if (mediaTransferResult.ok) {
@@ -14301,13 +14271,20 @@ Deno.serve(async (req) => {
         };
         const _tfTrigger = _tfTriggerMap[String(actionResult.status || "")];
         if (_tfTrigger) {
-          const _tfTo = String(actionResult.response || "").match(/Transferido para ([^.\n]+)/i);
           await auditTransfer(supabase, {
             clinicTokenId, conversationId, phone,
             initiatedBy: "julia",
             trigger: _tfTrigger,
-            reason: String(actionResult.status),
-            toAttendant: _tfTo?.[1]?.trim() || null,
+            // SEMPRE null (30/08). Este campo saia de um regex na FRASE da resposta
+            // (/Transferido para (.+)/) — o nome de quem a Julia *teria* escolhido,
+            // escrito antes de qualquer conferencia do que a transferencia fez. Nos
+            // caminhos de exame e infiltracao ele gravava "Mardila"/"Lidiane" para
+            // tickets que foram para a fila, e a aba Transferencias mostrava pessoas
+            // recebendo caso que ninguem recebeu. Foi assim que o painel do dono
+            // passou semanas dizendo que "esta caindo tudo na Mardila".
+            // Agora nenhuma transferencia atribui: o destino e a fila, e o unico
+            // valor honesto aqui e null (a tela renderiza "(fila geral)").
+            toAttendant: null,
             detail: (finalMessage || "").slice(0, 120),
           });
         }
