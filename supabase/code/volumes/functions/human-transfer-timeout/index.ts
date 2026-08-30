@@ -206,8 +206,17 @@ async function devolverInativosAFila(
 
     // Alguém respondeu DEPOIS dela? Conta tanto a atendente (manual_reply)
     // quanto a própria Julia — se a IA respondeu, o paciente não está no vácuo.
+    //
+    // MENOS O PRÓPRIO AVISO DE TIMEOUT (30/08). "A Fulana está finalizando outro
+    // atendimento e já já te responde" não é resposta: é a Julia falando da
+    // espera. Contando como resposta, o aviso IMUNIZAVA o caso — mandava a
+    // mensagem e, no mesmo movimento, desligava o mecanismo que devolveria o
+    // ticket se a resposta não viesse. Medido em 30/08: em 10 conversas dos
+    // últimos 7 dias a última mensagem do histórico era esse aviso. Fim de linha.
     const respondeuDepois = msgs.some((m: any) =>
-      m.direction === "outgoing" && new Date(m.created_at) > new Date(ultimaDoPaciente.created_at)
+      m.direction === "outgoing" &&
+      m.ai_intent !== "human_transfer_warning" &&
+      new Date(m.created_at) > new Date(ultimaDoPaciente.created_at)
     );
     if (respondeuDepois) { pulou("ja_respondida"); continue; }
 
