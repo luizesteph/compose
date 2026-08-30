@@ -121,14 +121,54 @@ function stripAccents(s: string): string {
 // FAIL-CLOSED de propósito: qualquer erro (showticket fora do ar, ticket sem id,
 // credencial faltando) PULA aquele ticket em vez de devolver. Devolver por
 // engano tira o paciente de quem está resolvendo o caso dele.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// POR QUE ISTO NUNCA DEVOLVEU NADA — medido em 30/08
+// ─────────────────────────────────────────────────────────────────────────────
+// Entre 25/08 (quando esta fase nasceu) e 30/08 o `transfer_audit` tinha ZERO
+// linhas com trigger='inatividade'. Não era falta de caso: na sexta 28/08 dois
+// tickets ficaram abertos, com dona, sem uma única resposta — um desde as 14h13,
+// outro desde as 16h44 — e ainda estavam assim no domingo de manhã. O cron rodava
+// de 2 em 2 minutos, a env estava ligada, e mesmo assim: zero.
+//
+// Eram DOIS erros somados, os dois calados:
+//
+//   1. O showticket devolve `{"success":true,"data":{...}}`. O código lia
+//      `d.status` e `d.id` — a raiz, não o `data`. Sempre undefined, então o
+//      `!== "open"` era sempre verdadeiro e o `continue` levava embora TODA
+//      conversa. O caminho da transferência não caiu nessa porque usa o
+//      extractTicketIdForTransfer, que procura o ticket dentro de `data`.
+//
+//   2. A Fase 1 escolhe o canal certo lendo `avanceai_active_channel` (lição
+//      19/07, ERR_API_REQUIRES_SESSION). A Fase 2 recebia as credenciais PLANAS
+//      da clinic_tokens — que hoje apontam para o canal 143, DESLIGADO. Mesmo
+//      com o parse consertado, a chamada iria para a sessão errada.
+//
+// Um erro escondia o outro, e o silêncio escondia os dois: a função só logava
+// quando devolvia alguma coisa. Agora ela loga o resultado SEMPRE, com o motivo
+// de cada pulo — zero devoluções passa a ser uma frase no log, não um vazio.
 async function devolverInativosAFila(
   supabase: any,
   clinicTokenId: string,
-  creds: { baseUrl: string; apiId: string; bearerToken: string },
+  creds: { baseUrl: string; apiId: string; bearerToken: string; channelId?: string | null },
   prazoPadrao: number,
   prazoEstendido: number,
-): Promise<{ avaliados: number; devolvidos: number; detalhes: string[] }> {
-  const out = { avaliados: 0, devolvidos: 0, detalhes: [] as string[] };
+): Promise<{ avaliados: number; devolvidos: number; detalhes: string[]; pulos: Record<string, number> }> {
+  const out = {
+    avaliados: 0,
+    devolvidos: 0,
+    detalhes: [] as string[],
+    // Por que cada conversa não virou devolução. Sem isto, "0 devolvidos" não
+    // distingue "ninguém estava esperando" de "o parse está quebrado".
+    pulos: {} as Record<string, number>,
+  };
+  const pulou = (motivo: string) => { out.pulos[motivo] = (out.pulos[motivo] || 0) + 1; };
+
+  // Teto por execução: esta fase ficou 5 dias sem rodar de verdade, então a
+  // primeira rodada boa encontra atraso acumulado. Devolver 60 tickets de uma
+  // vez encheria a fila de casos velhos e esconderia os de hoje. O cron roda de
+  // 2 em 2 min: o resto sai na próxima, e o log diz quantos ficaram.
+  const TETO_POR_RODADA = 5;
 
   // Conversas com atendente humana e ticket aberto. `ticket_status` é mantido
   // pelo refresh-ticket-status; se estiver velho, o showticket abaixo confere.
@@ -154,24 +194,26 @@ async function devolverInativosAFila(
 
     const msgs = (ultimas || []);
     const ultimaDoPaciente = msgs.find((m: any) => m.direction === "incoming");
-    if (!ultimaDoPaciente) continue;
+    if (!ultimaDoPaciente) { pulou("sem_mensagem_do_paciente"); continue; }
 
     // Alguém respondeu DEPOIS dela? Conta tanto a atendente (manual_reply)
     // quanto a própria Julia — se a IA respondeu, o paciente não está no vácuo.
     const respondeuDepois = msgs.some((m: any) =>
       m.direction === "outgoing" && new Date(m.created_at) > new Date(ultimaDoPaciente.created_at)
     );
-    if (respondeuDepois) continue;
+    if (respondeuDepois) { pulou("ja_respondida"); continue; }
 
     out.avaliados++;
 
     // A mensagem pede resposta? "obrigada" e mídia sem texto não pedem.
     const temMidia = !!(ultimaDoPaciente.raw_payload?.mediaUrl || ultimaDoPaciente.raw_payload?.mediaType);
-    if (!exigeRespostaDaAtendente(ultimaDoPaciente.message_text, temMidia)) continue;
+    if (!exigeRespostaDaAtendente(ultimaDoPaciente.message_text, temMidia)) { pulou("nao_exige_resposta"); continue; }
 
     const prazoMin = prazoDeRespostaEmMinutos(nome, prazoPadrao, prazoEstendido);
     const esperandoMin = (Date.now() - new Date(ultimaDoPaciente.created_at).getTime()) / 60000;
-    if (esperandoMin < prazoMin) continue;
+    if (esperandoMin < prazoMin) { pulou("dentro_do_prazo"); continue; }
+
+    if (out.devolvidos >= TETO_POR_RODADA) { pulou("teto_da_rodada"); continue; }
 
     // Confere no Z-PRO antes de mexer: o banco pode estar defasado, e a
     // atendente pode ter respondido por um caminho que não gerou webhook.
@@ -182,24 +224,39 @@ async function devolverInativosAFila(
       const r = await fetch(`${creds.baseUrl}/v2/api/external/${creds.apiId}/showticket`, {
         method: "POST",
         headers: { Authorization: `Bearer ${creds.bearerToken}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ number: full }),
+        body: JSON.stringify({
+          number: full,
+          ...(creds.channelId ? { channelId: Number(creds.channelId), whatsappId: Number(creds.channelId) } : {}),
+        }),
       });
-      if (!r.ok) continue;                              // fail-closed
+      // 404 aqui é ERR_TICKET_NOT_FOUND: o showticket só devolve ticket ABERTO.
+      // Ticket que já foi fechado ou já está pendente cai aqui — e não é caso de
+      // devolução, é caso que saiu do atendimento sozinho.
+      if (!r.ok) { pulou(`showticket_${r.status}`); continue; } // fail-closed
       const d = await r.json();
-      if (String(d?.status || "") !== "open") continue; // já saiu do atendimento
-      ticketId = Number(d?.id ?? d?.ticketId ?? 0) || null;
-    } catch { continue; }
-    if (!ticketId) continue;
+      // O ticket vem em `data`, NÃO na raiz. Ler d.status/d.id (como estava até
+      // 30/08) dava undefined e matava a fase inteira — ver o bloco no topo.
+      const tk = d?.data ?? d?.ticket ?? d;
+      if (String(tk?.status || "") !== "open") { pulou("nao_esta_open"); continue; } // já saiu do atendimento
+      ticketId = Number(tk?.id ?? tk?.ticketId ?? 0) || null;
+    } catch { pulou("showticket_erro"); continue; }
+    if (!ticketId) { pulou("sem_ticket_id"); continue; }
 
     // Devolve para a fila: status pending, sem dono.
     try {
       const r = await fetch(`${creds.baseUrl}/v2/api/external/${creds.apiId}/updateticketinfo`, {
         method: "POST",
         headers: { Authorization: `Bearer ${creds.bearerToken}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ ticketId, status: "pending", userId: null }),
+        body: JSON.stringify({
+          ticketId,
+          status: "pending",
+          userId: null,
+          ...(creds.channelId ? { channelId: Number(creds.channelId), whatsappId: Number(creds.channelId) } : {}),
+        }),
       });
       if (!r.ok) {
         out.detalhes.push(`ticket ${ticketId}: updateticketinfo ${r.status}`);
+        pulou(`updateticketinfo_${r.status}`);
         continue;
       }
       out.devolvidos++;
@@ -468,19 +525,52 @@ Deno.serve(async (req) => {
         const prazoEstendido = Number(Deno.env.get("DEVOLVER_FILA_MINUTOS_ESTENDIDO") || "60") || 60;
         const { data: clinicas } = await supabase
           .from("clinic_tokens")
-          .select("id, avanceai_base_url, avanceai_api_id, avanceai_bearer_token");
+          .select("id, avanceai_base_url, avanceai_api_id, avanceai_bearer_token, avanceai_active_channel");
         for (const cl of (clinicas || [])) {
           if (!cl.avanceai_base_url || !cl.avanceai_api_id || !cl.avanceai_bearer_token) continue;
+
+          // CANAL CERTO — mesma lição 19/07 (ERR_API_REQUIRES_SESSION) que a Fase 1
+          // já aplicava e esta não. As colunas planas da clinic_tokens hoje apontam
+          // para o canal 143, que está DESLIGADO: chamar showticket com elas procura
+          // o ticket numa sessão que não tem ticket nenhum, e devolve 404 sempre.
+          // O canal vivo mora dentro de avanceai_active_channel, com credencial
+          // própria — é dele que a Julia fala com o paciente.
+          let cBase = cl.avanceai_base_url, cApi = cl.avanceai_api_id, cBearer = cl.avanceai_bearer_token;
+          let cChannel: string | null = null;
+          try {
+            const parsed = typeof cl.avanceai_active_channel === "string"
+              ? JSON.parse(cl.avanceai_active_channel) : cl.avanceai_active_channel;
+            const habilitados = Array.isArray(parsed)
+              ? parsed.filter((ch: any) => ch && ch.apiId && ch.baseUrl && ch.enabled !== false) : [];
+            if (habilitados.length === 1) {
+              cBase = String(habilitados[0].baseUrl);
+              cApi = String(habilitados[0].apiId);
+              cBearer = String(habilitados[0].bearerToken || cl.avanceai_bearer_token || "");
+              cChannel = habilitados[0].id != null ? String(habilitados[0].id) : null;
+            } else if (habilitados.length > 1) {
+              // Com dois canais ligados não dá para adivinhar por qual o paciente
+              // falou. Pular é melhor que devolver o ticket no canal errado.
+              console.log(`[devolver-fila] clinica ${cl.id}: ${habilitados.length} canais ligados — pulando (ambíguo)`);
+              continue;
+            }
+          } catch { /* fica nas credenciais planas */ }
+
           try {
             const r = await devolverInativosAFila(
               supabase,
               cl.id,
-              { baseUrl: cl.avanceai_base_url, apiId: cl.avanceai_api_id, bearerToken: cl.avanceai_bearer_token },
+              { baseUrl: cBase, apiId: cApi, bearerToken: cBearer, channelId: cChannel },
               prazoPadrao,
               prazoEstendido,
             );
             (summary as any).fila_avaliados = ((summary as any).fila_avaliados || 0) + r.avaliados;
             (summary as any).fila_devolvidos = ((summary as any).fila_devolvidos || 0) + r.devolvidos;
+            // SEMPRE loga (30/08). Antes só falava quando devolvia algo, e por isso
+            // cinco dias devolvendo zero pareceram cinco dias sem caso nenhum.
+            const pulos = Object.entries(r.pulos).map(([k, v]) => `${k}=${v}`).join(",") || "nenhum";
+            console.log(
+              `[devolver-fila] clinica=${cl.id} canal=${cChannel || "plano"} avaliados=${r.avaliados} devolvidos=${r.devolvidos} pulos: ${pulos}`,
+            );
             if (r.detalhes.length) console.log(`[devolver-fila] ${r.detalhes.join(" | ")}`);
           } catch (e) {
             console.error(`[devolver-fila] clinica ${cl.id}: ${(e as Error).message}`);
