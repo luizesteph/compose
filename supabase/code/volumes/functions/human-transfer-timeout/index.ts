@@ -170,20 +170,28 @@ async function devolverInativosAFila(
   // 2 em 2 min: o resto sai na próxima, e o log diz quantos ficaram.
   const TETO_POR_RODADA = 5;
 
-  // Conversas com atendente humana e ticket aberto. `ticket_status` é mantido
-  // pelo refresh-ticket-status; se estiver velho, o showticket abaixo confere.
+  // QUEM ENTRA NA VARREDURA — conversa recente, e SÓ ISSO (30/08).
+  //
+  // Até agora o filtro era `ticket_status='open' AND assigned_agent_name IS NOT
+  // NULL` na chat_conversations. Mas essa tabela é um ESPELHO, e quem a atualiza
+  // é o refresh-ticket-status — que não está no pg_cron. Conferido em 30/08 nos
+  // dois tickets de sexta que passaram o fim de semana sem resposta: no Z-PRO um
+  // estava "open com a Laiz" e o outro "open com a Lidiane"; no espelho, um sem
+  // dona e o outro como "pending". Os dois casos que mais precisavam de devolução
+  // eram justamente os que o filtro jogava fora.
+  //
+  // Agora o espelho só serve para ACHAR candidato barato (conversa com mensagem
+  // nos últimos dias). Quem diz o status e quem é a dona é o showticket, ao vivo.
+  const desde = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
   const { data: convs } = await supabase
     .from("chat_conversations")
     .select("id, phone, assigned_agent_name, ticket_status, last_message_at")
     .eq("clinic_token_id", clinicTokenId)
-    .eq("ticket_status", "open")
-    .not("assigned_agent_name", "is", null)
+    .gte("last_message_at", desde)
+    .order("last_message_at", { ascending: false })
     .limit(200);
 
   for (const c of (convs || [])) {
-    const nome = String(c.assigned_agent_name || "").trim();
-    if (!nome) continue;
-
     // Última mensagem DO PACIENTE nesta conversa.
     const { data: ultimas } = await supabase
       .from("webhook_messages")
@@ -209,15 +217,19 @@ async function devolverInativosAFila(
     const temMidia = !!(ultimaDoPaciente.raw_payload?.mediaUrl || ultimaDoPaciente.raw_payload?.mediaType);
     if (!exigeRespostaDaAtendente(ultimaDoPaciente.message_text, temMidia)) { pulou("nao_exige_resposta"); continue; }
 
-    const prazoMin = prazoDeRespostaEmMinutos(nome, prazoPadrao, prazoEstendido);
+    // PRÉ-FILTRO com o prazo MAIS CURTO dos dois. O prazo de verdade depende de
+    // QUEM é a dona (Vânia e Lidiane têm 1h, o resto 10min) e a dona só se sabe
+    // depois do showticket. Cortar aqui pelo menor prazo evita bater na API de
+    // 2 em 2 minutos para conversa que ainda nem venceu o prazo mais curto.
     const esperandoMin = (Date.now() - new Date(ultimaDoPaciente.created_at).getTime()) / 60000;
-    if (esperandoMin < prazoMin) { pulou("dentro_do_prazo"); continue; }
+    if (esperandoMin < Math.min(prazoPadrao, prazoEstendido)) { pulou("dentro_do_prazo"); continue; }
 
     if (out.devolvidos >= TETO_POR_RODADA) { pulou("teto_da_rodada"); continue; }
 
-    // Confere no Z-PRO antes de mexer: o banco pode estar defasado, e a
+    // Confere no Z-PRO antes de mexer: o espelho local pode estar defasado, e a
     // atendente pode ter respondido por um caminho que não gerou webhook.
     let ticketId: number | null = null;
+    let nome = "";
     try {
       const tel = String(c.phone || "").replace(/\D/g, "");
       const full = tel.length <= 11 ? `55${tel}` : tel;
@@ -238,9 +250,18 @@ async function devolverInativosAFila(
       // 30/08) dava undefined e matava a fase inteira — ver o bloco no topo.
       const tk = d?.data ?? d?.ticket ?? d;
       if (String(tk?.status || "") !== "open") { pulou("nao_esta_open"); continue; } // já saiu do atendimento
+      // A DONA VEM DAQUI, não do espelho: é este nome que decide o prazo e é este
+      // que vai para a auditoria. Ticket aberto SEM dona já está disponível para
+      // quem quiser pegar — não há de quem tirar.
+      nome = String(tk?.user?.name || "").trim();
+      if (!nome) { pulou("open_sem_dona"); continue; }
       ticketId = Number(tk?.id ?? tk?.ticketId ?? 0) || null;
     } catch { pulou("showticket_erro"); continue; }
     if (!ticketId) { pulou("sem_ticket_id"); continue; }
+
+    // Agora sim o prazo da dona de verdade.
+    const prazoMin = prazoDeRespostaEmMinutos(nome, prazoPadrao, prazoEstendido);
+    if (esperandoMin < prazoMin) { pulou("dentro_do_prazo_da_dona"); continue; }
 
     // Devolve para a fila: status pending, sem dono.
     try {
