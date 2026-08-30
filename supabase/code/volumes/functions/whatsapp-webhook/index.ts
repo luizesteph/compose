@@ -348,8 +348,21 @@ function formatNowSPHuman(): string {
 
 // ─── Feriados/dias fechados (clinic_closed_days) ─────────────────────────────
 // Cache curto por clínica. closedToday + motivo + data de reabertura (próximo
-// dia útil que não está na lista) + conjunto de datas fechadas futuras (45d),
+// dia útil que não está na lista) + conjunto de datas fechadas futuras,
 // usado também para bloquear agendamento PARA um dia fechado.
+//
+// A JANELA TEM QUE COBRIR A AGENDA, NÃO UM NÚMERO REDONDO (30/08).
+// Eram 45 dias. A agenda que o Amigo devolve hoje vai a 92 (31/08 → 30/11), então
+// tudo que estivesse cadastrado entre o 46º e o 92º dia simplesmente não entrava
+// no closedSet — e o bloqueio de agendamento não disparava. Descoberto na hora de
+// cadastrar os feriados do fim do ano: Finados cai a 64 dias daqui, Natal a 117.
+// O paciente pediria 02/11, o guard não veria nada e a consulta seria marcada num
+// dia de clínica fechada.
+//
+// 210 dias cobre a agenda inteira com folga e ainda alcança o Carnaval do ano que
+// vem. O custo é nenhum: são poucas linhas por clínica, e o cache de 60s continua
+// absorvendo a leitura.
+const JANELA_DIAS_FECHADOS = 210;
 type ClosedDayInfo = { closedToday: boolean; reason: string; reopenISO: string; closedSet: Set<string> };
 const _closedDaysCache = new Map<string, { info: ClosedDayInfo; exp: number }>();
 async function getClosedDayInfo(sb: any, clinicId: string | null | undefined): Promise<ClosedDayInfo> {
@@ -364,7 +377,7 @@ async function getClosedDayInfo(sb: any, clinicId: string | null | undefined): P
       .select("closed_date, reason")
       .eq("clinic_token_id", clinicId)
       .gte("closed_date", today)
-      .lte("closed_date", addDaysToISO(today, 45));
+      .lte("closed_date", addDaysToISO(today, JANELA_DIAS_FECHADOS));
     const rows = Array.isArray(data) ? data : [];
     const closedSet = new Set<string>(rows.map((r: any) => String(r.closed_date).slice(0, 10)));
     const todayRow = rows.find((r: any) => String(r.closed_date).slice(0, 10) === today);
