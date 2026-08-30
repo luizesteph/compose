@@ -599,6 +599,17 @@ export async function transferTicketToHuman(opts: {
       } else {
         lastHttpStatus = showRes.status;
         lastErrorDetail = `showticket ${showRes.status}: ${showBody.substring(0, 200)}`;
+        // 404 NAO E FALHA TRANSITORIA — E A REGRA AQUI (30/08).
+        // O showticket so devolve ticket ABERTO. A Julia so transfere quando o
+        // ticket NAO esta aberto com humano, entao o 404 e o caso NORMAL desta
+        // chamada, nao a excecao. Medido em 72h de log: 186 respostas 404 e ZERO
+        // 200. Tratar como transitorio custava 3 requisicoes e 6 segundos de
+        // sleep em TODA transferencia, com o paciente esperando, para depois cair
+        // no Attempt B — que e quem sempre resolveu. Vai direto para o B.
+        if (showRes.status === 404) {
+          console.log(`[Transfer] showticket 404 (ticket nao esta aberto) — sem retry, vai para o Attempt B`);
+          break;
+        }
         if (showAttempt < MAX_SHOW_RETRIES) {
           console.log(`[Transfer] showticket failed (${showRes.status}), retrying in ${showAttempt * 2}s...`);
           await new Promise((r) => setTimeout(r, showAttempt * 2000));

@@ -2092,11 +2092,41 @@ async function lockPresentedSlots(
     console.log(`[Webhook] Slot lock (presentation) error (non-blocking): ${(err as Error).message}`);
   }
 }
+// A LETRA "c" NAO E UM PEDIDO DE CIRURGIA (30/08)
+//
+// A segunda perna desta funcao aceitava `kw.startsWith(w)`: bastava a mensagem
+// conter uma palavra que fosse PREFIXO da keyword. Com a keyword "cirurgia", o
+// "c" solto casava — e "c" e como meio mundo escreve "com" no WhatsApp. Medido em
+// producao, 30 dias, todas grudadas na Vania e fora da fila:
+//
+//   "Fiz uma consulta c o dr Vilella dia 12/8"        -> regra "cirurgia"
+//   "Encaixe hj c medico especialista em pe ?"        -> regra "cirurgia"
+//   "Gostaria de agendar uma consulta c dr Guilherme" -> regra "cirurgia"
+//   "queria marcar retorno c dr lucas miotto"         -> regra "cirurgia"
+//
+// Com a keyword "Infiltracao", um "i" solto fazia o mesmo. E como a regra de
+// palavra-chave marca alvo dirigido, o ticket saia da fila e ficava preso numa
+// pessoa — exatamente o sintoma que o dono relatou.
+//
+// A perna curta continua existindo, porque ela serve para algo real: "infiltra"
+// tem que casar a keyword "Infiltracao". O que ela nao pode e aceitar toco de uma
+// ou duas letras. Quatro caracteres E pelo menos 70% da keyword: "infiltra" (8 de
+// 11) passa, "cirurgi" (7 de 8) passa, "c" e "ci" nao chegam perto.
+const MIN_PREFIXO = 4;
 function flexKeywordMatch(text: string, keyword: string): boolean {
   if (text.includes(keyword)) return true;
   const words = text.split(/\s+/).filter(Boolean);
   const kwWords = keyword.split(/\s+/).filter(Boolean);
-  return kwWords.length > 0 && kwWords.every((kw) => words.some((w) => w.startsWith(kw) || kw.startsWith(w)));
+  return (
+    kwWords.length > 0 &&
+    kwWords.every((kw) =>
+      words.some(
+        (w) =>
+          w.startsWith(kw) ||
+          (kw.startsWith(w) && w.length >= MIN_PREFIXO && w.length >= Math.ceil(kw.length * 0.7)),
+      ),
+    )
+  );
 }
 
 // Levenshtein distance for fuzzy name matching
@@ -8435,6 +8465,13 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             : undefined;
           let selectedUser: { id: number; name: string } | null = null;
           let routingRuleMatched = false;
+          // DIRIGIDA DE VERDADE (30/08). Comeca acompanhando "regra bateu ou o
+          // paciente pediu o nome", mas os galhos de fallback abaixo a desligam:
+          // quando o alvo esta offline ou nem existe, quem sobra e a primeira da
+          // hierarquia — escolha generica da Julia, e escolha generica vai para a
+          // fila. Antes o flag continuava ligado e o ticket era cravado numa
+          // generalista, o oposto do combinado.
+          let alvoDirigidoDeVerdade = false;
 
           // Check routing rules against conversation - prioritize current message
           if (!requestedName && routingRules && routingRules.length > 0) {
@@ -8493,6 +8530,9 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               // Fuzzy match among online users
               selectedUser = fuzzyFindUser(users, requestedName!);
             }
+            // Achou o alvo pedido, online: ESTA e dirigida de verdade e mantem a
+            // atribuicao. So aqui — os fallbacks abaixo devolvem o flag para false.
+            if (selectedUser) alvoDirigidoDeVerdade = true;
             if (!selectedUser) {
               if (routingRuleMatched) {
                 // Routing rule target not found among ONLINE users — NEVER transfer to offline
@@ -8509,7 +8549,13 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                     const preferredOrder = parseTransferOrder(customNotes);
                     selectedUser =
                       preferredOrder.length > 0 ? selectAttendantByPriority(users, preferredOrder) : users[0];
-                    console.log(`[Webhook] falar_com_atendente - Fallback to online attendant: ${selectedUser.name}`);
+                    // DEIXA DE SER DIRIGIDA AQUI (30/08). Quem a regra pedia esta
+                    // offline; quem sobrou e a primeira da hierarquia, ou seja, uma
+                    // escolha generica da Julia. Mantendo o alvo dirigido, o ticket
+                    // era CRAVADO nessa generalista em vez de ir para a fila — o
+                    // oposto do combinado, e com o rotulo errado no historico.
+                    alvoDirigidoDeVerdade = false;
+                    console.log(`[Webhook] falar_com_atendente - Fallback to online attendant: ${selectedUser.name} (vai para a FILA: alvo da regra offline)`);
                   } else {
                     return {
                       status: "failed",
@@ -8520,9 +8566,12 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                 } else {
                   // Target truly doesn't exist — pick first available online
                   console.log(
-                    `[Webhook] falar_com_atendente - Routing rule target "${requestedName}" not found at all, auto-selecting first available online`,
+                    `[Webhook] falar_com_atendente - Routing rule target "${requestedName}" not found at all, auto-selecting first available online (vai para a FILA)`,
                   );
                   selectedUser = users[0] || null;
+                  // Mesma razao do galho de cima: o alvo da regra nem existe, entao
+                  // isto e escolha generica e pertence a fila.
+                  alvoDirigidoDeVerdade = false;
                 }
               } else {
                 // Check if the person exists but is offline (exact + fuzzy)
@@ -8646,7 +8695,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             forceReassign: true,
             // Dirigida só quando o paciente pediu o nome ou uma regra de palavra-chave
             // resolveu o alvo. Sem isso é rodízio da hierarquia — vai para a fila.
-            alvoDirigido: !!(routingRuleMatched || requestedName),
+            alvoDirigido: alvoDirigidoDeVerdade,
           });
 
           if (!transferResult.ok) {
@@ -8664,7 +8713,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               userId: selectedUser.id,
               channelId,
               forceReassign: true,
-              alvoDirigido: !!(routingRuleMatched || requestedName),
+              alvoDirigido: alvoDirigidoDeVerdade,
             });
             if (!transferResult.ok) {
               console.error(
