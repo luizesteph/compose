@@ -170,6 +170,32 @@ async function devolverInativosAFila(
   // 2 em 2 min: o resto sai na próxima, e o log diz quantos ficaram.
   const TETO_POR_RODADA = 5;
 
+  // ── FREIO DO PINGUE-PONGUE (pedido do dono, 31/08) ──────────────────────────
+  // No primeiro dia inteiro com a devolução funcionando, ela devolveu 91 tickets
+  // — e 23 dos 36 telefones voltaram MAIS DE UMA VEZ. Um deles oito:
+  //
+  //   07:58 Vânia   sem responder há 3711min → fila
+  //   08:52 Glaucia sem responder há 3765min → fila
+  //   09:12 Glaucia ... 10:12 Vânia ... 12:32 ... 16:00 ... 16:02 ... 18:54
+  //
+  // A atendente pega da fila, não responde, o ticket volta, outra pega, não
+  // responde, volta. O dia inteiro, em silêncio, com a paciente esperando desde
+  // sexta. Devolver pela nona vez não ia resolver o que oito não resolveram.
+  //
+  // A partir da 3ª volta o caso PARA de circular e vira uma linha na aba
+  // Transferências, para alguém olhar. O ticket fica onde está — com dona — em
+  // vez de voltar para uma fila que já provou não resolver este caso.
+  //
+  // O paciente NÃO recebe mais nada: ele já recebeu o aviso de 15 min, e mandar
+  // outra mensagem automática é o caminho do spam de 28/07 (o Mássimo recebeu o
+  // mesmo aviso ~50 vezes em 1h43).
+  //
+  // Medido com os dados de 31/08: 15 das 36 conversas teriam travado, evitando
+  // 17 devoluções inúteis. As 21 que rodaram uma ou duas voltas seguem intactas.
+  const TETO_DEVOLUCOES = 3;
+  const JANELA_FREIO_HORAS = 24;
+  const desdeFreio = new Date(Date.now() - JANELA_FREIO_HORAS * 60 * 60 * 1000).toISOString();
+
   // QUEM ENTRA NA VARREDURA — conversa recente, e SÓ ISSO (30/08).
   //
   // Até agora o filtro era `ticket_status='open' AND assigned_agent_name IS NOT
@@ -192,6 +218,11 @@ async function devolverInativosAFila(
     .limit(200);
 
   for (const c of (convs || [])) {
+    // Só para a linha do freio: quem o espelho ACHA que é a dona. A dona de
+    // verdade vem do showticket, mais abaixo — mas o freio dispara antes disso,
+    // de propósito, para não gastar chamada de API num caso que não vai devolver.
+    const nomeEspelho = String(c.assigned_agent_name || "").trim();
+
     // Última mensagem DO PACIENTE nesta conversa.
     const { data: ultimas } = await supabase
       .from("webhook_messages")
@@ -234,6 +265,45 @@ async function devolverInativosAFila(
     if (esperandoMin < Math.min(prazoPadrao, prazoEstendido)) { pulou("dentro_do_prazo"); continue; }
 
     if (out.devolvidos >= TETO_POR_RODADA) { pulou("teto_da_rodada"); continue; }
+
+    // Quantas vezes ESTA conversa já rodou a volta nas últimas 24h? A contagem sai
+    // do próprio transfer_audit — sem coluna nova, sem migration. Custa uma query
+    // por conversa, e só chega aqui quem já passou por todos os filtros: no dia
+    // 31/08 isso seria no máximo 5 por rodada, o teto acima.
+    const { count: _voltas } = await supabase
+      .from("transfer_audit")
+      .select("id", { count: "exact", head: true })
+      .eq("conversation_id", c.id)
+      .eq("trigger", "inatividade")
+      .gte("created_at", desdeFreio);
+    if ((_voltas || 0) >= TETO_DEVOLUCOES) {
+      // Avisa UMA vez e cala. Sem esta checagem o cron gravaria a mesma linha de
+      // 2 em 2 minutos e a aba Transferências viraria um muro de repetição — o
+      // mesmo erro do spam de 28/07, só que na tela em vez de no WhatsApp.
+      const { count: _jaAvisado } = await supabase
+        .from("transfer_audit")
+        .select("id", { count: "exact", head: true })
+        .eq("conversation_id", c.id)
+        .eq("trigger", "inatividade_travada")
+        .gte("created_at", desdeFreio);
+      if (!_jaAvisado) {
+        await supabase.from("transfer_audit").insert({
+          clinic_token_id: clinicTokenId,
+          conversation_id: c.id,
+          phone: c.phone,
+          from_attendant: nomeEspelho || null,
+          to_attendant: null,
+          initiated_by: "sistema",
+          trigger: "inatividade_travada",
+          reason: "limite_de_devolucoes",
+          detail: `${_voltas} devoluções em 24h sem ninguém responder — parei de devolver, precisa de gente`,
+        } as any).then(() => {}, () => {});
+        console.log(`[devolver-fila] 🛑 FREIO: conversa ${c.id} já rodou ${_voltas} voltas em 24h — parei de devolver`);
+        out.detalhes.push(`conversa ${String(c.id).slice(0, 8)}: ${_voltas} voltas — TRAVADA, precisa de gente`);
+      }
+      pulou("freio_de_devolucoes");
+      continue;
+    }
 
     // Confere no Z-PRO antes de mexer: o espelho local pode estar defasado, e a
     // atendente pode ter respondido por um caminho que não gerou webhook.

@@ -8790,7 +8790,17 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             phone: senderPhone,
             // Sem alvo dirigido o ticket foi para a FILA — a aba Transferências
             // não pode dizer que foi para uma pessoa que não o recebeu.
-            toAttendant: routingRuleMatched || requestedName ? selectedUser.name : null,
+            // SEMPRE null (31/08). Este era o ultimo ponto que ainda creditava uma
+            // pessoa. Desde 30/08 nenhuma transferencia atribui — tudo vai para a
+            // fila pendente e quem estiver livre puxa. Medido no dia seguinte a
+            // mudanca: a aba Transferencias dizia que a Vania tinha recebido 7
+            // tickets e a Lidiane 3, e nenhuma das duas recebeu nada. O nome que
+            // saia daqui era o da atendente que a escada ESCOLHEU, nao a que
+            // recebeu — e nao existe mais "a que recebeu".
+            // `selectedUser` continua vivo de proposito: ele alimenta o
+            // logRoutingDecision acima, que registra a ESCOLHA (outra coisa, e
+            // ainda verdadeira).
+            toAttendant: null,
             initiatedBy: "julia",
             trigger: "pedido_paciente",
             reason: _stickyPicked
