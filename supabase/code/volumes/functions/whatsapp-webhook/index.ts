@@ -73,6 +73,9 @@ import {
   toInsuranceId,
   validarAfirmacaoDeConvenio,
   textoDeConvenioNaoConfirmado,
+  avaliarEfetivoIV,
+  textoEfetivoIV,
+  EFETIVO_IV_MEDICO,
 } from "./insurance.ts";
 // @ts-nocheck
 // TODO(FASE 2): remove this directive and address ~50 structural TS errors
@@ -90,6 +93,23 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 // também o texto, para pegar o caso em que a atendente ou o paciente escreveram
 // "infiltra*" sem que aquilo tenha virado intent.
 // PURA LEITURA: na dúvida devolve false e o fluxo segue normal.
+// Texto que o PACIENTE escreveu — mensagem atual mais o histórico recente dele.
+// O plano quase nunca vem na mesma mensagem da queixa: ele diz "Bradesco Efetivo
+// IV" num turno e "dor no ombro" no seguinte.
+function textoDoPacienteRecente(mensagemAtual: unknown, mensagensRecentes: unknown): string {
+  const partes: string[] = [String(mensagemAtual || "")];
+  try {
+    const lista = Array.isArray(mensagensRecentes) ? mensagensRecentes : [];
+    for (const m of lista.slice(-10)) {
+      const msg = m as Record<string, unknown>;
+      const papel = String(msg.role || msg.direction || "");
+      if (papel === "assistant" || papel === "outgoing") continue; // só o que ELE disse
+      partes.push(String(msg.content || msg.message_text || ""));
+    }
+  } catch { /* histórico ilegível: fica só a mensagem atual */ }
+  return partes.join("\n");
+}
+
 function temContextoDeInfiltracao(mensagensRecentes: unknown): boolean {
   try {
     const lista = Array.isArray(mensagensRecentes) ? mensagensRecentes : [];
@@ -5854,6 +5874,22 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
 
         // Dia fechado cadastrado (feriado/emenda): não deixar marcar PARA essa data,
         // mesmo que a agenda do Amigo esteja aberta por engano.
+        // BRADESCO EFETIVO IV (31/08): o plano amarra médico E região. Barra aqui,
+        // no mesmo degrau do dia fechado, porque é o último ponto antes do POST —
+        // e porque aqui dá para responder ao paciente sem criar a consulta.
+        {
+          const _efReg = String((entities as Record<string, unknown>).efetivo_iv || "");
+          if (_efReg === "recusa" || _efReg === "indefinida") {
+            const _efMsg = textoEfetivoIV({
+              plano: true,
+              regiao: _efReg as "recusa" | "indefinida",
+              medico: EFETIVO_IV_MEDICO,
+            });
+            console.log(`[EfetivoIV] agendamento barrado (região ${_efReg})`);
+            return { status: "needs_info", response: _efMsg, error: _efMsg, bypassAiRewrite: true } as any;
+          }
+        }
+
         {
           const _cdBook = await getClosedDayInfo(supabaseClient, clinicTokenId);
           if (_cdBook.closedSet.has(isoDate)) {
@@ -13412,6 +13448,30 @@ Deno.serve(async (req) => {
               `[Webhook] ⚙️ Fallback deterministico: intent "${classification.intent}" -> "reagendar" (sinal de remarcar consulta existente)`,
             );
             classification.intent = "reagendar";
+          }
+        }
+
+        // === BRADESCO EFETIVO IV: MÉDICO ÚNICO (regra do dono, 31/08) ===
+        // "Apenas eu posso atender esse plano." Ombro, cotovelo e joelho são dele;
+        // o resto o plano não cobre aqui. Quando a região é dele, o médico fica
+        // CRAVADO na classificação — assim o fluxo normal segue pelo caminho de
+        // "paciente pediu um médico pelo nome", que já é proibido de oferecer
+        // alternativa (OVERRIDE 2). Sem isso, uma queixa de joelho seria roteada
+        // para o Dr. Hugo ou o Dr. Felipe, que não atendem este plano.
+        // A recusa e a pergunta de região ficam no executeAction, junto do guard
+        // de dia fechado — é lá que dá para responder sem agendar.
+        const _efIV = avaliarEfetivoIV(
+          textoDoPacienteRecente(finalMessage, conversationHistory),
+          `${classification.subspecialty || ""} ${classification.complaint || ""}`,
+        );
+        if (_efIV.plano) {
+          // viaja junto para o executeAction decidir agendar, recusar ou perguntar
+          (classification as Record<string, unknown>).efetivo_iv = _efIV.regiao;
+          if (_efIV.regiao === "aceita" && !classification.doctor_name) {
+            console.log(`[EfetivoIV] plano + região dele — médico cravado: ${EFETIVO_IV_MEDICO.nome}`);
+            classification.doctor_name = EFETIVO_IV_MEDICO.nome;
+          } else if (_efIV.regiao !== "aceita") {
+            console.log(`[EfetivoIV] plano detectado, região "${_efIV.regiao}" — agendamento vai ser barrado`);
           }
         }
 

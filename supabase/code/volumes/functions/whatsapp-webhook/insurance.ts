@@ -337,3 +337,90 @@ export function textoDeConvenioNaoConfirmado(v: Extract<VeredictoConvenio, { ok:
   }
   return `Esse plano eu preciso confirmar com a equipe antes de agendar. 🙏 Já estou chamando alguém pra te ajudar.`;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PLANO COM MÉDICO ÚNICO — Bradesco Efetivo IV (regra do dono, 31/08)
+// ─────────────────────────────────────────────────────────────────────────────
+// "Apenas eu, Dr. Luiz Gustavo Estephanelli, posso atender esse plano da
+// Bradesco, Efetivo IV. Quando o paciente colocar isso, já fale que apenas eu
+// posso atendê-lo, e apenas casos de ombro e cotovelo. Joelho também aceito."
+//
+// É diferente dos outros convênios daqui. Nos outros a pergunta é só "esse plano
+// vale?". Neste, valer não basta: o plano amarra O MÉDICO e A REGIÃO do corpo.
+// Um paciente do Efetivo IV com dor no pé não é caso de escolher outro médico —
+// nenhum outro atende este plano.
+//
+// DUAS DECISÕES DO DONO, tomadas em 31/08 quando perguntei:
+//   • joelho entra igual a ombro e cotovelo (ele atende);
+//   • queixa fora do escopo é RECUSADA na hora, não empurrada para a equipe.
+//
+// A recusa só dispara com a região CONFIRMADA. Queixa vaga ("dor", "consulta",
+// "machuquei") devolve "indefinida" e a Julia pergunta — recusar por chute
+// mandaria embora paciente que talvez fosse do ombro.
+
+export const EFETIVO_IV_MEDICO = { id: 20654, nome: "Luiz Gustavo Estephanelli" };
+
+// "Efetivo IV", "efetivo 4", "EFETIVO IV". Exige as duas partes: "efetivo"
+// sozinho não decide, e um "4" solto muito menos. Tolera o "Bradesco" ausente
+// porque o paciente costuma já ter dito o convênio na mensagem anterior — quem
+// confere o convênio é o chamador, com o contexto da conversa.
+export const EFETIVO_IV_RE = /\befetivo\s*(iv|4)\b/i;
+
+// ACENTO E \b NÃO SE MISTURAM. `\bpé\b` nunca casa "dor no pé": em JavaScript o
+// \b olha [A-Za-z0-9_], e "é" já não é caractere de palavra — não existe fronteira
+// depois dele. Um teste pegou isso na primeira rodada, com "pé" voltando
+// "indefinida" em vez de "recusa". A saída é tirar o acento ANTES de comparar e
+// escrever os padrões sem acento nenhum.
+function semAcento(s: string): string {
+  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+// Dele. Casa a palavra e as formas que o paciente usa de verdade.
+const REGIAO_DELE_RE = /\b(ombros?|cotovelos?|joelhos?|manguito|rotador|epicondilite|luxacao\s+do\s+ombro)\b/i;
+// De outro médico. Se a queixa é CLARAMENTE uma destas, o Efetivo IV não serve.
+const REGIAO_DE_OUTRO_RE = /\b(pes?|tornozelos?|coluna|lombar|cervical|hernia\s+de\s+disco|maos?|punhos?|dedos?|quadril|bacia|joanete|fascite|tunel\s+do\s+carpo)\b/i;
+
+export type VeredictoEfetivoIV =
+  | { plano: false }
+  | { plano: true; regiao: "aceita" | "recusa" | "indefinida"; medico: typeof EFETIVO_IV_MEDICO };
+
+/**
+ * O paciente está falando do Bradesco Efetivo IV, e a queixa cabe no escopo?
+ *
+ * `textoDoPaciente` — o que ELE escreveu (mensagem atual + contexto recente).
+ * `queixa`          — a queixa/subespecialidade que o classificador extraiu,
+ *                     quando houver; entra junto na leitura da região.
+ */
+export function avaliarEfetivoIV(textoDoPaciente: unknown, queixa?: unknown): VeredictoEfetivoIV {
+  const t = String(textoDoPaciente || "");
+  if (!EFETIVO_IV_RE.test(t)) return { plano: false };
+
+  const alvo = semAcento(`${t}\n${String(queixa || "")}`);
+  // Ombro/cotovelo/joelho VENCE: "dor no joelho e no pé" é caso dele, e mandar
+  // embora por causa do "pé" seria recusar um paciente que ele atende.
+  if (REGIAO_DELE_RE.test(alvo)) return { plano: true, regiao: "aceita", medico: EFETIVO_IV_MEDICO };
+  if (REGIAO_DE_OUTRO_RE.test(alvo)) return { plano: true, regiao: "recusa", medico: EFETIVO_IV_MEDICO };
+  return { plano: true, regiao: "indefinida", medico: EFETIVO_IV_MEDICO };
+}
+
+/** O que a Julia responde quando reconhece o Efetivo IV. */
+export function textoEfetivoIV(v: Extract<VeredictoEfetivoIV, { plano: true }>): string {
+  if (v.regiao === "recusa") {
+    return (
+      `Sobre o Bradesco Efetivo IV: aqui na clínica esse plano é atendido apenas pelo ` +
+      `*Dr. ${v.medico.nome}*, que cuida de ombro, cotovelo e joelho. 🙏 ` +
+      `Como a sua queixa é de outra área, não consigo agendar por esse plano. ` +
+      `Se quiser, posso verificar outra forma de atendimento pra você.`
+    );
+  }
+  if (v.regiao === "indefinida") {
+    return (
+      `Sobre o Bradesco Efetivo IV: esse plano é atendido apenas pelo *Dr. ${v.medico.nome}*, ` +
+      `que cuida de ombro, cotovelo e joelho. 🙏 Pra eu confirmar se consigo agendar, ` +
+      `me conta qual é a região que está te incomodando?`
+    );
+  }
+  return (
+    `Pelo Bradesco Efetivo IV o atendimento é com o *Dr. ${v.medico.nome}* — ` +
+    `é ele quem atende esse plano aqui na clínica. 😊 Vou verificar a agenda dele pra você.`
+  );
+}
