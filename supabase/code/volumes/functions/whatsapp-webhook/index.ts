@@ -64,6 +64,7 @@ import {
   validateBookingDate,
   isDuplicateReply,
   nearDuplicate,
+  respostaFoiFalha,
 } from "./guards.ts";
 import {
   readPatientInsurance,
@@ -11807,13 +11808,38 @@ Deno.serve(async (req) => {
         const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
         const { data: unknownRows } = await supabase
           .from("webhook_messages")
-          .select("id, created_at")
+          .select("id, created_at, message_text")
           .eq("conversation_id", conversationId)
           .eq("direction", "outgoing")
           .in("ai_intent", ["unknown", "unknown_intent"])
           .gte("created_at", tenMinAgo);
 
-        let unknownCount = (unknownRows || []).length;
+        // ── SÓ FALHA DE VERDADE VIRA COMBUSTÍVEL (01/09) ──────────────────────
+        // O classificador rotula 'unknown' tanto o que não entendeu quanto a
+        // resposta contextual perfeita. Medido: 5 disparos em 7 dias, 5 falsos.
+        // No caso Yvo (31/08 15:40–15:44) as CINCO respostas antes do disparo
+        // eram boas ("Entendo perfeitamente, Yvo! Uma pena não termos encaixe
+        // para amanhã...") — e o disjuntor engoliu o pedido seguinte, que era
+        // entrada na lista de espera.
+        const _todasUnknown = (unknownRows || []) as Array<{ message_text?: string }>;
+        const _falhasReais = _todasUnknown.filter((r) => respostaFoiFalha(r.message_text));
+
+        // TETO DURO, sem filtro nenhum: o filtro acima é o certo para conversa de
+        // gente, mas um loop robô-a-robô com respostas contextuais passaria por
+        // ele. O caso Alessandra (176 mensagens) não é mais verificável em dados
+        // — a retenção é de 7 dias — então a trava entra desde o primeiro dia.
+        const TETO_DURO_UNKNOWN = 8;
+        if (_todasUnknown.length >= TETO_DURO_UNKNOWN) {
+          console.log(`[Webhook] ⛔ CIRCUIT BREAKER (teto duro): ${_todasUnknown.length} unknowns em 10min — dispara sem filtro`);
+        } else if (_todasUnknown.length !== _falhasReais.length) {
+          console.log(
+            `[Webhook] CIRCUIT BREAKER: ${_todasUnknown.length} unknowns, mas só ${_falhasReais.length} foram falha de verdade — o resto foi resposta boa mal rotulada`,
+          );
+        }
+
+        let unknownCount = _todasUnknown.length >= TETO_DURO_UNKNOWN
+          ? _todasUnknown.length
+          : _falhasReais.length;
         if (unknownCount >= 3 && clinicTokenId && phone) {
           // Was there a slot_lock active for this phone in the 5min before each unknown?
           // If yes for any of them, subtract — booking-flow confusion shouldn't trip breaker.
@@ -14492,6 +14518,39 @@ Deno.serve(async (req) => {
         ehNegativaDeHorario(String(actionResult.error || "") + " " + String(actionResult.response || ""))
       ) {
         try {
+          // ── QUEM ESTÁ PEDINDO MAIS DATAS NÃO É QUEM DESISTIU (01/09) ──────────
+          // A Regra 7 conta o RESULTADO ("sem horários"), não a atitude do paciente
+          // — então ela punia exatamente quem continuava colaborando. As frases que
+          // levaram "vou te passar pra uma colega" na cara, medidas em 7 dias:
+          //   30/08 09:55  "Me fala as datas disponíveis para o Lucas"
+          //   31/08 07:43  "Sim, qual a proxima data q ele tem horario?"
+          //   01/09 09:07  "Pra frente"
+          // Pedir mais opções é tentativa nova, não recusa. Não conta.
+          if (pedeQualquerData(finalMessage)) {
+            console.log(`[Regra7] paciente está PEDINDO mais datas — tentativa nova, não conta como negativa`);
+            throw { _regra7Pula: true };
+          }
+
+          // ── UMA ESCALADA POR VEZ (01/09) ──────────────────────────────────────
+          // Depois de escalar, a linha vira 'empty_slots_escalated' e sai da
+          // contagem — mas as OUTRAS negativas continuam na janela de 45min. A
+          // mensagem seguinte recontava as mesmas duas e transferia de novo.
+          // Medido: 6fe70127 disparou 11:48:03 e 11:48:21; 3fec5a58 às 15:42:19 e
+          // 15:42:52; 110f4c7d TRÊS vezes em 01/09 (09:07, 09:10, 09:15) — e a
+          // última foi com o paciente dizendo só "Ok". Cada disparo mandava a
+          // mensagem de transferência e chamava o transferTicketToHuman de novo.
+          const _since15 = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+          const { count: _jaEscalou } = await supabase
+            .from("webhook_messages")
+            .select("id", { count: "exact", head: true })
+            .eq("conversation_id", conversationId)
+            .eq("action_status", "empty_slots_escalated")
+            .gte("created_at", _since15);
+          if ((_jaEscalou || 0) > 0) {
+            console.log(`[Regra7] esta conversa já foi escalada há menos de 15min — não transfiro de novo`);
+            throw { _regra7Pula: true };
+          }
+
           const _since45 = new Date(Date.now() - 45 * 60 * 1000).toISOString();
           const { data: _emptyRows } = await supabase
             .from("webhook_messages")
@@ -14539,7 +14598,11 @@ Deno.serve(async (req) => {
             );
           }
         } catch (e) {
-          console.log(`[Regra7] empty-slots counter error (non-blocking): ${(e as Error).message}`);
+          // O `throw { _regra7Pula: true }` acima é desvio de fluxo, não falha:
+          // sai do bloco sem transferir e sem poluir o log de erro.
+          if (!(e as { _regra7Pula?: boolean })?._regra7Pula) {
+            console.log(`[Regra7] empty-slots counter error (non-blocking): ${(e as Error).message}`);
+          }
         }
       }
 

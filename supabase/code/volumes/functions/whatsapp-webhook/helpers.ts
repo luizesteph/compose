@@ -430,7 +430,18 @@ export function pedeQualquerData(texto: unknown): boolean {
     /\bqualquer\s+(dia|data|hor[a]?rio)\b/.test(t) ||
     /\b(ve|veja|vejo|mostra|me\s+passa|quais|que)\b[\s\S]{0,25}\b(datas?|dias?|hor[a]?rios?)\s+(disponive|livre|que\s+tem|dispon)/.test(t) ||
     /\bo\s+(mais\s+)?(rapido|proximo|cedo)\b/.test(t) ||
-    /\bprimeira\s+(data|vaga)\b/.test(t)
+    /\bprimeira\s+(data|vaga)\b/.test(t) ||
+    // 01/09: as frases reais que a Regra 7 estava punindo. O paciente pedindo
+    // MAIS datas é o contrário de paciente desistindo — era ele que levava
+    // "vou te passar pra uma colega" na cara.
+    //   30/08 09:55  "Me fala as datas disponíveis para o Lucas"
+    //   31/08 07:43  "Sim, qual a proxima data q ele tem horario?"
+    //   01/09 09:07  "Pra frente"
+    /\b(me\s+)?fal[ae]\b[\s\S]{0,20}\b(datas?|dias?|hor[a]?rios?)\b/.test(t) ||
+    /\bqual\s+(e\s+)?(a\s+)?proxima\s+(data|vaga|hor[a]?rio)\b/.test(t) ||
+    /\bquando\s+(ele|ela|o\s+dr|a\s+dra)\b[\s\S]{0,20}\btem\b/.test(t) ||
+    /\bpra\s+frente\b/.test(t) ||
+    /\bmais\s+(datas?|dias?|opcoes|horarios?)\b/.test(t)
   );
 }
 

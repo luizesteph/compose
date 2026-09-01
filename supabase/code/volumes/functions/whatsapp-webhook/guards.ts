@@ -486,3 +486,48 @@ export function validateBookingDate(
 // _shared/atendimento.ts quando o cron human-transfer-timeout passou a precisar
 // das mesmas funções. Re-exportadas para não quebrar quem já importava daqui.
 export { exigeRespostaDaAtendente, prazoDeRespostaEmMinutos } from "../_shared/atendimento.ts";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMBUSTÍVEL DO DISJUNTOR: só conta o que foi FALHA DE VERDADE (auditoria 01/09)
+// ─────────────────────────────────────────────────────────────────────────────
+// O disjuntor #1 conta toda saída rotulada 'unknown' (3 em 10min → transfere).
+// Mas o classificador rotula 'unknown' tanto o que ele não entendeu quanto a
+// resposta contextual perfeita a uma pergunta que a própria Julia fez. Resultado
+// medido: 5 disparos em 7 dias, 5 falsos positivos.
+//
+// O caso Yvo (31/08), linha por linha — as cinco respostas antes do disparo:
+//   15:40  "Boa tarde, Yvo! 👋 Eu sou a Julia..."
+//   15:41  "Aqui na CBT Ortopedia somos uma clínica especializada..."
+//   15:42  "De nada! Se precisar de qualquer suporte..."
+//   15:43  "Entendo perfeitamente, Yvo! Uma pena não termos encaixe para amanhã..."
+//   15:44  "Por nada, Yvo! Se precisar de algo, estamos por aqui."
+//   15:44  DISPAROU — e engoliu "Se houver desistência amanhã, me chame, quem sabe?"
+// Cinco respostas boas viraram combustível, e o pedido de lista de espera morreu.
+//
+// A separação é o TEXTO que saiu: se a Julia respondeu de verdade, não houve
+// falha para acumular. Só conta quando ela disse, de uma forma ou de outra, que
+// não conseguiu ajudar.
+//
+// A mensagem do PRÓPRIO disjuntor entra na lista de propósito: ela é persistida
+// como 'unknown' para manter o contador armado e evitar o dente-de-serra do caso
+// Alessandra (176 mensagens). Tirá-la daqui desarmaria essa trava em silêncio.
+const FALHA_DE_VERDADE_RE = [
+  /dificuldade\s+pra\s+te\s+ajudar/i,        // a mensagem do próprio disjuntor
+  /dificuldade\s+t[ée]cnica/i,               // FALLBACK do sanitizeReply e do helpers
+  /n[ãa]o\s+(consegui|entendi)\s+(entender|te\s+ajudar|o\s+que)/i,
+  /pode\s+repetir\s+(por\s+favor|de\s+outro\s+jeito)/i,
+  /n[ãa]o\s+tenho\s+essa\s+informa[çc][ãa]o/i,
+];
+
+/**
+ * Esta resposta da Julia é uma FALHA (combustível do disjuntor) ou foi uma
+ * resposta de verdade que só ficou mal rotulada?
+ *
+ * `true`  → a Julia disse que não conseguiu ajudar. Conta.
+ * `false` → respondeu com conteúdo. Não conta, por mais que o rótulo diga unknown.
+ */
+export function respostaFoiFalha(texto: unknown): boolean {
+  const t = String(texto || "");
+  if (!t.trim()) return true; // saída vazia é falha, e das piores
+  return FALHA_DE_VERDADE_RE.some((re) => re.test(t));
+}
