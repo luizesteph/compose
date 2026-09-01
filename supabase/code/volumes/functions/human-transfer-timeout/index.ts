@@ -399,6 +399,193 @@ async function devolverInativosAFila(
   return out;
 }
 
+// Envio ao paciente, no MESMO contrato que a Fase 1 usa e que funciona:
+// externalKey (dedup do lado do Z-PRO) + isClosed + o canal certo. Omitir
+// qualquer um deles deixa o comportamento do ticket indefinido.
+async function sendWhats(
+  creds: { baseUrl: string; apiId: string; bearerToken: string; channelId?: string | null },
+  phone: string,
+  msg: string,
+): Promise<{ ok: boolean; detail: string }> {
+  try {
+    const limpo = String(phone || "").replace(/\D/g, "");
+    if (!limpo) return { ok: false, detail: "telefone vazio" };
+    const full = limpo.length <= 11 ? `55${limpo}` : limpo;
+    const payload: Record<string, unknown> = {
+      number: full, body: msg, externalKey: crypto.randomUUID(), isClosed: false,
+    };
+    if (creds.channelId) {
+      payload.channelId = Number(creds.channelId);
+      payload.whatsappId = Number(creds.channelId);
+    }
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 10000);
+    const res = await fetch(`${creds.baseUrl}/v2/api/external/${creds.apiId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${creds.bearerToken}` },
+      body: JSON.stringify(payload),
+      signal: ctrl.signal,
+    }).finally(() => clearTimeout(t));
+    return { ok: res.ok, detail: res.ok ? "" : `HTTP ${res.status}: ${(await res.text()).slice(0, 120)}` };
+  } catch (e) {
+    return { ok: false, detail: `exceção: ${(e as Error).message.slice(0, 120)}` };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FASE 3 — A MENSAGEM ENGOLIDA NÃO MORRE MAIS EM SILÊNCIO (auditoria 01/09)
+// ─────────────────────────────────────────────────────────────────────────────
+// O guard "Humano ativo" existe por um bom motivo: enquanto uma atendente está no
+// ticket, a Julia cala a boca e não responde por cima dela. O problema nunca foi
+// calar — foi que ninguém NUNCA reprocessa o que ficou calado. Se a atendente não
+// vir o card, aquela mensagem morre ali, para sempre.
+//
+// Medido em 7 dias no banco de produção:
+//   1191 mensagens engolidas pelo guard, em 278 conversas
+//    178 nunca receberam NENHUMA resposta
+//     68 dessas eram substantivas — ~10 por dia que somem
+//
+// E entre elas, o que mais dói:
+//   26/08 17:17  Rapha    "Desculpe, vou ter que cancelar a consulta"   sem resposta
+//   28/08 07:39  Andreia  "imprevisto e não poderei fazer a infiltração" (era às 8h20
+//                          do MESMO dia) — sem resposta, no-show certo
+//   28/08 11:22  Juliana  "Não poderei ir obrigada"                     sem resposta
+// A consulta segue de pé no Amigo, o horário não volta para a lista de espera, e
+// o paciente fica achando que avisou.
+//
+// O QUE ESTA FASE FAZ — E O QUE ELA NÃO FAZ.
+// Ela NÃO reinjeta a mensagem na IA. A auditoria estudou isso e o risco é real: o
+// ticket está genuinamente aberto com dona no Z-PRO, e responder por cima seria
+// desfazer a única regra que nunca falhou aqui (zero casos de IA atropelando
+// humano em 7 dias). Ela apenas TORNA VISÍVEL: grava a linha na aba Transferências
+// para a recepção enxergar. Quem responde continua sendo gente.
+//
+// A exceção é o pedido de cancelar/remarcar, e só ele: aí o paciente recebe UMA
+// confirmação de recebimento, com texto neutro que não afirma cancelamento (metade
+// dos casos é remarcação, e "não poderei chegar antes das 15h" também casa a
+// palavra). A Julia NUNCA cancela sozinha no Amigo — quem efetiva é a equipe,
+// lendo o texto original.
+const JANELA_ENGOLIDAS_DIAS = 3;
+const IDADE_MINIMA_MIN = 45;      // menos que isso, a atendente ainda pode estar digitando
+const TETO_SINALIZAR = 10;        // por rodada; o cron roda de 2 em 2 min
+const TETO_AVISAR = 3;            // mensagens ao paciente por rodada — teto apertado de propósito
+const SILENCIO_INICIO = 20;       // 20h–7h (SP): sem mensagem ao paciente. A sinalização
+const SILENCIO_FIM = 7;           // interna roda sempre — a equipe vê de manhã.
+
+// Pedido de desmarcar/remarcar. Deliberadamente largo: falso positivo aqui custa uma
+// linha a mais na aba e uma mensagem neutra; falso negativo custa um no-show.
+const PEDIDO_DE_DESMARCAR_RE =
+  /\b(cancelar|cancelamento|desmarcar|remarcar|reagendar|n[ãa]o\s+(vou\s+)?poder|n[ãa]o\s+consigo\s+ir|n[ãa]o\s+poderei|imprevisto)\b/i;
+
+// Marcas idempotentes gravadas no proprio action_error. Sem coluna nova, e a
+// consulta que busca engolidas ja filtra por elas — rodar duas vezes nao duplica.
+const MARCA_SINALIZADA = "| sinalizada";
+const MARCA_AVISADA = "| paciente avisado";
+
+async function varrerEngolidas(
+  supabase: any,
+  clinicTokenId: string,
+  creds: { baseUrl: string; apiId: string; bearerToken: string; channelId?: string | null },
+): Promise<{ achadas: number; sinalizadas: number; avisadas: number; pulos: Record<string, number> }> {
+  const out = { achadas: 0, sinalizadas: 0, avisadas: 0, pulos: {} as Record<string, number> };
+  const pulou = (m: string) => { out.pulos[m] = (out.pulos[m] || 0) + 1; };
+
+  const desde = new Date(Date.now() - JANELA_ENGOLIDAS_DIAS * 24 * 60 * 60 * 1000).toISOString();
+  const ate = new Date(Date.now() - IDADE_MINIMA_MIN * 60 * 1000).toISOString();
+
+  const { data: engolidas } = await supabase
+    .from("webhook_messages")
+    .select("id, conversation_id, sender_phone, sender_name, message_text, created_at, action_error, raw_payload")
+    .eq("clinic_token_id", clinicTokenId)
+    .eq("direction", "incoming")
+    .ilike("action_error", "Humano ativo%")
+    .gte("created_at", desde)
+    .lte("created_at", ate)
+    .order("created_at", { ascending: true })
+    .limit(120);
+
+  const horaSP = Number(
+    new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", hour12: false })
+      .format(new Date()),
+  );
+  const emSilencio = horaSP >= SILENCIO_INICIO || horaSP < SILENCIO_FIM;
+
+  for (const m of (engolidas || []) as any[]) {
+    const jaSinalizada = String(m.action_error || "").includes(MARCA_SINALIZADA);
+    const jaAvisada = String(m.action_error || "").includes(MARCA_AVISADA);
+    if (jaSinalizada && jaAvisada) continue;
+
+    // Alguém falou com o paciente DEPOIS? Então não morreu — a atendente viu o card.
+    const { count: _respostas } = await supabase
+      .from("webhook_messages")
+      .select("id", { count: "exact", head: true })
+      .eq("conversation_id", m.conversation_id)
+      .eq("direction", "outgoing")
+      .gt("created_at", m.created_at);
+    if ((_respostas || 0) > 0) { pulou("respondida_depois"); continue; }
+
+    // "ok", "obrigada", documento sem texto: não é pergunta, não vira alerta. É o
+    // mesmo helper que a Fase 2 usa — uma regra só para as duas.
+    const temMidia = !!(m.raw_payload?.mediaUrl || m.raw_payload?.mediaType);
+    if (!exigeRespostaDaAtendente(m.message_text, temMidia)) { pulou("nao_exige_resposta"); continue; }
+
+    out.achadas++;
+    const ehDesmarcar = PEDIDO_DE_DESMARCAR_RE.test(String(m.message_text || ""));
+    const esperaMin = Math.round((Date.now() - new Date(m.created_at).getTime()) / 60000);
+
+    // ── 1. Sinalizar (sempre; roda inclusive de madrugada) ────────────────────
+    if (!jaSinalizada) {
+      if (out.sinalizadas >= TETO_SINALIZAR) { pulou("teto_sinalizar"); continue; }
+      await supabase.from("transfer_audit").insert({
+        clinic_token_id: clinicTokenId,
+        conversation_id: m.conversation_id,
+        phone: m.sender_phone,
+        patient_name: m.sender_name || null,
+        from_attendant: null,
+        to_attendant: null,
+        initiated_by: "sistema",
+        trigger: ehDesmarcar ? "cancelamento_engolido" : "mensagem_engolida",
+        reason: "guard_humano_ativo",
+        detail:
+          (ehDesmarcar ? "PEDIDO DE DESMARCAR/REMARCAR " : "Mensagem ") +
+          `sem resposta há ${esperaMin}min: "${String(m.message_text || "").replace(/\s+/g, " ").slice(0, 90)}"`,
+      } as any).then(() => {}, () => {});
+      await supabase.from("webhook_messages")
+        .update({ action_error: `${String(m.action_error || "")} ${MARCA_SINALIZADA}`.slice(0, 480) })
+        .eq("id", m.id);
+      out.sinalizadas++;
+      console.log(`[engolidas] ${ehDesmarcar ? "🔴 DESMARCAR" : "⚠️"} ${String(m.sender_phone).slice(-4)} há ${esperaMin}min — sinalizado na aba`);
+    }
+
+    // ── 2. Avisar o paciente — SÓ pedido de desmarcar, e só fora do silêncio ──
+    // O resto não recebe nada: seria a Julia falando por cima de uma atendente que
+    // está no ticket, e mensagem automática a mais foi o incidente de 28/07.
+    if (ehDesmarcar && !jaAvisada) {
+      if (emSilencio) { pulou("silencio_noturno"); continue; }
+      if (out.avisadas >= TETO_AVISAR) { pulou("teto_avisar"); continue; }
+      const primeiro = String(m.sender_name || "").trim().split(/\s+/)[0];
+      // Texto NEUTRO de propósito: metade dos casos é remarcação, não cancelamento,
+      // e "não poderei chegar antes das 15h" também casa a palavra. Confirmar
+      // recebimento sem afirmar o que vai acontecer é o único texto sempre verdadeiro.
+      const msg =
+        `${primeiro ? `${primeiro}, ` : ""}recebi a sua mensagem sobre a consulta e já passei para a nossa equipe. 🙏 ` +
+        `Alguém te responde para confirmar — se for urgente, é só chamar por aqui.`;
+      const env = await sendWhats(creds, String(m.sender_phone || ""), msg);
+      if (env.ok) {
+        await supabase.from("webhook_messages")
+          .update({ action_error: `${String(m.action_error || "")} ${MARCA_SINALIZADA} ${MARCA_AVISADA}`.slice(0, 480) })
+          .eq("id", m.id);
+        out.avisadas++;
+        console.log(`[engolidas] ✉️ confirmação de recebimento enviada para ...${String(m.sender_phone).slice(-4)}`);
+      } else {
+        console.log(`[engolidas] envio falhou (${env.detail}) — fica para a próxima rodada`);
+        pulou("envio_falhou");
+      }
+    }
+  }
+  return out;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
@@ -687,6 +874,26 @@ Deno.serve(async (req) => {
             if (r.detalhes.length) console.log(`[devolver-fila] ${r.detalhes.join(" | ")}`);
           } catch (e) {
             console.error(`[devolver-fila] clinica ${cl.id}: ${(e as Error).message}`);
+          }
+
+          // ── FASE 3: mensagem engolida pelo guard não morre em silêncio ────────
+          // Mesmo canal já resolvido acima. Roda depois da devolução de propósito:
+          // se a Fase 2 acabou de devolver o ticket, a conversa volta a ser da fila
+          // e a mensagem engolida deixa de precisar de alerta na próxima rodada.
+          try {
+            const e3 = await varrerEngolidas(
+              supabase, cl.id,
+              { baseUrl: cBase, apiId: cApi, bearerToken: cBearer, channelId: cChannel },
+            );
+            (summary as any).engolidas_achadas = ((summary as any).engolidas_achadas || 0) + e3.achadas;
+            (summary as any).engolidas_sinalizadas = ((summary as any).engolidas_sinalizadas || 0) + e3.sinalizadas;
+            (summary as any).engolidas_avisadas = ((summary as any).engolidas_avisadas || 0) + e3.avisadas;
+            const p3 = Object.entries(e3.pulos).map(([k, v]) => `${k}=${v}`).join(",") || "nenhum";
+            console.log(
+              `[engolidas] clinica=${cl.id} achadas=${e3.achadas} sinalizadas=${e3.sinalizadas} avisadas=${e3.avisadas} pulos: ${p3}`,
+            );
+          } catch (e) {
+            console.error(`[engolidas] clinica ${cl.id}: ${(e as Error).message}`);
           }
         }
       }
