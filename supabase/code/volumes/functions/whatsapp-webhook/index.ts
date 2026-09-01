@@ -6953,6 +6953,40 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           else if (offSecond && offSecond.status >= 200 && offSecond.status < 300) reschedFinal = offSecond;
         }
         if (reschedFinal.status >= 200 && reschedFinal.status < 300) {
+          // ── DUAS PESSOAS, UM "PRONTINHO" (caso Gabriella e Eduardo, 31/08) ──────
+          // 12:53 "teria como reagendar as consultas do Eduardo e minha pra semana
+          //        que vem?"
+          // 13:13 "293.687.918-30 Gabriella Ferretti / 281.299.598-01 Eduardo Xavier"
+          // 13:20 "14:20, 14:40"                          <- DOIS horários
+          // 13:21 "Prontinho! A consulta foi reagendada com sucesso para o dia
+          //        08/09 às 14:20"                        <- SINGULAR
+          //
+          // `entities.cpf` e `entities.attendance_id` são strings ÚNICAS: o segundo
+          // CPF entrou na conversa e sumiu. Só a consulta da Gabriella andou. Medido
+          // ao vivo em 31/08 às 22h, com a família achando que as duas tinham
+          // mudado: Gabriella 08/09 14:20, Eduardo AINDA em 02/09 08:40.
+          //
+          // Remarcar as duas de uma vez é mudança grande e arriscada. Parar de
+          // MENTIR é pequeno e resolve o dano: quando a conversa mostra mais de um
+          // CPF e só um atendimento andou, a Julia diz quem foi e quem não foi, e
+          // chama gente. Falhar alto em vez de falhar baixo.
+          const _cpfsNaConversa = new Set<string>();
+          for (const _t of [String(currentMessageText || ""), ...(recentMessages || []).map((m: any) => String(m?.content || ""))]) {
+            for (const _m of _t.matchAll(/\d{3}\.?\d{3}\.?\d{3}-?\d{2}/g)) {
+              const _d = _m[0].replace(/\D/g, "");
+              if (isValidCpf(_d)) _cpfsNaConversa.add(_d);
+            }
+          }
+          if (_cpfsNaConversa.size > 1) {
+            const _quemAndou = String(entities.patient_full_name || "").trim();
+            const _aviso =
+              `Remarquei${_quemAndou ? ` a consulta de *${_quemAndou}*` : ""} para ` +
+              `${entities.date}${entities.time ? " às " + entities.time : ""}. ✅\n\n` +
+              `Como você pediu para mais de uma pessoa, a outra consulta ainda está na data original — ` +
+              `não quero deixar você achando que mudou. 🙏 Já estou chamando uma atendente pra concluir essa aqui.`;
+            console.log(`[Webhook] reagendar - ${_cpfsNaConversa.size} CPFs na conversa e só 1 atendimento remarcado — NÃO vou dizer "prontinho"`);
+            return { status: "needs_info", response: _aviso, error: _aviso, bypassAiRewrite: true } as any;
+          }
           return {
             status: "success",
             response: `Agendamento ${attId} reagendado para ${entities.date}${entities.time ? " às " + entities.time : ""} ✅`,

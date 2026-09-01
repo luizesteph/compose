@@ -364,7 +364,17 @@ export const EFETIVO_IV_MEDICO = { id: 20654, nome: "Luiz Gustavo Estephanelli" 
 // sozinho não decide, e um "4" solto muito menos. Tolera o "Bradesco" ausente
 // porque o paciente costuma já ter dito o convênio na mensagem anterior — quem
 // confere o convênio é o chamador, com o contexto da conversa.
-export const EFETIVO_IV_RE = /\befetivo\s*(iv|4)\b/i;
+//
+// O "I" ROMANO QUASE NUNCA É UM I (31/08). A primeira versão aceitava só `iv|4`
+// e não pegava a ÚNICA ocorrência real de "efetivo" em todo o histórico:
+//
+//   29/08 11:55  "Efetivo lV"   hex 4566657469766f206c56   0x6c = 'l' minúsculo
+//
+// No teclado do celular o l, o I e o 1 são o mesmo traço, e o próprio dono
+// escreveu "Efetivo lV" quando me passou a regra. Era 1 de 1 dos casos
+// observados escapando. Aceitar as três grafias não custa nada: nenhum outro
+// plano da clínica tem "efetivo" no nome, e a palavra precisa estar grudada.
+export const EFETIVO_IV_RE = /\befetivo\s*([il1]\s*v|4)\b/i;
 
 // ACENTO E \b NÃO SE MISTURAM. `\bpé\b` nunca casa "dor no pé": em JavaScript o
 // \b olha [A-Za-z0-9_], e "é" já não é caractere de palavra — não existe fronteira
