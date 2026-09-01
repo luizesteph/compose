@@ -5,6 +5,8 @@ import {
   firstName,
   stripAccents,
   getWeekday,
+  mensagemFalaDeDia,
+  diaDaSemanaPedido,
   formatDateLabel,
   buildColdOpenGreeting,
   buildLateHandoffMessage,
@@ -6771,23 +6773,43 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
 
               // 4) Determine candidate dates
               const todayStr = getTodayISO_SP();
+              const _todasAsDatas = [...slotsMap.keys()].filter((d) => d >= todayStr).sort();
+
+              // QUEM MANDA É O TURNO ATUAL, NÃO A ENTIDADE HERDADA (01/09).
+              // `entities.date` vem preenchido com a data da consulta ENCONTRADA — o
+              // classificador copia "sua consulta é 31/08" para lá. Usar isso como
+              // filtro fazia "tem quarta?" virar "quartas dentro de 31/08" (uma
+              // segunda-feira) e devolver negativa numa agenda cheia. Cada negativa
+              // dessas alimenta a Regra 7, que transfere para humano.
+              //
+              // Ordem de precedência, da mais específica para a mais genérica:
+              //   1. dia da semana dito AGORA  -> varre o calendário inteiro nesse dia
+              //   2. dia dito AGORA ("hoje", "dia 12") -> respeita a data, mesmo que
+              //      ela coincida com a da consulta velha (remarcar para hoje mais
+              //      tarde é pedido legítimo — caso Alvaro, 31/08 14:47)
+              //   3. nada dito sobre dia -> calendário inteiro, sem estreitar
+              const _weekdayMap: Record<string, number> = {
+                domingo: 0, segunda: 1, terca: 2, terça: 2,
+                quarta: 3, quinta: 4, sexta: 5, sabado: 6, sábado: 6,
+              };
+              const _diaPedido =
+                diaDaSemanaPedido(currentMessageText) ??
+                (entities.preferred_weekday ? _weekdayMap[entities.preferred_weekday.toLowerCase()] : undefined) ??
+                null;
+              const _falouDeDia = mensagemFalaDeDia(currentMessageText);
+
               let candidateDates: string[] = [];
-              if (entities.date) {
+              if (_diaPedido !== null && _diaPedido !== undefined) {
+                candidateDates = _todasAsDatas.filter((d) => getWeekday(d) === _diaPedido);
+                console.log(`[Webhook] reagendar - dia da semana pedido AGORA (${_diaPedido}) vence data herdada — ${candidateDates.length} data(s)`);
+              } else if (entities.date && _falouDeDia) {
                 const iso = normalizeDateToISO(entities.date) || entities.date;
                 if (iso) candidateDates = [iso];
               } else {
-                candidateDates = [...slotsMap.keys()].filter((d) => d >= todayStr).sort();
-                // Apply weekday filter
-                if (entities.preferred_weekday) {
-                  const weekdayMap: Record<string, number> = {
-                    domingo: 0, segunda: 1, terca: 2, terça: 2,
-                    quarta: 3, quinta: 4, sexta: 5, sabado: 6, sábado: 6,
-                  };
-                  const targetDay = weekdayMap[entities.preferred_weekday.toLowerCase()];
-                  if (targetDay !== undefined) {
-                    candidateDates = candidateDates.filter((d) => getWeekday(d) === targetDay);
-                  }
+                if (entities.date) {
+                  console.log(`[Webhook] reagendar - entities.date="${entities.date}" veio do contexto (o paciente não falou de dia agora) — varrendo o calendário inteiro`);
                 }
+                candidateDates = _todasAsDatas;
               }
 
               // 5) Apply period filter and weekend block

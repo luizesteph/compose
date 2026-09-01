@@ -481,6 +481,9 @@ const PEDIDO_DE_DESMARCAR_RE =
 // consulta que busca engolidas ja filtra por elas — rodar duas vezes nao duplica.
 const MARCA_SINALIZADA = "| sinalizada";
 const MARCA_AVISADA = "| paciente avisado";
+// Terceira marca: alguém respondeu ao paciente, o caso morreu sozinho e não
+// precisa mais ser olhado. É ela que impede a fila de trabalho de crescer sem fim.
+const MARCA_RESOLVIDA = "| resolvida";
 
 async function varrerEngolidas(
   supabase: any,
@@ -493,12 +496,18 @@ async function varrerEngolidas(
   const desde = new Date(Date.now() - JANELA_ENGOLIDAS_DIAS * 24 * 60 * 60 * 1000).toISOString();
   const ate = new Date(Date.now() - IDADE_MINIMA_MIN * 60 * 1000).toISOString();
 
+  // As já tratadas saem do bolo NA CONSULTA, não no laço. Na primeira rodada em
+  // produção, 114 das 120 buscadas eram mensagens que JÁ tinham sido respondidas
+  // pela atendente — e, sem essa marca, elas voltariam a consumir o orçamento de
+  // 120 em toda rodada, para sempre, empurrando as recentes (que são as que
+  // importam) para fora da janela.
   const { data: engolidas } = await supabase
     .from("webhook_messages")
     .select("id, conversation_id, sender_phone, sender_name, message_text, created_at, action_error, raw_payload")
     .eq("clinic_token_id", clinicTokenId)
     .eq("direction", "incoming")
     .ilike("action_error", "Humano ativo%")
+    .not("action_error", "ilike", `%${MARCA_RESOLVIDA}%`)
     .gte("created_at", desde)
     .lte("created_at", ate)
     .order("created_at", { ascending: true })
@@ -513,24 +522,33 @@ async function varrerEngolidas(
   for (const m of (engolidas || []) as any[]) {
     const jaSinalizada = String(m.action_error || "").includes(MARCA_SINALIZADA);
     const jaAvisada = String(m.action_error || "").includes(MARCA_AVISADA);
-    if (jaSinalizada && jaAvisada) continue;
+    const ehDesmarcar = PEDIDO_DE_DESMARCAR_RE.test(String(m.message_text || ""));
+    // Já fiz tudo o que havia para fazer com esta: sai do caminho sem gastar query.
+    if (jaSinalizada && (!ehDesmarcar || jaAvisada)) continue;
+
+    const marcar = async (marca: string) => {
+      await supabase.from("webhook_messages")
+        .update({ action_error: `${String(m.action_error || "")} ${marca}`.slice(0, 480) })
+        .eq("id", m.id);
+    };
 
     // Alguém falou com o paciente DEPOIS? Então não morreu — a atendente viu o card.
+    // Marca como resolvida para não reavaliar este caso em toda rodada.
     const { count: _respostas } = await supabase
       .from("webhook_messages")
       .select("id", { count: "exact", head: true })
       .eq("conversation_id", m.conversation_id)
       .eq("direction", "outgoing")
       .gt("created_at", m.created_at);
-    if ((_respostas || 0) > 0) { pulou("respondida_depois"); continue; }
+    if ((_respostas || 0) > 0) { await marcar(MARCA_RESOLVIDA); pulou("respondida_depois"); continue; }
 
     // "ok", "obrigada", documento sem texto: não é pergunta, não vira alerta. É o
-    // mesmo helper que a Fase 2 usa — uma regra só para as duas.
+    // mesmo helper que a Fase 2 usa — uma regra só para as duas. Também sai do bolo:
+    // "obrigada" não vira pergunta com o tempo.
     const temMidia = !!(m.raw_payload?.mediaUrl || m.raw_payload?.mediaType);
-    if (!exigeRespostaDaAtendente(m.message_text, temMidia)) { pulou("nao_exige_resposta"); continue; }
+    if (!exigeRespostaDaAtendente(m.message_text, temMidia)) { await marcar(MARCA_RESOLVIDA); pulou("nao_exige_resposta"); continue; }
 
     out.achadas++;
-    const ehDesmarcar = PEDIDO_DE_DESMARCAR_RE.test(String(m.message_text || ""));
     const esperaMin = Math.round((Date.now() - new Date(m.created_at).getTime()) / 60000);
 
     // ── 1. Sinalizar (sempre; roda inclusive de madrugada) ────────────────────
@@ -550,9 +568,7 @@ async function varrerEngolidas(
           (ehDesmarcar ? "PEDIDO DE DESMARCAR/REMARCAR " : "Mensagem ") +
           `sem resposta há ${esperaMin}min: "${String(m.message_text || "").replace(/\s+/g, " ").slice(0, 90)}"`,
       } as any).then(() => {}, () => {});
-      await supabase.from("webhook_messages")
-        .update({ action_error: `${String(m.action_error || "")} ${MARCA_SINALIZADA}`.slice(0, 480) })
-        .eq("id", m.id);
+      await marcar(MARCA_SINALIZADA);
       out.sinalizadas++;
       console.log(`[engolidas] ${ehDesmarcar ? "🔴 DESMARCAR" : "⚠️"} ${String(m.sender_phone).slice(-4)} há ${esperaMin}min — sinalizado na aba`);
     }
@@ -572,9 +588,7 @@ async function varrerEngolidas(
         `Alguém te responde para confirmar — se for urgente, é só chamar por aqui.`;
       const env = await sendWhats(creds, String(m.sender_phone || ""), msg);
       if (env.ok) {
-        await supabase.from("webhook_messages")
-          .update({ action_error: `${String(m.action_error || "")} ${MARCA_SINALIZADA} ${MARCA_AVISADA}`.slice(0, 480) })
-          .eq("id", m.id);
+        await marcar(MARCA_AVISADA);
         out.avisadas++;
         console.log(`[engolidas] ✉️ confirmação de recebimento enviada para ...${String(m.sender_phone).slice(-4)}`);
       } else {

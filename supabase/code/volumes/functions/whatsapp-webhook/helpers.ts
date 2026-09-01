@@ -643,3 +643,56 @@ export function casarConvenioNoTexto(
   }
   return null;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A DATA DA CONSULTA VELHA GRUDA NO REAGENDAR (auditoria 01/09)
+// ─────────────────────────────────────────────────────────────────────────────
+// No reagendar, `entities.date` preenchido faz a busca olhar SÓ aquela data. E o
+// classificador copia para lá a data da consulta encontrada ("sua consulta é
+// 31/08"). Resultado medido:
+//
+//   30/08 12:54  "Tem.data disponível na quarta?"
+//                -> "não encontrei horários com LUCAS MIOTTO em quartas em 2026-08-31"
+//                   (31/08 era segunda-feira)
+//   31/08 14:47  Alvaro, consulta em 31/08, pediu tarde/4ª
+//                -> buscas presas em 31/08, depois um único 02/09 -> escalado
+//
+// Negativa atrás de negativa numa agenda que TEM vaga — e cada negativa alimenta
+// a Regra 7, que transfere. Conversão do reagendar: 4 de 15 conversas.
+//
+// A saída NÃO é "descartar a data quando for igual à da consulta original": o
+// próprio Alvaro pediu "tem algum horário hoje mais tarde?" com a consulta no
+// mesmo dia — ali as datas coincidem e o pedido é legítimo. Quem decide é o TURNO
+// ATUAL: se o paciente acabou de falar de um dia, a data vale; se não falou, ela
+// foi herdada do contexto e não pode estreitar a busca.
+
+/** O paciente falou de um DIA nesta mensagem? ("hoje", "amanhã", "dia 12", "05/09") */
+export function mensagemFalaDeDia(texto: unknown): boolean {
+  const t = stripAccents(String(texto || "").toLowerCase());
+  return (
+    /\b(hoje|amanha|depois de amanha|ainda esta semana|essa semana|semana que vem|proxima semana)\b/.test(t) ||
+    /\b\d{1,2}\s*\/\s*\d{1,2}\b/.test(t) ||          // 05/09
+    /\bdia\s+\d{1,2}\b/.test(t) ||                    // dia 12
+    /\b\d{1,2}\s+de\s+(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)/.test(t)
+  );
+}
+
+/**
+ * Dia da semana pedido NA MENSAGEM, 0=domingo. Lido do texto e não da entidade
+ * porque foi exatamente aqui que o classificador falhou: "Tem.data disponível na
+ * quarta?" virou busca por quartas DENTRO de 31/08, uma segunda-feira.
+ */
+export function diaDaSemanaPedido(texto: unknown): number | null {
+  const t = stripAccents(String(texto || "").toLowerCase());
+  const mapa: Array<[RegExp, number]> = [
+    [/\bdomingo\b/, 0],
+    [/\b(segunda|segundas|2\s*a\s*feira|2a)\b/, 1],
+    [/\b(terca|tercas|3\s*a\s*feira|3a)\b/, 2],
+    [/\b(quarta|quartas|4\s*a\s*feira|4a|4f)\b/, 3],
+    [/\b(quinta|quintas|5\s*a\s*feira|5a|5f)\b/, 4],
+    [/\b(sexta|sextas|6\s*a\s*feira|6a|6f)\b/, 5],
+    [/\b(sabado|sabados)\b/, 6],
+  ];
+  for (const [re, dia] of mapa) if (re.test(t)) return dia;
+  return null;
+}
