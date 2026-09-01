@@ -26,6 +26,7 @@ import {
   classificarUrgencia,
   campoPedidoNoCadastro,
   ehNegativaDeHorario,
+  ehSaudacaoPura,
   pedeQualquerData,
   classificarPedidoDeFisioterapia,
   PEDIDO_DE_ATENDENTE_RE,
@@ -111,6 +112,54 @@ function textoDoPacienteRecente(mensagemAtual: unknown, mensagensRecentes: unkno
     }
   } catch { /* histórico ilegível: fica só a mensagem atual */ }
   return partes.join("\n");
+}
+
+// FECHAMENTO PÓS-AGRADECIMENTO (caso 06/07), num lugar só.
+// Paciente que agradece depois de marcar encerra o assunto — o ticket tem que
+// sair da fila das atendentes em vez de ficar aberto. Isto existia solto dentro
+// do ramo "resposta enviada"; quando a Regra 9 passou a calar nesses casos (01/09),
+// o silêncio deixava o ticket aberto justamente nos ~21 casos por semana em que
+// ele mais deveria fechar. Uma função, dois chamadores, sem divergir de novo.
+async function agendarFechamentoPosAgradecimento(
+  supabase: any,
+  args: {
+    conversationId: string | null | undefined;
+    clinicTokenId: string | null | undefined;
+    phone: string | null | undefined;
+    userId: string | null | undefined;
+    baseUrl: string; apiId: string; bearerToken: string;
+    channelId: string | null;
+  },
+): Promise<boolean> {
+  const { conversationId, clinicTokenId, phone, baseUrl, apiId, bearerToken } = args;
+  if (!conversationId || !clinicTokenId || !phone || !baseUrl || !apiId || !bearerToken) return false;
+  try {
+    const desde24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { data: booking } = await supabase
+      .from("webhook_messages")
+      .select("id")
+      .eq("conversation_id", conversationId)
+      .gte("created_at", desde24h)
+      .or("and(ai_intent.in.(agendar,reagendar,cadastrar,confirmar),action_status.eq.success),booking_source.eq.widget")
+      .limit(1);
+    if (!booking || booking.length === 0) return false;
+    const quando = new Date(Date.now() + 90 * 1000).toISOString();
+    await supabase.from("pending_ticket_resolutions").insert({
+      phone,
+      base_url: baseUrl,
+      api_id: apiId,
+      bearer_token: bearerToken,
+      channel_id: args.channelId || null,
+      clinic_token_id: clinicTokenId,
+      user_id: args.userId,
+      execute_at: quando,
+    });
+    console.log(`[TicketClose] agradecimento pós-booking — resolução do ticket agendada para ${quando}`);
+    return true;
+  } catch (e) {
+    console.log(`[TicketClose] check error (non-blocking): ${(e as Error).message}`);
+    return false;
+  }
 }
 
 function temContextoDeInfiltracao(mensagensRecentes: unknown): boolean {
@@ -12532,10 +12581,16 @@ Deno.serve(async (req) => {
       try {
         // Aceita: "oi", "ola", "oie", "oii", "boa tarde", "ola de novo", "oi novamente",
         // "voltei", "ola tudo bem?", etc. O ".{0,30}" no final captura adornos curtos.
-        const PURE_GREETING_RE =
-          /^(ol[aá]+|oi+e?|hey+|hi+|hello+|e\s*a[ií]+|fala+|salve+|bom\s+dia|boa\s+tarde|boa\s+noite|boa\s+madrugada|voltei|estou\s+de\s+volta)(\s+(de\s+novo|novamente|outra\s+vez|tudo\s+bem|tudo\s+bom))?[\s!.?,]*$/i;
-        const greetTrimmed = (finalMessage || "").trim();
-        const isPureGreeting = PURE_GREETING_RE.test(greetTrimmed) && greetTrimmed.length <= 40;
+        // 01/09: era um regex de uma linha que aceitava UM token de saudação mais,
+        // no máximo, "tudo bem". Vírgula, ponto, emoji ou segundo token derrubavam,
+        // e a mensagem ia para o LLM, voltava 'unknown' e virava combustível do
+        // disjuntor. 49 saudações caíram assim em 7 dias — "Olá, tudo bem?",
+        // "Bom.dia", "Oi, bom dia!", "Oeeee boa tarde 🌞".
+        // O helper come tokens de saudação até não sobrar nada. Validado contra os
+        // 1968 textos reais da semana: ZERO regressão e 62 textos novos. As duas
+        // únicas capturas com rótulo de ação são literalmente só cumprimento, e as
+        // guardas de conversa-fresca abaixo já neutralizam conversa em curso.
+        const isPureGreeting = ehSaudacaoPura(finalMessage);
 
         if (
           isPureGreeting &&
@@ -12614,6 +12669,74 @@ Deno.serve(async (req) => {
         }
       } catch (e) {
         console.log(`[Webhook] greeting shortcut error (non-blocking): ${(e as Error).message}`);
+      }
+
+      // === REGRA 9: NÃO RESPONDER AO "OBRIGADO" FINAL (auditoria 01/09) ==========
+      // O script do dono proíbe isso desde sempre — item 9 do "O QUE NÃO FAZER":
+      // "Se já se despediu, NÃO responda a um 'Obrigado' final." Era instrução de
+      // prompt, e prompt falha: em 7 dias, 25 agradecimentos de encerramento foram
+      // ao LLM, voltaram 'unknown' — alimentando o disjuntor — e ainda ganharam
+      // resposta ("Imagina, Patricia! Estamos à disposição...").
+      //
+      // DUAS COISAS QUE A REVISÃO ADVERSARIAL PEGOU ANTES DE ISTO SUBIR:
+      //
+      // 1. DOR NÃO PODE VIRAR SILÊNCIO. O batching junta 8s de mensagens, então
+      //    "Obrigada" + "to com muita dor" chegam como UM finalMessage de 25
+      //    caracteres, sem "?" — passava em isClosingThanks e a paciente ficava
+      //    muda, com o bloco de urgência (acolhimento + transferência imediata)
+      //    nunca chegando a rodar. Por isso o silêncio agora exige também que não
+      //    haja sinal clínico nem pedido de atendente na mensagem.
+      //
+      // 2. O TICKET PRECISA FECHAR. O agendamento da resolução do ticket pós-
+      //    agradecimento (guard <paciente>, 06/07) mora lá embaixo, no ramo
+      //    "resposta enviada" — e este return passava na frente dele. Resultado
+      //    medido: ~21 casos em 7 dias em que o ticket ficaria ABERTO na fila das
+      //    atendentes justamente por causa do silêncio. Agenda antes de sair.
+      try {
+        if (isClosingThanks(finalMessage || "") && conversationId) {
+          const _urgente = !!classificarUrgencia(finalMessage || "") || detectUrgency(finalMessage || "");
+          const _querAtendente = PEDIDO_DE_ATENDENTE_RE.test(String(finalMessage || "").trim());
+          const { data: _ultOut } = await supabase
+            .from("webhook_messages")
+            .select("message_text, ai_intent, created_at")
+            .eq("conversation_id", conversationId)
+            .eq("direction", "outgoing")
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          const _txtUlt = String((_ultOut as { message_text?: string } | null)?.message_text || "");
+          const _temPerguntaAberta = _txtUlt.includes("?");
+          const _estadoAtivo = ["slot_search", "slot_chosen", "awaiting_cpf", "awaiting_confirmation",
+            "awaiting_registration", "reschedule_search", "cancel_pending"];
+          let _emFluxo = false;
+          try {
+            const _st = clinicTokenId ? await getConversationState(supabase, clinicTokenId, phone) : null;
+            if (_st && _estadoAtivo.includes(_st.current_state)) _emFluxo = true;
+          } catch { /* non-blocking */ }
+
+          // Sem outgoing nenhum, "obrigado" como PRIMEIRA mensagem não encerra nada.
+          if (_txtUlt && !_temPerguntaAberta && !_emFluxo && !_urgente && !_querAtendente) {
+            console.log(`[Webhook] 🤐 REGRA 9: agradecimento de encerramento e a Julia já tinha se despedido — silêncio`);
+            // O silêncio não pode deixar o ticket aberto: mesma função do caminho
+            // normal, para os dois nunca divergirem.
+            await agendarFechamentoPosAgradecimento(supabase, {
+              conversationId, clinicTokenId, phone, userId,
+              baseUrl: avanceaiBaseUrl, apiId: avanceaiApiId, bearerToken: avanceaiBearerToken,
+              channelId: resolvedChannelId || null,
+            });
+            await supabase.from("webhook_messages").update({
+              action_status: "success",
+              ai_intent: "social_closing",
+              action_error: "Regra 9: agradecimento final — sem resposta, de propósito",
+            }).eq("id", messageId);
+            return new Response(
+              JSON.stringify({ status: "social_closing", replied: false }),
+              { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+            );
+          }
+        }
+      } catch (e) {
+        console.log(`[Webhook] regra 9 (fechamento) error (non-blocking): ${(e as Error).message}`);
       }
 
       // === Pre-fetch conversation_state ===
@@ -16028,42 +16151,15 @@ Deno.serve(async (req) => {
             }
 
             // === FECHAMENTO PÓS-AGRADECIMENTO (caso 06/07) ===
-            // Paciente com booking/confirmação nas últimas 24h (via bot OU widget)
-            // agradece e encerra ("obrigada!") — resolve o ticket em vez de deixá-lo
-            // pendente na fila das atendentes. Reusa a fila do resolve-ticket (cron).
-            try {
-              if (
-                isClosingThanks(finalMessage || "") &&
-                conversationId && clinicTokenId && phone &&
-                avanceaiBaseUrl && avanceaiApiId && avanceaiBearerToken
-              ) {
-                const _since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-                const { data: _recentBooked } = await supabase
-                  .from("webhook_messages")
-                  .select("id")
-                  .eq("conversation_id", conversationId)
-                  .gte("created_at", _since24h)
-                  .or(
-                    "and(ai_intent.in.(agendar,reagendar,cadastrar,confirmar),action_status.eq.success),booking_source.eq.widget",
-                  )
-                  .limit(1);
-                if (_recentBooked && _recentBooked.length > 0) {
-                  const _closeAt = new Date(Date.now() + 90 * 1000).toISOString();
-                  await supabase.from("pending_ticket_resolutions").insert({
-                    phone,
-                    base_url: avanceaiBaseUrl,
-                    api_id: avanceaiApiId,
-                    bearer_token: avanceaiBearerToken,
-                    channel_id: resolvedChannelId || null,
-                    clinic_token_id: clinicTokenId,
-                    user_id: userId,
-                    execute_at: _closeAt,
-                  });
-                  console.log(`[TicketClose] agradecimento pós-booking — resolução do ticket agendada para ${_closeAt}`);
-                }
-              }
-            } catch (e) {
-              console.log(`[TicketClose] check error (non-blocking): ${(e as Error).message}`);
+            // Paciente com booking nas últimas 24h agradece e encerra: o ticket sai
+            // da fila em vez de ficar pendente. Mesma função que a Regra 9 chama —
+            // eram dois blocos iguais e um deles ia envelhecer sozinho.
+            if (isClosingThanks(finalMessage || "")) {
+              await agendarFechamentoPosAgradecimento(supabase, {
+                conversationId, clinicTokenId, phone, userId,
+                baseUrl: avanceaiBaseUrl, apiId: avanceaiApiId, bearerToken: avanceaiBearerToken,
+                channelId: resolvedChannelId || null,
+              });
             }
           } else {
             console.error("[Webhook] Failed to send auto-reply via AvanceAI");

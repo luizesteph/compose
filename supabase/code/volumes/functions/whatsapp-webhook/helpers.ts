@@ -707,3 +707,62 @@ export function diaDaSemanaPedido(texto: unknown): number | null {
   for (const [re, dia] of mapa) if (re.test(t)) return dia;
   return null;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SAUDAÇÃO PURA: CONSUMO GULOSO, NÃO UM REGEX DE UMA LINHA (auditoria 01/09)
+// ─────────────────────────────────────────────────────────────────────────────
+// O PURE_GREETING_RE aceitava UM token de saudação mais, no máximo, o sufixo
+// "tudo bem". Qualquer vírgula, ponto, emoji ou segundo token derrubava — e a
+// mensagem ia parar no LLM, voltava rotulada 'unknown' e virava combustível do
+// disjuntor. Em 7 dias, 49 saudações caíram assim:
+//
+//   "Olá, tudo bem?"        a vírgula quebra
+//   "Bom.dia"               o ponto quebra
+//   "Oi, bom dia!"          dois tokens
+//   "Oeeee boa tarde 🌞"    "Oeeee" não casa /oi+e?/ e o emoji sobra
+//   "Olá Bom dia Tudo bem?" três tokens
+//
+// A saída é normalizar e ir COMENDO token de saudação enquanto houver. Se no fim
+// não sobrou nada, era saudação. Se sobrou qualquer coisa ("Oi, quero agendar"),
+// não era — e vai para o LLM como sempre.
+const _TOKENS_DE_SAUDACAO: RegExp[] = [
+  /^(bom\s+dia|boa\s+tarde|boa\s+noite|boa\s+madrugada|otima\s+tarde|otimo\s+dia)\b/,
+  /^(ola+|oi+e*|oie+|oe+|opa+|hey+|hi+|hello+|e\s*ai+|fala+|salve+)\b/,
+  /^(tudo\s+(bem|bom|certo|otimo|joia)|td\s+(bem|bom)|como\s+vai|como\s+esta)\b/,
+  /^(voltei|estou\s+de\s+volta|de\s+novo|novamente|outra\s+vez)\b/,
+  /^(bem|otimo|otima|tudo)\b/,           // "Bem e vc?", "Tudo?"
+  /^(e\s+(vc|voce|voces|ai))\b/,          // "e vc?"
+  /^(com\s+voce|contigo|por\s+ai)\b/,     // "...e com você?"
+  /^(dr|dra|doutor|doutora|equipe|pessoal|gente)\b/, // vocativo: "Oi equipe"
+];
+
+/**
+ * A mensagem é SÓ cumprimento, sem pedido nenhum?
+ *
+ * Come tokens de saudação da esquerda para a direita; sobrou texto, não é pura.
+ * Conservadora de propósito: na dúvida devolve false e a mensagem segue para o
+ * classificador, que é o comportamento de hoje.
+ */
+export function ehSaudacaoPura(texto: unknown): boolean {
+  let t = stripAccents(String(texto ?? "").toLowerCase())
+    // emoji, pontuação e símbolos viram espaço — é a pontuação que derrubava
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!t) return false;
+  if (t.length > 60) return false; // saudação de verdade é curta
+
+  let mudou = true;
+  while (mudou && t) {
+    mudou = false;
+    for (const re of _TOKENS_DE_SAUDACAO) {
+      const m = t.match(re);
+      if (m) {
+        t = t.slice(m[0].length).trim();
+        mudou = true;
+        break;
+      }
+    }
+  }
+  return t.length === 0;
+}
