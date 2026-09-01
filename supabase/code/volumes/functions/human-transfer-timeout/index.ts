@@ -287,16 +287,29 @@ async function devolverInativosAFila(
         .eq("trigger", "inatividade_travada")
         .gte("created_at", desdeFreio);
       if (!_jaAvisado) {
+        // Quem estava com o caso na ULTIMA volta. O espelho quase sempre esta
+        // vazio aqui (a propria devolucao limpa o assigned_agent_name), e uma
+        // linha de alerta sem nome nao ajuda quem vai olhar a aba. O nome bom
+        // esta na ultima devolucao desta conversa.
+        const { data: _ultimaVolta } = await supabase
+          .from("transfer_audit")
+          .select("from_attendant")
+          .eq("conversation_id", c.id)
+          .eq("trigger", "inatividade")
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        const _quemSegurava = String((_ultimaVolta as { from_attendant?: string } | null)?.from_attendant || "").trim();
         await supabase.from("transfer_audit").insert({
           clinic_token_id: clinicTokenId,
           conversation_id: c.id,
           phone: c.phone,
-          from_attendant: nomeEspelho || null,
+          from_attendant: _quemSegurava || nomeEspelho || null,
           to_attendant: null,
           initiated_by: "sistema",
           trigger: "inatividade_travada",
           reason: "limite_de_devolucoes",
-          detail: `${_voltas} devoluções em 24h sem ninguém responder — parei de devolver, precisa de gente`,
+          detail: `${_voltas} devoluções em 24h sem ninguém responder${_quemSegurava ? ` (última: ${_quemSegurava})` : ""} — parei de devolver, precisa de gente`,
         } as any).then(() => {}, () => {});
         console.log(`[devolver-fila] 🛑 FREIO: conversa ${c.id} já rodou ${_voltas} voltas em 24h — parei de devolver`);
         out.detalhes.push(`conversa ${String(c.id).slice(0, 8)}: ${_voltas} voltas — TRAVADA, precisa de gente`);
