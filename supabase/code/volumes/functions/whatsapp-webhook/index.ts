@@ -44,6 +44,9 @@ import {
   getPhoneVariants,
   normalizeApiResponse,
   fetchWithTimeout,
+  horaDoSlot,
+  mesmoMedico,
+  slotJaPassou,
 } from "./helpers.ts";
 import { tryFetch } from "./amigoApi.ts";
 import { LLM_MODEL, LLM_MODEL_FALLBACK, LLM_GATEWAY, ehErroDeModeloDesconhecido, llmApiKey, llmHeaders, LLM_USAGE_INCLUDE, custoDaChamada } from "../_shared/llm.ts";
@@ -406,6 +409,13 @@ function getNowSPParts(): {
 function getTodayISO_SP(): string {
   const p = getNowSPParts();
   return `${p.year}-${String(p.month).padStart(2, "0")}-${String(p.day).padStart(2, "0")}`;
+}
+
+// O "agora" que slotJaPassou (helpers.ts) recebe. Fica aqui porque helpers.ts é puro
+// e testado com relógio fixo — o relógio real entra por parâmetro, sempre SP.
+function agoraSP(): { hoje: string; hora: number; minuto: number } {
+  const p = getNowSPParts();
+  return { hoje: getTodayISO_SP(), hora: p.hour, minuto: p.minute };
 }
 
 function getNowSP(): Date {
@@ -4464,6 +4474,11 @@ async function executeAction(
               } else if (periodFilter === "tarde") {
                 unique = unique.filter((t) => t >= "12:00");
               }
+              // Horário de hoje que já passou não é vaga (17 ofertas mortas em 7 dias,
+              // a pior às 21:06 oferecendo 10:40 do mesmo dia). isoDate é a data já
+              // normalizada da linha acima — `date` pode chegar como DD/MM/YYYY.
+              const _ag = agoraSP();
+              unique = unique.filter((t) => !slotJaPassou(isoDate, t, _ag));
               return unique.slice(0, 10);
             }
           } catch (e) {
@@ -4736,7 +4751,9 @@ async function executeAction(
                   if (!slotsMap.has(d)) continue;
                   if (isWeekendISO(d)) continue; // clínica fechada sáb/dom (caso Caio, 11/08)
                   if (totalSlots >= MAX_TOTAL_SLOTS) break;
-                  let slots = slotsMap.get(d)!;
+                  // mesmo corte na montagem da oferta multi-data (foi este caminho
+                  // que imprimiu "01/09 (terça): 10:40, 11:00" às 21:06)
+                  let slots = slotsMap.get(d)!.filter((t) => !slotJaPassou(d, t, agoraSP()));
                   if (periodFilter === "manha") slots = slots.filter((t) => t < "12:00");
                   if (periodFilter === "tarde") slots = slots.filter((t) => t >= "12:00");
                   if (slots.length === 0) continue;
@@ -5364,10 +5381,23 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               messageId: null,
             });
           }
+          // O texto aqui sempre foi honesto ("estou reservando", "3 minutos"), mas ia
+          // como `error` com `response: ""` — ou seja, o LLM reescrevia. Em 01/09 21:11
+          // ele reescreveu para "Perfeito! Já reservei o horário das 15h40 no dia 08/09"
+          // — presente provisório virando passado concluído. A paciente passa a achar
+          // que tem vaga garantida antes de qualquer POST no Amigo.
+          //
+          // Vai literal (bypassAiRewrite). Termina em "?" de propósito: é o que preserva
+          // o dedup de pergunta de CPF mais adiante.
+          const _msgReserva =
+            `Estou segurando o horário das ${entities.time} do dia ${formatDateLabel(entities.date)} ` +
+            `com ${doctorName || "o médico"} ${patientRef} por 3 minutos — ainda *não* está confirmado. ` +
+            `Para fechar, me passa o CPF ${cpfRef}?`;
           return {
             status: "needs_info",
-            response: "",
-            error: `Estou reservando o horário das ${entities.time} no dia ${entities.date} com ${doctorName || "o médico"} ${patientRef} (reserva válida por 3 minutos). Para concluir e confirmar oficialmente, me passe o CPF ${cpfRef}, por favor.`,
+            response: _msgReserva,
+            error: _msgReserva,
+            bypassAiRewrite: true,
             verifiedSchedule: true,
           } as any;
         }
@@ -5895,11 +5925,50 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           _insSource = "descartado_nao_numerico";
         }
 
+        // === TIPO DE CONSULTA: quem a Julia ACABOU de cadastrar é primeira vez ===
+        // O evento foi escolhido lá em cima com pickEventForBooking(events) — sem
+        // newPatient — sob a premissa (verdadeira quando foi escrita) de que "agendar
+        // = paciente existente, novo cai em needs_registration". Deixou de valer: o
+        // cadastro devolve o fluxo para o agendar e, dois minutos depois, o paciente
+        // JÁ EXISTE no Amigo. Resultado medido em 30 dias: 28 agendamentos, 28 como
+        // "CONSULTA", incluindo os 9 pacientes cadastrados pela própria Julia.
+        // (Log 01/09: 21:20 pickEvent newPatient=true -> "CONSULTA 1° VEZ";
+        //             21:22 pickEvent newPatient=false -> "CONSULTA", mesma paciente.)
+        //
+        // O critério é deliberadamente estreito: cadastro feito NESTA conversa. Não uso
+        // "não tem histórico no Amigo" porque paciente antigo migrado sem histórico
+        // cairia como primeira vez — erro que ninguém pediu para correr.
+        let eventIdParaPost = eventId;
+        if (conversationIdParam) {
+          try {
+            const { data: _cadastrouAgora } = await supabaseClient
+              .from("webhook_messages")
+              .select("id")
+              .eq("conversation_id", conversationIdParam)
+              .eq("ai_intent", "cadastrar")
+              .eq("action_status", "success")
+              .gte("created_at", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
+              .limit(1);
+            if (Array.isArray(_cadastrouAgora) && _cadastrouAgora.length > 0) {
+              const _evPrimeira = pickEventForBooking(events, { newPatient: true });
+              const _idPrimeira = String((_evPrimeira as any)?.id || "");
+              if (_idPrimeira && _idPrimeira !== eventIdParaPost) {
+                console.log(
+                  `[Webhook] agendar - cadastro nesta conversa: evento ${eventIdParaPost} -> ${_idPrimeira} ("${String((_evPrimeira as any)?.name || "?")}")`,
+                );
+                eventIdParaPost = _idPrimeira;
+              }
+            }
+          } catch (e) {
+            console.log(`[Webhook] agendar - checagem de primeira consulta falhou (não bloqueante): ${(e as Error).message}`);
+          }
+        }
+
         const attendanceBody: Record<string, unknown> = {
           start_date: startDate,
           user_id: doctorId,
           patient_id: patId,
-          event_id: eventId,
+          event_id: eventIdParaPost,
           place_id: placeId,
           company_id: companyId,
         };
@@ -6050,7 +6119,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               clinic_token_id: clinicTokenId || null,
               user_id: supabaseClient ? (await supabaseClient.auth.getUser())?.data?.user?.id : null,
               place_id: placeId || null,
-              event_id: eventId || null,
+              event_id: eventIdParaPost || null,
               // BUG-1 FIX: delay first verification by 15s so the Amigo API has time to propagate
               // the freshly-created attendance to its read replicas before we go looking for it.
               next_attempt_at: new Date(Date.now() + 15 * 1000).toISOString(),
@@ -6076,8 +6145,13 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             // POST enviou: tipo de consulta escolhido (e a lista toda) + convenio.
             entities: {
               ...entities,
-              booked_event_id: eventId,
-              booked_event_name: pickedEventName,
+              booked_event_id: eventIdParaPost,
+              booked_event_name:
+                eventIdParaPost === eventId
+                  ? pickedEventName
+                  : String(
+                      (events.find((e) => String((e as any).id) === eventIdParaPost) as any)?.name || pickedEventName,
+                    ),
               booked_insurance_id: patientInsuranceId ? String(patientInsuranceId) : "particular",
               // De ONDE veio o convênio (cadastro da Amigo / cache / conversa) — é o
               // que separa "o paciente é particular mesmo" de "não conseguimos ler o
@@ -7446,19 +7520,13 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               // Find doctor by name
               const docsRes = await tryFetch(`doctors?company_id=${companyId}`, amigoToken);
               const allDocs = normalizeApiResponse(docsRes) as Array<Record<string, unknown>>;
-              const normSearch = (entities.doctor_name || "")
-                .normalize("NFD")
-                .replace(/[\u0300-\u036f]/g, "")
-                .toLowerCase();
+              // includes() cru falhava com o título: o nome do banco ("Hugo Bitencourt
+              // Fabri") não CONTÉM a busca ("dr. hugo bitencourt fabri"), e o
+              // auto-agendamento inteiro era pulado em silêncio. mesmoMedico compara
+              // por nome, sem título e sem acento.
+              const normSearch = String(entities.doctor_name || "");
               const docMatch =
-                Array.isArray(allDocs) &&
-                allDocs.find((d) =>
-                  ((d.name as string) || "")
-                    .normalize("NFD")
-                    .replace(/[\u0300-\u036f]/g, "")
-                    .toLowerCase()
-                    .includes(normSearch),
-                );
+                Array.isArray(allDocs) && allDocs.find((d) => mesmoMedico(d.name, entities.doctor_name));
               if (docMatch) {
                 const autoDocId = String(docMatch.id);
                 const autoDocName = String(docMatch.name || entities.doctor_name);
@@ -7516,9 +7584,9 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                               | undefined;
                             if (slots && Array.isArray(slots)) {
                               for (const slot of slots) {
-                                const raw = String(slot.start_time || slot.startTime || slot.time || "");
-                                const m = raw.match(/(\d{2}:\d{2})/);
-                                if (m) realSlots.push(m[1]);
+                                // A chave do Amigo é "start" (ver horaDoSlot em helpers.ts).
+                                const _h = horaDoSlot(slot);
+                                if (_h) realSlots.push(_h);
                               }
                             }
                           }
@@ -7569,9 +7637,8 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                                 const sl = (us.slots || us.available_slots) as Array<Record<string, unknown>> | undefined;
                                 if (Array.isArray(sl)) {
                                   for (const s of sl) {
-                                    const r = String(s.start_time || s.startTime || s.time || "");
-                                    const m = r.match(/(\d{2}:\d{2})/);
-                                    if (m) retrySlots.push(m[1]);
+                                    const _h = horaDoSlot(s);
+                                    if (_h) retrySlots.push(_h);
                                   }
                                 }
                               }
@@ -7699,10 +7766,9 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             try {
               const docsRes2 = await tryFetch(`doctors?company_id=${companyId}`, amigoToken);
               const allDocs2 = normalizeApiResponse(docsRes2) as Array<Record<string, unknown>>;
-              const normSearch2 = (entities.doctor_name || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-              const docMatch2 = Array.isArray(allDocs2) && allDocs2.find(
-                (d) => ((d.name as string) || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().includes(normSearch2)
-              );
+              const normSearch2 = String(entities.doctor_name || "");
+              const docMatch2 =
+                Array.isArray(allDocs2) && allDocs2.find((d) => mesmoMedico(d.name, entities.doctor_name));
               if (docMatch2) {
                 const regDocId = String(docMatch2.id);
                 const regDocName = String(docMatch2.name || entities.doctor_name);
@@ -7896,19 +7962,9 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                 try {
                   const docsRes = await tryFetch(`doctors?company_id=${companyId}`, amigoToken);
                   const allDocs = normalizeApiResponse(docsRes) as Array<Record<string, unknown>>;
-                  const normSearch = (entities.doctor_name || "")
-                    .normalize("NFD")
-                    .replace(/[\u0300-\u036f]/g, "")
-                    .toLowerCase();
+                  const normSearch = String(entities.doctor_name || "");
                   const docMatch =
-                    Array.isArray(allDocs) &&
-                    allDocs.find((d) =>
-                      ((d.name as string) || "")
-                        .normalize("NFD")
-                        .replace(/[\u0300-\u036f]/g, "")
-                        .toLowerCase()
-                        .includes(normSearch),
-                    );
+                    Array.isArray(allDocs) && allDocs.find((d) => mesmoMedico(d.name, entities.doctor_name));
                   if (docMatch) {
                     const [evRes, plRes] = await Promise.all([
                       tryFetch(`events?company_id=${companyId}`, amigoToken),
@@ -7961,9 +8017,8 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                                   | undefined;
                                 if (slots && Array.isArray(slots)) {
                                   for (const slot of slots) {
-                                    const raw = String(slot.start_time || slot.startTime || slot.time || "");
-                                    const m = raw.match(/(\d{2}:\d{2})/);
-                                    if (m) realSlots.push(m[1]);
+                                    const _h = horaDoSlot(slot);
+                                    if (_h) realSlots.push(_h);
                                   }
                                 }
                               }
@@ -13600,6 +13655,14 @@ Deno.serve(async (req) => {
 
 
       console.log("[Webhook] Classifying intent with AI (with conversation memory + context summary)...");
+      // === CAMPOS LIMPOS DE PROPÓSITO (01/09, caso Nirya) ===
+      // Vários pontos abaixo zeram date/time deliberadamente ("tanto faz o dia",
+      // "outro médico", troca real de médico) para forçar busca nova. A recuperação
+      // de entidades, mais adiante, repõe TODO campo vazio a partir do histórico —
+      // então essas limpezas se desfaziam sozinhas e o único efeito real era destruir
+      // o que o LLM tinha acabado de extrair da mensagem atual. Quem limpa de propósito
+      // registra aqui, e a recuperação pula esses campos.
+      const _limposDeProposito = new Set<string>();
       let classification;
       try {
         if (isResetRequest) {
@@ -14266,6 +14329,8 @@ Deno.serve(async (req) => {
           );
           classification.date = "";
           classification.preferred_weekday = "";
+          _limposDeProposito.add("date");
+          _limposDeProposito.add("preferred_weekday");
         }
 
         // POST-CLASSIFICATION: Detect doctor switch mid-conversation and clear stale date/time
@@ -14280,15 +14345,22 @@ Deno.serve(async (req) => {
             .limit(1);
           if (lastEntitiesRows && lastEntitiesRows.length > 0) {
             const lastEnt = lastEntitiesRows[0].ai_entities as Record<string, unknown>;
-            if (
-              lastEnt?.doctor_name &&
-              String(lastEnt.doctor_name).toLowerCase() !== classification.doctor_name.toLowerCase()
-            ) {
+            // Comparar por NOME, não por string crua: o LLM alterna entre "Dr. Hugo
+            // Bitencourt Fabri" e "Hugo Bitencourt Fabri" no mesmo atendimento. Com o
+            // toLowerCase() puro isso disparou 14 vezes em 30h de log — as 14 com o
+            // MESMO médico — e cada disparo apagava date/time no meio do fluxo. Foi
+            // assim que a Nirya (01/09 21:22) pediu 15h20 e saiu agendada 15h40.
+            if (lastEnt?.doctor_name && !mesmoMedico(lastEnt.doctor_name, classification.doctor_name)) {
               console.log(
                 `[Webhook] Doctor changed: "${lastEnt.doctor_name}" → "${classification.doctor_name}". Clearing date/time to force new schedule lookup.`,
               );
               classification.date = "";
               classification.time = "";
+              // Troca REAL: a limpeza precisa sobreviver à recuperação de entidades,
+              // que logo abaixo repõe todo campo vazio a partir do histórico. Sem esta
+              // marca a limpeza se desfazia sozinha e só destruía o dado do turno atual.
+              _limposDeProposito.add("date");
+              _limposDeProposito.add("time");
             }
           }
         }
@@ -14423,7 +14495,7 @@ Deno.serve(async (req) => {
             (k) => k !== "date" && k !== "time" && k !== "preferred_weekday" && k !== "preferred_period",
           );
         }
-        const missingKeys = entityKeys.filter((k) => !classification[k]);
+        const missingKeys = entityKeys.filter((k) => !classification[k] && !_limposDeProposito.has(k));
 
         if (missingKeys.length > 0) {
           // Query ai_entities from recent messages to recover missing fields

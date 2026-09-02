@@ -766,3 +766,111 @@ export function ehSaudacaoPura(texto: unknown): boolean {
   }
   return t.length === 0;
 }
+
+// ============================================================================
+// horaDoSlot — a hora de um slot do calendário do Amigo, venha na chave que vier.
+// ============================================================================
+// O /calendar devolve cada vaga assim:
+//   {"start":"09:00","end":"09:20","timegrid_id":…,"user_id":…,"event_id":…}
+// A chave é "start". Três leitores no index.ts (o do auto-agendamento pós-cadastro,
+// o retry dele e o de duplicidade) liam apenas start_time/startTime/time — as três
+// inexistentes — e portanto coletavam ZERO horários sempre. Medido em 01/09: 6
+// auto-agendamentos após cadastro, 5 abortados com "retry também vazio", 0 vagas
+// lidas. Toda paciente recém-cadastrada ouvia que o horário escolhido tinha sumido
+// (caso Nirya 01/09 21:20, caso Cecilia 14:48, caso das 14:57) — e o horário
+// continuava livre na agenda.
+//
+// Um único leitor, para a chave não voltar a divergir. Aceita string solta também.
+export function horaDoSlot(slot: unknown): string | null {
+  const bruto =
+    typeof slot === "string"
+      ? slot
+      : slot && typeof slot === "object"
+        ? String(
+            (slot as Record<string, unknown>).start_time ??
+              (slot as Record<string, unknown>).startTime ??
+              (slot as Record<string, unknown>).start ??
+              (slot as Record<string, unknown>).time ??
+              (slot as Record<string, unknown>).hour ??
+              (slot as Record<string, unknown>).hora ??
+              "",
+          )
+        : "";
+  const m = bruto.match(/(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  const h = Number(m[1]);
+  if (!Number.isFinite(h) || h > 23) return null;
+  return `${String(h).padStart(2, "0")}:${m[2]}`;
+}
+
+// ============================================================================
+// mesmoMedico — "Dr. Hugo Bitencourt Fabri" e "Hugo Bitencourt Fabri" são O MESMO.
+// ============================================================================
+// A comparação era `a.toLowerCase() !== b.toLowerCase()`, e o LLM alterna livremente
+// entre nome com e sem título, curto e completo, maiúsculo e minúsculo. Em 30h de log
+// isso disparou 14 vezes "Doctor changed" — as 14 com o MESMO médico dos dois lados:
+//   "Dr. Lucas Miotto José" → "Lucas Miotto José"    (título)
+//   "Hugo"                  → "Hugo Bitencourt Fabri" (nome curto)
+//   "Dr. Lucas Miotto"      → "LUCAS MIOTTO JOSÉ"     (caixa)
+//   "Ana Paula"             → "Dra. Ana Paula"        (título feminino)
+// Nenhuma troca real. Cada disparo apagava date/time no meio do fluxo — foi assim que
+// a Nirya pediu 15h20 e saiu agendada 15h40 (01/09 21:22: o LLM extraiu "15:20", este
+// ramo limpou, e a recuperação repôs o 15:40 velho do histórico).
+//
+// Critério: sem título, sem acento, sem pontuação; um conjunto de nomes contido no
+// outro é a mesma pessoa. "Luiz" ⊂ "Luiz Gustavo Estephanelli" = mesmo médico.
+// Se a clínica tiver dois médicos de mesmo primeiro nome e o paciente falar só ele,
+// damos "mesmo" — o que preserva date/time e deixa a validação de vaga decidir, em vez
+// de destruir o contexto. É estritamente melhor que o comportamento anterior.
+const _TITULOS_MEDICO = /\b(dr|dra|doutor|doutora|prof|profa|professor|professora)\b/g;
+
+function _nomesDe(v: unknown): Set<string> {
+  const t = String(v ?? "")
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(_TITULOS_MEDICO, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!t) return new Set();
+  // "de/da/do/dos/das/e" não distinguem ninguém
+  return new Set(t.split(" ").filter((p) => p.length > 1 && !/^(de|da|do|dos|das|e)$/.test(p)));
+}
+
+export function mesmoMedico(a: unknown, b: unknown): boolean {
+  const A = _nomesDe(a);
+  const B = _nomesDe(b);
+  if (A.size === 0 || B.size === 0) return false;
+  const [menor, maior] = A.size <= B.size ? [A, B] : [B, A];
+  for (const nome of menor) if (!maior.has(nome)) return false;
+  return true;
+}
+
+// ============================================================================
+// slotJaPassou — um horário de HOJE que já passou não é vaga, é ruído.
+// ============================================================================
+// Às 21:06 de 01/09 a Julia ofereceu "01/09 (terça): 10:40, 11:00" — daquela mesma
+// manhã. Não era alucinação: a API do Amigo devolve a grade CONFIGURADA do dia,
+// sem noção de relógio, e não havia filtro nenhum do nosso lado (o único piso de
+// data no parse é `_listGateMin`, que é a string vazia — código morto). Medido:
+// 17 ofertas de horário já passado em 7 dias.
+//
+// O "agora" entra por PARÂMETRO de propósito: mantém este módulo puro (helpers.ts
+// roda sob tsc --strict no preflight e é testado com relógio fixo), e impede que a
+// função apodreça quando a data do teste ficar no passado. Quem chama passa
+// getNowSPParts() — America/Sao_Paulo, nunca new Date() cru.
+export function slotJaPassou(
+  isoDate: string,
+  hhmm: string,
+  agora: { hoje: string; hora: number; minuto: number },
+  leadMin = 0,
+): boolean {
+  if (!isoDate || !/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) return false; // data ilegível não derruba nada
+  if (!agora || !/^\d{4}-\d{2}-\d{2}$/.test(String(agora.hoje))) return false;
+  if (isoDate > agora.hoje) return false;
+  if (isoDate < agora.hoje) return true;
+  const m = String(hhmm).match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return false;
+  return Number(m[1]) * 60 + Number(m[2]) < agora.hora * 60 + agora.minuto + leadMin;
+}
