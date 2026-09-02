@@ -526,9 +526,19 @@ async function varrerEngolidas(
     // Já fiz tudo o que havia para fazer com esta: sai do caminho sem gastar query.
     if (jaSinalizada && (!ehDesmarcar || jaAvisada)) continue;
 
+    // AS MARCAS SE ACUMULAM NUMA VARIÁVEL, NÃO NO CAMPO LIDO (01/09, à noite).
+    // A primeira versão montava cada update a partir de `m.action_error`, que é o
+    // valor de quando a linha foi BUSCADA. Quando a mesma passagem gravava as duas
+    // marcas — sinalizar e avisar o paciente —, a segunda escrita apagava a
+    // primeira. Efeito medido no mesmo dia: o telefone …0239 pediu remarcação uma
+    // vez e a aba Transferências ganhou DOIS alertas, 19:46 e 19:48, porque a marca
+    // "sinalizada" tinha sumido e a rodada seguinte não sabia que já havia avisado.
+    // O paciente recebeu só uma mensagem — o estrago foi ruído na tela da equipe.
+    let _marcas = String(m.action_error || "");
     const marcar = async (marca: string) => {
+      _marcas = `${_marcas} ${marca}`.slice(0, 480);
       await supabase.from("webhook_messages")
-        .update({ action_error: `${String(m.action_error || "")} ${marca}`.slice(0, 480) })
+        .update({ action_error: _marcas })
         .eq("id", m.id);
     };
 
