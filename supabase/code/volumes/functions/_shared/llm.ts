@@ -100,14 +100,22 @@ export function ehErroDeModeloDesconhecido(status: number, corpo: string): boole
 export const LLM_USAGE_INCLUDE = { include: true } as const;
 
 // Preços LIDOS de https://openrouter.ai/api/v1/models em 24/08, não copiados da
-// tabela antiga do Lovable — que estava errada em dois dos três modelos (dizia
-// 0,15/0,60 para o preview, que na verdade custa 0,50/3,00; e cobrava do 3.7 o
-// dobro do preço real). Só serve de estimativa quando o provedor não devolve
+// tabela antiga do Lovable — que estava errada no preview (dizia 0,15/0,60, que
+// na verdade custa 0,50/3,00). O 3.7 eu mesmo errei em 24/08, anotando o preço da
+// variante :batch; corrigido em 02/09. Só serve de estimativa quando não devolve
 // `usage.cost`; com `usage: { include: true }` o número é o real.
 const PRECO_POR_TOKEN: Record<string, { input: number; output: number }> = {
   "google/gemini-3-flash-preview": { input: 0.50 / 1e6, output: 3.00 / 1e6 },
   "google/gemini-3.6-flash":       { input: 0.75 / 1e6, output: 3.75 / 1e6 },
-  "google/gemini-3.7-flash":       { input: 0.375 / 1e6, output: 1.875 / 1e6 },
+  // ATENÇÃO (02/09): 0,375/1,875 é o preço do `google/gemini-3.7-flash:batch`,
+  // NÃO do modelo síncrono. O `:batch` custa metade porque não responde na hora —
+  // chamá-lo pelo /chat/completions devolve 404 ("This model is only available
+  // through the Batch API. Use the /api/beta/batches endpoint instead."). Quem
+  // atende paciente no WhatsApp não pode usar. Se esta tabela voltar a marcar
+  // metade, o custo estimado sai pela metade. (Na prática ela quase nunca roda:
+  // o OpenRouter devolve `usage.cost` e custoDaChamada prefere sempre esse valor —
+  // 1.183 chamadas em 7 dias, zero caíram na estimativa.)
+  "google/gemini-3.7-flash":       { input: 0.75 / 1e6, output: 3.75 / 1e6 },
   "google/gemini-2.5-flash":       { input: 0.30 / 1e6, output: 2.50 / 1e6 },
 };
 
