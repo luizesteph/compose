@@ -6194,10 +6194,43 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             }
           }
           
+          // O texto antigo dizia "limite atingido para esse HORÁRIO/PROFISSIONAL" e ia
+          // como `error` com response vazio — o LLM reescreveu para "atingimos o limite
+          // de vagas automáticas para esse horário" (02/09 16:59, caso Maria Inês). As
+          // duas versões estão erradas: o limite do Amigo é por CPF, não por vaga nem
+          // por médico, e a paciente ficou achando que o horário tinha acabado.
+          // Agora diz o que de fato aconteceu, nomeia a consulta que ela já tem, e vai
+          // literal para o LLM não reinventar a causa.
+          let _consultaQueJaTem = "";
+          try {
+            const _attRes = await tryFetch(`attendances/${patId}?company_id=${companyId}`, amigoToken);
+            const _attList = normalizeApiResponse(_attRes) as Array<Record<string, unknown>>;
+            const _viva = (Array.isArray(_attList) ? _attList : [])
+              .filter((a) => a.canceled !== true && String(a.status || "").toLowerCase() !== "cancelled")
+              .map((a) => String(a.start_date || a.date || ""))
+              .filter(Boolean)
+              .sort()[0];
+            if (_viva) {
+              const _dia = _viva.split(" ")[0].split("T")[0];
+              const _hora = _viva.includes("T")
+                ? _viva.split("T")[1]?.substring(0, 5)
+                : _viva.split(" ")[1]?.substring(0, 5);
+              _consultaQueJaTem =
+                ` Vi aqui que você já tem uma consulta marcada para *${formatDateLabel(_dia)}*` +
+                `${_hora ? ` às *${_hora}*` : ""}.`;
+            }
+          } catch (e) {
+            console.log(`[Webhook] limite - não consegui ler a consulta existente (não bloqueante): ${(e as Error).message}`);
+          }
+          const _msgLimite =
+            `Não consegui concluir esse agendamento: o sistema da clínica não aceitou uma segunda ` +
+            `marcação para o seu CPF.${_consultaQueJaTem} Já chamei uma atendente — se você quiser ` +
+            `*remarcar* a consulta que já existe, ela resolve rapidinho. 🙏`;
           return {
             status: "success",
-            response: "",
-            error: `O sistema indica que há um limite de atendimentos atingido para esse horário/profissional. Um atendente da recepção foi acionado para resolver essa questão. Aguarde, por favor! 🙏`,
+            response: _msgLimite,
+            error: _msgLimite,
+            bypassAiRewrite: true,
           };
         }
 
@@ -7594,6 +7627,58 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                       }
                     }
                     const uniqueSlots = [...new Set(realSlots)].sort();
+                    // === A VAGA QUE "SUMIU" PODE SER A DELA MESMA (02/09, caso Maria Inês) ===
+                    // 16:57 a Julia agendou 10:40 e disse "Prontinho! Consulta confirmada".
+                    // 16:57/16:58 a paciente mandou o endereço e "consulta é particular" —
+                    // respostas atrasadas do cadastro. O fluxo rodou de novo, viu que 10:40
+                    // não estava mais na grade e respondeu "Puxa, desculpa! Aquele horário
+                    // acabou de ser preenchido". Estava preenchido POR ELA. A paciente então
+                    // pediu 10:20, e esse POST bateu no limite do Amigo (uma marcação por
+                    // CPF) — criado pela consulta que a própria Julia tinha acabado de fazer.
+                    // Antes de dizer que a vaga sumiu, conferir se o dono da vaga é ele.
+                    let _pacienteJaTemEssaVaga = false;
+                    if (uniqueSlots.length > 0 && !uniqueSlots.includes(autoIsoTime) && newPatientId) {
+                      try {
+                        const _attRes = await tryFetch(
+                          `attendances/${newPatientId}?company_id=${companyId}`,
+                          amigoToken,
+                        );
+                        const _attList = normalizeApiResponse(_attRes) as Array<Record<string, unknown>>;
+                        _pacienteJaTemEssaVaga = (Array.isArray(_attList) ? _attList : []).some((a) => {
+                          if (a.canceled === true || String(a.status || "").toLowerCase() === "cancelled") return false;
+                          const bruto = String(a.start_date || a.date || "");
+                          const dia = bruto.split(" ")[0].split("T")[0];
+                          const hora = bruto.includes("T")
+                            ? bruto.split("T")[1]?.substring(0, 5)
+                            : bruto.split(" ")[1]?.substring(0, 5);
+                          const medico = String(a.user_id || (a.user as Record<string, unknown>)?.id || "");
+                          return dia === autoIsoDate && hora === autoIsoTime && medico === String(autoDocId);
+                        });
+                        if (_pacienteJaTemEssaVaga) {
+                          console.log(
+                            `[Webhook] cadastrar - a vaga ${autoIsoTime} de ${autoIsoDate} já é DESTE paciente — não é vaga perdida`,
+                          );
+                        }
+                      } catch (e) {
+                        console.log(`[Webhook] cadastrar - checagem de vaga própria falhou (não bloqueante): ${(e as Error).message}`);
+                      }
+                    }
+                    if (_pacienteJaTemEssaVaga) {
+                      return {
+                        status: "success",
+                        response: JSON.stringify({
+                          registered: true,
+                          scheduled: true,
+                          already_booked: true,
+                          patient_name: entities.patient_full_name,
+                          insurance: insuranceName || "particular",
+                          _doctor_name: autoDocName,
+                          _date: entities.date,
+                          _time: entities.time,
+                        }),
+                        patientName: entities.patient_full_name,
+                      };
+                    }
                     if (uniqueSlots.length > 0 && !uniqueSlots.includes(autoIsoTime)) {
                       console.log(
                         `[Webhook] cadastrar - ⛔ Auto-schedule abortado: ${autoIsoTime} não existe na agenda. Slots reais: [${uniqueSlots.join(",")}]`,
