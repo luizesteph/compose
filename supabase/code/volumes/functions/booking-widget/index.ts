@@ -146,6 +146,48 @@ function jsonResponse(data: unknown, status = 200) {
   });
 }
 
+// ============================================================================
+// canalDeEnvio — o widget mandava TODA confirmação pelo canal DESATIVADO (03/09).
+// ============================================================================
+// As colunas planas de clinic_tokens (avanceai_api_id etc.) apontam para o canal
+// 143, que está com enabled=false. O canal vivo é o 144, e ele só existe dentro
+// de avanceai_active_channel. Resultado medido no log: 15 "AvanceAI send failed:
+// 400" em 48h — TODA pessoa que agendou pelo site da clínica ficou sem a
+// confirmação no WhatsApp, embora a consulta tenha sido criada no Amigo.
+//
+// A mesma lição já tinha custado a Fase 2 do human-transfer-timeout (19/07 e
+// 30/08). Filtra por enabled explicitamente: o parseChannels do transfer-ticket
+// pega o primeiro da lista e só acerta por causa da ordem atual do array.
+function canalDeEnvio(
+  clinic: Record<string, unknown> | null | undefined,
+): { baseUrl: string; apiId: string; bearerToken: string } | null {
+  if (!clinic) return null;
+  const planoBase = String(clinic.avanceai_base_url || "");
+  const planoToken = String(clinic.avanceai_bearer_token || "");
+  try {
+    const bruto = clinic.avanceai_active_channel;
+    const lista = typeof bruto === "string" ? JSON.parse(bruto) : bruto;
+    if (Array.isArray(lista)) {
+      const vivo = lista.find(
+        (c: Record<string, unknown>) => c && c.apiId && c.enabled !== false && c.enabled !== "false",
+      );
+      if (vivo) {
+        const baseUrl = String((vivo as Record<string, unknown>).baseUrl || planoBase);
+        const apiId = String((vivo as Record<string, unknown>).apiId);
+        const bearerToken = String((vivo as Record<string, unknown>).bearerToken || planoToken);
+        if (baseUrl && apiId && bearerToken) return { baseUrl, apiId, bearerToken };
+      }
+    }
+  } catch {
+    /* cai no plano abaixo */
+  }
+  const apiId = String(clinic.avanceai_api_id || "");
+  if (planoBase && apiId && planoToken) {
+    return { baseUrl: planoBase, apiId, bearerToken: planoToken };
+  }
+  return null;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -168,7 +210,7 @@ Deno.serve(async (req) => {
 
     const { data: widget, error: widgetError } = await supabase
       .from("booking_widgets")
-      .select("*, clinic_tokens(token, clinic_name, user_id, avanceai_base_url, avanceai_api_id, avanceai_bearer_token)")
+      .select("*, clinic_tokens(token, clinic_name, user_id, avanceai_base_url, avanceai_api_id, avanceai_bearer_token, avanceai_active_channel)")
       .eq("widget_key", widgetKey)
       .eq("is_active", true)
       .maybeSingle();
@@ -559,9 +601,10 @@ Deno.serve(async (req) => {
         if (result.status >= 200 && result.status < 300 && patientPhone) {
           try {
             const clinicName = widget.clinic_tokens?.clinic_name || "Clínica";
-            const avanceaiBaseUrl = widget.clinic_tokens?.avanceai_base_url;
-            const avanceaiApiId = widget.clinic_tokens?.avanceai_api_id;
-            const avanceaiBearerToken = widget.clinic_tokens?.avanceai_bearer_token;
+            const _canal = canalDeEnvio(widget.clinic_tokens as Record<string, unknown>);
+            const avanceaiBaseUrl = _canal?.baseUrl;
+            const avanceaiApiId = _canal?.apiId;
+            const avanceaiBearerToken = _canal?.bearerToken;
 
             if (avanceaiBaseUrl && avanceaiApiId && avanceaiBearerToken) {
               // Parse date/time from start_date (format: "yyyy-MM-dd HH:mm")
@@ -619,9 +662,10 @@ Deno.serve(async (req) => {
           const _msg2PatientName = patientName;
           const _msg2DoctorName = doctorName;
           const _msg2StartDate = attendanceBody.start_date || "";
-          const _msg2AvanceaiBaseUrl = widget.clinic_tokens?.avanceai_base_url;
-          const _msg2AvanceaiApiId = widget.clinic_tokens?.avanceai_api_id;
-          const _msg2AvanceaiBearerToken = widget.clinic_tokens?.avanceai_bearer_token;
+          const _msg2Canal = canalDeEnvio(widget.clinic_tokens as Record<string, unknown>);
+          const _msg2AvanceaiBaseUrl = _msg2Canal?.baseUrl;
+          const _msg2AvanceaiApiId = _msg2Canal?.apiId;
+          const _msg2AvanceaiBearerToken = _msg2Canal?.bearerToken;
           // Wrap in EdgeRuntime.waitUntil so the 30s sleep + send is not killed when
           // the runtime returns the HTTP response. Falls back to plain IIFE on local dev.
           const _msg2Job = (async () => {
