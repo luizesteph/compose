@@ -158,6 +158,57 @@ function jsonResponse(data: unknown, status = 200) {
 // A mesma lição já tinha custado a Fase 2 do human-transfer-timeout (19/07 e
 // 30/08). Filtra por enabled explicitamente: o parseChannels do transfer-ticket
 // pega o primeiro da lista e só acerta por causa da ordem atual do array.
+// ============================================================================
+// convenioPedeConfirmacao — os planos que a clínica já sabe que dão problema.
+// ============================================================================
+// Regra do dono (08/09): quando alguém marca pelo site, a confirmação deve dizer
+// qual convênio foi usado e, nos três casos abaixo, já pedir o plano — para o
+// problema de autorização aparecer dias antes e não na recepção, no dia.
+//
+// A fonte da verdade é whatsapp-webhook/insurance.ts (CONVENIOS_COM_PLANO). Não dá
+// para importar de lá (é outra função e outro módulo estrito), então a lista está
+// repetida aqui — e há um teste que compara as duas e quebra se divergirem.
+const CONVENIOS_QUE_PEDEM_PLANO: Array<{ chave: string; re: RegExp; pergunta: string }> = [
+  {
+    chave: "Bradesco",
+    re: /\bbradesco\b/i,
+    pergunta: "só atendemos o plano *Top Nacional*",
+  },
+  {
+    chave: "Notre Dame / Hapvida",
+    re: /\b(notre\s*dame|notredame|hapvida)\b/i,
+    pergunta: "só atendemos os planos *900* e *1000*",
+  },
+  {
+    chave: "Porto Seguro",
+    re: /\bporto\s*seguro\b/i,
+    pergunta: "precisamos confirmar a cobertura do seu plano",
+  },
+];
+
+function convenioPedeConfirmacao(nome: unknown): { chave: string; pergunta: string } | null {
+  const n = String(nome || "");
+  if (!n.trim()) return null;
+  for (const c of CONVENIOS_QUE_PEDEM_PLANO) if (c.re.test(n)) return { chave: c.chave, pergunta: c.pergunta };
+  return null;
+}
+
+// Lê o nome do convênio do cadastro do Amigo tolerando os formatos que ele usa
+// (o mesmo motivo de readPatientInsurance existir: ler uma chave só não basta).
+function nomeDoConvenio(fp: unknown): string {
+  const o = fp as Record<string, unknown> | null;
+  if (!o || typeof o !== "object") return "";
+  for (const k of ["insurance_name", "convenio_nome", "health_insurance_name"]) {
+    const v = o[k];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  for (const k of ["health_insurance", "insurance", "insurance_plan", "convenio", "plan"]) {
+    const n = o[k] as Record<string, unknown> | undefined;
+    if (n && typeof n === "object" && typeof n.name === "string" && n.name.trim()) return String(n.name).trim();
+  }
+  return "";
+}
+
 function canalDeEnvio(
   clinic: Record<string, unknown> | null | undefined,
 ): { baseUrl: string; apiId: string; bearerToken: string } | null {
@@ -374,6 +425,9 @@ Deno.serve(async (req) => {
           delete attendanceBody.insurance_id;
         }
 
+        // Nome do convênio para a confirmação (pedido do dono, 08/09). Preenchido
+        // aqui quando o cadastro é lido, e buscado adiante se o front já mandou o id.
+        let _nomeConvenio = "";
         // BILLING FIX: if frontend didn't send insurance_id but patient has one in Amigo, auto-resolve.
         if (!attendanceBody.insurance_id && attendanceBody.patient_id) {
           try {
@@ -401,6 +455,7 @@ Deno.serve(async (req) => {
                   }
                 }
               }
+              _nomeConvenio = nomeDoConvenio(fp) || _nomeConvenio;
               if (insId) {
                 attendanceBody.insurance_id = Number(insId);
                 console.log(`[BookingWidget] create_attendance auto-resolved insurance_id=${insId} for patient ${attendanceBody.patient_id}`);
@@ -622,7 +677,37 @@ Deno.serve(async (req) => {
               const _wlSuffix = (attendanceBody as any).__waitlist_invite
                 ? `\n\n💡 Como sua consulta ficou um pouco distante, se quiser eu te coloco na *lista de espera*: se abrir uma vaga antes com ${doctorName || "o médico"}, te aviso por aqui e a gente antecipa. É só responder *lista de espera*.`
                 : "";
-              const message = `Olá, ${patientName || "paciente"}! Sua consulta foi agendada com sucesso.\n\nClínica: ${clinicName}\nMédico(a): ${doctorName || "N/A"}\nData: ${formattedDate}\nHorário: ${formattedTime}${_wlSuffix}\n\nEm caso de dúvidas, entre em contato conosco. Obrigado!`;
+              // === CONVÊNIO NA CONFIRMAÇÃO (pedido do dono, 08/09) ===
+              // A confirmação não dizia se saiu por plano ou particular, então o
+              // paciente só descobria na recepção. Agora diz — e nos três convênios
+              // que a clínica sabe que dão problema de autorização, já pede o plano
+              // na mesma mensagem, dias antes da consulta.
+              if (attendanceBody.insurance_id && !_nomeConvenio) {
+                try {
+                  const _pr = await tryFetch(
+                    `patients/${attendanceBody.patient_id}?company_id=${companyId}`,
+                    amigoToken,
+                  );
+                  if (_pr.status >= 200 && _pr.status < 300) {
+                    let _fp: any = _pr.data;
+                    if (_fp && typeof _fp === "object" && "data" in _fp) _fp = _fp.data;
+                    if (Array.isArray(_fp)) _fp = _fp[0];
+                    _nomeConvenio = nomeDoConvenio(_fp);
+                  }
+                } catch (e) {
+                  console.log(`[BookingWidget] nome do convênio não lido (não bloqueante): ${(e as Error).message}`);
+                }
+              }
+              const _linhaConvenio = attendanceBody.insurance_id
+                ? `\nConvênio: ${_nomeConvenio || "(convênio cadastrado)"}`
+                : `\nConvênio: Particular`;
+              const _flag = attendanceBody.insurance_id ? convenioPedeConfirmacao(_nomeConvenio) : null;
+              const _pedidoConvenio = _flag
+                ? `\n\n⚠️ Sobre a *${_flag.chave}*: ${_flag.pergunta}. Me confirma aqui qual é o seu plano, por favor? Assim a gente resolve antes do dia da consulta. 🙏`
+                : !attendanceBody.insurance_id
+                  ? `\n\nSe você tem convênio e quer usar, me avisa por aqui qual é — dá tempo de ajustar antes da consulta. 😊`
+                  : "";
+              const message = `Olá, ${patientName || "paciente"}! Sua consulta foi agendada com sucesso.\n\nClínica: ${clinicName}\nMédico(a): ${doctorName || "N/A"}\nData: ${formattedDate}\nHorário: ${formattedTime}${_linhaConvenio}${_wlSuffix}${_pedidoConvenio}\n\nEm caso de dúvidas, entre em contato conosco. Obrigado!`;
 
               // Clean phone number
               const cleanPhone = String(patientPhone).replace(/\D/g, "");
