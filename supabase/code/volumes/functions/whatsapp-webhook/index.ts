@@ -9956,18 +9956,86 @@ async function isHumanActive(
   avanceaiBearerToken: string | null,
   phone: string,
   resolvedChannelId: string | null,
+  prazoGuardaMin = 0,
 ): Promise<{ blocked: boolean; reason: string }> {
+  // ── PRAZO DA GUARDA (pedido do dono, 08/09) ────────────────────────────────
+  // A guarda cala a Julia enquanto o ticket tem dono humano. Certo — enquanto a
+  // atendente está conduzindo. Mas ela não olhava o relógio: havia paciente sem
+  // resposta com a atendente calada há 13 DIAS ("estou precisando, tenho que
+  // levar hoje às 15h"). Medido em 6 dias: 55 mensagens de 45 pessoas ficaram
+  // sem resposta de ninguém — e 72% dos casos a atendente respondia em 30 min,
+  // então o prazo separa bem os dois mundos.
+  //
+  // O relógio começa na PRIMEIRA mensagem que a guarda pulou depois da última
+  // fala humana. Isso dá 30 minutos cheios a quem acabou de assumir o ticket e
+  // ainda não digitou — o caso que eu mais queria não quebrar.
+  //
+  // clinic_tokens.human_guard_timeout_min = 0 volta ao comportamento antigo,
+  // sem deploy.
+  const _prazo = Number(prazoGuardaMin) > 0 ? Number(prazoGuardaMin) : 0;
+  const _desdeJanela = new Date(Date.now() - _prazo * 60 * 1000).toISOString();
+  // Há quanto tempo o humano está calado? Devolve null quando não dá para saber.
+  let _caladoCache: boolean | null = null;
+  const _humanoCaladoHaMaisDe = async (): Promise<boolean> => {
+    if (_caladoCache !== null) return _caladoCache;
+    if (!_prazo || !conversationId || !supabaseClient) return false;
+    try {
+      // alguém digitou dentro da janela? então está conduzindo.
+      const { data: falou } = await supabaseClient
+        .from("webhook_messages")
+        .select("created_at")
+        .eq("conversation_id", conversationId)
+        .eq("direction", "outgoing")
+        .eq("ai_intent", "manual_reply")
+        .gte("created_at", _desdeJanela)
+        .limit(1)
+        .maybeSingle();
+      if (falou) return false;
+      // senão, o relógio começa na primeira mensagem pulada desde a última fala humana
+      const { data: ultimaFala } = await supabaseClient
+        .from("webhook_messages")
+        .select("created_at")
+        .eq("conversation_id", conversationId)
+        .eq("direction", "outgoing")
+        .eq("ai_intent", "manual_reply")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      let q = supabaseClient
+        .from("webhook_messages")
+        .select("created_at")
+        .eq("conversation_id", conversationId)
+        .eq("action_status", "skipped")
+        .like("action_error", "Humano ativo%")
+        .order("created_at", { ascending: true })
+        .limit(1);
+      if (ultimaFala?.created_at) q = q.gt("created_at", ultimaFala.created_at);
+      const { data: primeiroPulo } = await q.maybeSingle();
+      // nunca pulamos nada ainda: dá a vez à atendente
+      if (!primeiroPulo?.created_at) return false;
+      _caladoCache = primeiroPulo.created_at < _desdeJanela;
+      return _caladoCache;
+    } catch (_) {
+      return false; // na dúvida, mantém o comportamento antigo
+    }
+  };
   // Signal 1: raw payload check
   const rawStatus = String((rawTicket?.status as string) || "");
   const rawUserId = Number(rawTicket?.userId || 0);
   if (rawStatus === "open" && rawUserId > 0) {
-    return { blocked: true, reason: `raw_payload(status=open,userId=${rawUserId})` };
+    if (await _humanoCaladoHaMaisDe()) {
+      console.log(
+        `[isHumanActive] ticket é do userId=${rawUserId}, mas ninguém fala há mais de ${_prazo}min — devolvendo a conversa para a Julia`,
+      );
+    } else {
+      return { blocked: true, reason: `raw_payload(status=open,userId=${rawUserId})` };
+    }
   }
 
-  // Signal 2: recent manual_reply (≤2h) — a human already typed something in this card
+  // Signal 2: recent manual_reply (≤2h, ou o prazo da guarda quando ligado)
   if (conversationId && supabaseClient) {
     try {
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+      const twoHoursAgo = _prazo ? _desdeJanela : new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
       const { data: manual } = await supabaseClient
         .from("webhook_messages")
         .select("created_at")
@@ -10033,7 +10101,15 @@ async function isHumanActive(
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle();
-      if (handoff) {
+      // O prazo vale aqui também — e este é o sinal que o dono identificou:
+      // a devolução por inatividade grava em transfer_audit, e o registro calava
+      // a Julia por 24h. Ou seja, devolver o ticket para a fila (que era para
+      // ajudar) era o que garantia o silêncio. 141 devoluções em 03/09.
+      if (handoff && _prazo && (await _humanoCaladoHaMaisDe())) {
+        console.log(
+          `[isHumanActive] handoff registrado, mas ninguém fala há mais de ${_prazo}min — devolvendo a conversa para a Julia`,
+        );
+      } else if (handoff) {
         return {
           blocked: true,
           reason: `handoff_ativo(${String(handoff.reason || "transferido")},<${horas}h)`,
@@ -10063,9 +10139,10 @@ async function isHumanActive(
         // staleness, o ticket esta abandonado -> libera a IA. Conservador: um humano
         // ativo na janela (Signals 2/3 + esta checagem) continua bloqueando.
         const staleHours = Number(Deno.env.get("HUMAN_TICKET_STALE_HOURS") || "8") || 8;
+        const _staleCorte = _prazo ? _desdeJanela : null;
         if (check.status === "open" && conversationId && supabaseClient) {
           try {
-            const staleCutoff = new Date(Date.now() - staleHours * 60 * 60 * 1000).toISOString();
+            const staleCutoff = _staleCorte || new Date(Date.now() - staleHours * 60 * 60 * 1000).toISOString();
             const { data: recentHuman } = await supabaseClient
               .from("webhook_messages")
               .select("created_at")
@@ -11290,7 +11367,7 @@ Deno.serve(async (req) => {
       // Get clinic data
       let tokenQuery = supabase
         .from("clinic_tokens")
-        .select("token, ai_enabled, avanceai_base_url, avanceai_api_id, avanceai_bearer_token, avanceai_active_channel")
+        .select("token, ai_enabled, avanceai_base_url, avanceai_api_id, avanceai_bearer_token, avanceai_active_channel, human_guard_timeout_min")
         .eq("user_id", userId)
         .eq("is_active", true);
 
@@ -11933,6 +12010,7 @@ Deno.serve(async (req) => {
           avanceaiBearerToken,
           phone,
           resolvedChannelId,
+          Number((tokenData as any)?.human_guard_timeout_min ?? 0) || 0,
         );
         if (humanCheck.blocked) {
           console.log(`[Webhook] ⛔ Human active — skipping AI. Reason: ${humanCheck.reason}`);
