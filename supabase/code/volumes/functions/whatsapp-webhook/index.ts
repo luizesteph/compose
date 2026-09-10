@@ -12747,9 +12747,18 @@ Deno.serve(async (req) => {
         if (!forceRegistrationIntent && lastOutgoing && lastOutgoing.ai_intent === "manual_reply") {
           const lastOutgoingTime = lastOutgoing.created_at ? new Date(lastOutgoing.created_at as string).getTime() : 0;
           const hoursSinceManual = (Date.now() - lastOutgoingTime) / (1000 * 60 * 60);
-          if (hoursSinceManual <= 2) {
+          // === O MESMO PRAZO DA GUARDA (09/09) ===
+          // Esta trava é SEPARADA do isHumanActive e ficou de fora do ajuste de
+          // 08/09 — continuava com 2h fixas. Caso Udo (09/09): a Glaucia mandou um
+          // documento às 14:11; às 15:46, 15:47 e 15:49 ele respondeu propondo datas
+          // ("dia 18/09", "pode ser dia 21/09 de manhã") e as TRÊS foram engolidas,
+          // porque ainda estava dentro das 2h. Agora usa clinic_tokens
+          // .human_guard_timeout_min — o mesmo botão desliga tudo.
+          const _prazoManualMin = Number((tokenData as any)?.human_guard_timeout_min ?? 0) || 0;
+          const limiteHoras = _prazoManualMin > 0 ? _prazoManualMin / 60 : 2;
+          if (hoursSinceManual <= limiteHoras) {
             console.log(
-              `[Webhook] ⛔ Last outgoing was human-sent (manual_reply, ${hoursSinceManual.toFixed(1)}h ago) — skipping AI processing`,
+              `[Webhook] ⛔ Last outgoing was human-sent (manual_reply, ${hoursSinceManual.toFixed(1)}h ago, limite ${limiteHoras.toFixed(2)}h) — skipping AI processing`,
             );
             await supabase
               .from("webhook_messages")
