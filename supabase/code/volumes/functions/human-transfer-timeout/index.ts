@@ -874,6 +874,60 @@ Deno.serve(async (req) => {
   const summary = { checked: 0, reassigned: 0, expired: 0, errors: 0 };
 
   try {
+    // ── FASE 4: varredura da ficha — RODA PRIMEIRO ──────────────────────────
+    // Ela nasceu no fim do arquivo e ficou 1 rodada em 10. Medido em 12/09, dez
+    // minutos depois de subir: 10 linhas de `[devolver-fila]` no log para UMA de
+    // `[ficha]`, e no meio delas "wall clock duration warning / early termination
+    // has been triggered". As Fases 1-3 gastam o orçamento do isolate — a 2
+    // sozinha avalia ~96 conversas e faz ~50 showticket por rodada — e o worker
+    // era morto antes de chegar aqui. Quem vem por último nunca roda.
+    //
+    // A ordem é a correção: esta fase é barata e TEM TETO (3 chamadas quando não
+    // há nada a liberar, no máximo ~33 quando há dez). As outras são as caras, e
+    // são justamente as que aguentam ser cortadas no meio: o que sobrou sai na
+    // rodada seguinte, e elas já logam quanto ficou para trás.
+    // FORA do `if (DEVOLVER_FILA_ENABLED)` de propósito. A chave da Fase 2 é uma
+    // variável de ambiente que o dono desliga pelo Easypanel num expediente
+    // ruim; se a Fase 4 morasse dentro dela, esse gesto apagaria junto uma coisa
+    // que ele nunca pediu para apagar. Esta tem o próprio botão, no banco:
+    //     update clinic_tokens set varredura_ficha_min = 0;
+    try {
+      const agoraSP = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
+      const agora = { diaDaSemana: agoraSP.getDay(), hora: agoraSP.getHours(), minuto: agoraSP.getMinutes() };
+      // FALHA FECHADA: enquanto as colunas de 20260912120000_varredura_da_ficha.sql
+      // não existirem, este select devolve erro, a lista vem vazia e a varredura
+      // não roda. É de propósito — sem a coluna não existe o botão de desligar,
+      // e ligar uma varredura que mexe em ticket de paciente sem ter como desligá-la
+      // é exatamente o tipo de coisa que não se faz. O log diz isso em voz alta
+      // em vez de deixar "0 avaliados" parecendo "não havia caso nenhum".
+      const { data: clinicasF4, error: erroF4 } = await supabase
+        .from("clinic_tokens")
+        .select("id, avanceai_base_url, avanceai_api_id, avanceai_bearer_token, avanceai_active_channel, varredura_ficha_min, varredura_ficha_offline_min, varredura_ficha_fora_min");
+      if (erroF4) {
+        console.log(`[ficha] DESLIGADA — falta a migration 20260912120000_varredura_da_ficha.sql (${erroF4.message})`);
+      }
+      for (const cl of (clinicasF4 || [])) {
+        const creds = canalVivo(cl);
+        if (!creds) { console.log(`[ficha] clinica ${cl.id}: sem canal unico — pulando`); continue; }
+        const limites: LimitesDaFicha = {
+          ocioso: Number(cl.varredura_ficha_min ?? LIMITES_PADRAO_DA_FICHA.ocioso) || 0,
+          donaOffline: Number(cl.varredura_ficha_offline_min ?? LIMITES_PADRAO_DA_FICHA.donaOffline) || 0,
+          foraDeExpediente: Number(cl.varredura_ficha_fora_min ?? LIMITES_PADRAO_DA_FICHA.foraDeExpediente) || 0,
+          idadeMaximaDias: LIMITES_PADRAO_DA_FICHA.idadeMaximaDias,
+        };
+        if (limites.ocioso <= 0) continue;   // desligada nesta clínica
+        const r4 = await varrerFichasParadas(supabase, cl.id, creds, limites, agora);
+        (summary as any).ficha_avaliados = ((summary as any).ficha_avaliados || 0) + r4.avaliados;
+        (summary as any).ficha_liberados = ((summary as any).ficha_liberados || 0) + r4.liberados;
+        const p4 = Object.entries(r4.pulos).map(([k, v]) => `${k}=${v}`).join(",") || "nenhum";
+        console.log(`[ficha] clinica=${cl.id} canal=${creds.channelId || "plano"} avaliados=${r4.avaliados} liberados=${r4.liberados} pulos: ${p4}`);
+        if (r4.detalhes.length) console.log(`[ficha] ${r4.detalhes.join(" | ")}`);
+      }
+    } catch (e) {
+      console.error(`[ficha] fatal: ${(e as Error).message}`);
+    }
+
+
     const nowIso = new Date().toISOString();
     const { data: rows, error } = await supabase
       .from("pending_human_transfers")
@@ -1155,48 +1209,6 @@ Deno.serve(async (req) => {
           }
         }
       }
-
-    // ── FASE 4: varredura da ficha ──────────────────────────────────────────
-    // FORA do `if (DEVOLVER_FILA_ENABLED)` de propósito. A chave da Fase 2 é uma
-    // variável de ambiente que o dono desliga pelo Easypanel num expediente
-    // ruim; se a Fase 4 morasse dentro dela, esse gesto apagaria junto uma coisa
-    // que ele nunca pediu para apagar. Esta tem o próprio botão, no banco:
-    //     update clinic_tokens set varredura_ficha_min = 0;
-    try {
-      const agoraSP = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
-      const agora = { diaDaSemana: agoraSP.getDay(), hora: agoraSP.getHours(), minuto: agoraSP.getMinutes() };
-      // FALHA FECHADA: enquanto as colunas de 20260912120000_varredura_da_ficha.sql
-      // não existirem, este select devolve erro, a lista vem vazia e a varredura
-      // não roda. É de propósito — sem a coluna não existe o botão de desligar,
-      // e ligar uma varredura que mexe em ticket de paciente sem ter como desligá-la
-      // é exatamente o tipo de coisa que não se faz. O log diz isso em voz alta
-      // em vez de deixar "0 avaliados" parecendo "não havia caso nenhum".
-      const { data: clinicasF4, error: erroF4 } = await supabase
-        .from("clinic_tokens")
-        .select("id, avanceai_base_url, avanceai_api_id, avanceai_bearer_token, avanceai_active_channel, varredura_ficha_min, varredura_ficha_offline_min, varredura_ficha_fora_min");
-      if (erroF4) {
-        console.log(`[ficha] DESLIGADA — falta a migration 20260912120000_varredura_da_ficha.sql (${erroF4.message})`);
-      }
-      for (const cl of (clinicasF4 || [])) {
-        const creds = canalVivo(cl);
-        if (!creds) { console.log(`[ficha] clinica ${cl.id}: sem canal unico — pulando`); continue; }
-        const limites: LimitesDaFicha = {
-          ocioso: Number(cl.varredura_ficha_min ?? LIMITES_PADRAO_DA_FICHA.ocioso) || 0,
-          donaOffline: Number(cl.varredura_ficha_offline_min ?? LIMITES_PADRAO_DA_FICHA.donaOffline) || 0,
-          foraDeExpediente: Number(cl.varredura_ficha_fora_min ?? LIMITES_PADRAO_DA_FICHA.foraDeExpediente) || 0,
-          idadeMaximaDias: LIMITES_PADRAO_DA_FICHA.idadeMaximaDias,
-        };
-        if (limites.ocioso <= 0) continue;   // desligada nesta clínica
-        const r4 = await varrerFichasParadas(supabase, cl.id, creds, limites, agora);
-        (summary as any).ficha_avaliados = ((summary as any).ficha_avaliados || 0) + r4.avaliados;
-        (summary as any).ficha_liberados = ((summary as any).ficha_liberados || 0) + r4.liberados;
-        const p4 = Object.entries(r4.pulos).map(([k, v]) => `${k}=${v}`).join(",") || "nenhum";
-        console.log(`[ficha] clinica=${cl.id} canal=${creds.channelId || "plano"} avaliados=${r4.avaliados} liberados=${r4.liberados} pulos: ${p4}`);
-        if (r4.detalhes.length) console.log(`[ficha] ${r4.detalhes.join(" | ")}`);
-      }
-    } catch (e) {
-      console.error(`[ficha] fatal: ${(e as Error).message}`);
-    }
 
     return new Response(JSON.stringify({ ok: true, summary }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
