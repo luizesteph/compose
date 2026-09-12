@@ -17,7 +17,14 @@
 //       - Insert routing_log entry for audit
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { exigeRespostaDaAtendente, prazoDeRespostaEmMinutos } from "../_shared/atendimento.ts";
+import {
+  exigeRespostaDaAtendente,
+  prazoDeRespostaEmMinutos,
+  decideLiberarFicha,
+  expedienteAberto,
+  LIMITES_PADRAO_DA_FICHA,
+  type LimitesDaFicha,
+} from "../_shared/atendimento.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -610,6 +617,233 @@ async function varrerEngolidas(
   return out;
 }
 
+/**
+ * Credenciais do canal VIVO de uma clínica (lição 19/07, ERR_API_REQUIRES_SESSION).
+ *
+ * As colunas planas da clinic_tokens hoje apontam para o canal 143, DESLIGADO.
+ * Quem fala com o paciente é o canal de dentro do `avanceai_active_channel`.
+ * Devolve `null` quando há mais de um canal ligado: com dois não dá para
+ * adivinhar por qual o paciente falou, e agir no canal errado é pior que parar.
+ */
+function canalVivo(cl: any): { baseUrl: string; apiId: string; bearerToken: string; channelId: string | null } | null {
+  if (!cl?.avanceai_base_url || !cl?.avanceai_api_id || !cl?.avanceai_bearer_token) return null;
+  try {
+    const parsed = typeof cl.avanceai_active_channel === "string"
+      ? JSON.parse(cl.avanceai_active_channel) : cl.avanceai_active_channel;
+    const habilitados = Array.isArray(parsed)
+      ? parsed.filter((ch: any) => ch && ch.apiId && ch.baseUrl && ch.enabled !== false) : [];
+    if (habilitados.length > 1) return null;
+    if (habilitados.length === 1) {
+      return {
+        baseUrl: String(habilitados[0].baseUrl),
+        apiId: String(habilitados[0].apiId),
+        bearerToken: String(habilitados[0].bearerToken || cl.avanceai_bearer_token || ""),
+        channelId: habilitados[0].id != null ? String(habilitados[0].id) : null,
+      };
+    }
+  } catch { /* cai nas colunas planas */ }
+  return {
+    baseUrl: String(cl.avanceai_base_url),
+    apiId: String(cl.avanceai_api_id),
+    bearerToken: String(cl.avanceai_bearer_token),
+    channelId: null,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FASE 4 — VARREDURA DA FICHA (pedido do dono, 12/09)
+// ─────────────────────────────────────────────────────────────────────────────
+// "Mesmo que a pessoa deixou alguns lá na própria fila, tudo isso fosse para
+//  pendentes."
+//
+// A Fase 2 devolve quando o PACIENTE está esperando resposta. Esta devolve
+// quando NINGUÉM está trabalhando o ticket — que é outro problema, e é o que
+// sobra no fim do dia. As duas terminam no mesmo estado (pending, sem dono), e
+// por isso não brigam: quem a Fase 2 já devolveu não tem mais dono e sai daqui
+// pelo motivo "sem_dona".
+//
+// POR QUE NÃO REUSAR A FASE 2: ela parte da chat_conversations (espelho, janela
+// de 3 dias, 200 linhas) e exige showticket status="open". Os cinco tickets que
+// no sábado 12/09 estavam em "pending" AINDA com o nome da Lidiane — pendente e
+// com dona ao mesmo tempo, o caso exato que o dono descreveu — são jogados fora
+// por ela no `nao_esta_open`. Esta fase lê o listTickets direto: é a lista de
+// verdade, inclui pending, e não depende do espelho estar em dia.
+//
+// SEM PINGUE-PONGUE, por construção: ela nunca entrega o ticket a alguém, só
+// tira o nome. Rodada seguinte, o mesmo ticket já não tem dona e é ignorado.
+// O freio da Fase 2 (TETO_DEVOLUCOES) não faz falta aqui.
+async function varrerFichasParadas(
+  supabase: any,
+  clinicTokenId: string,
+  creds: { baseUrl: string; apiId: string; bearerToken: string; channelId?: string | null },
+  limites: LimitesDaFicha,
+  agoraSP: { diaDaSemana: number; hora: number; minuto: number },
+): Promise<{ avaliados: number; liberados: number; pulos: Record<string, number>; detalhes: string[] }> {
+  const out = {
+    avaliados: 0,
+    liberados: 0,
+    pulos: {} as Record<string, number>,
+    detalhes: [] as string[],
+  };
+  const pulou = (m: string) => { out.pulos[m] = (out.pulos[m] || 0) + 1; };
+
+  // Teto por rodada. O cron roda de 2 em 2 min: a primeira varredura de uma
+  // segunda-feira encontra o acúmulo do fim de semana e não precisa despejar
+  // tudo de uma vez na cara de quem acabou de chegar.
+  const TETO_POR_RODADA = 10;
+
+  const auth = { Authorization: `Bearer ${creds.bearerToken}`, "Content-Type": "application/json" };
+  const canal = creds.channelId ? Number(creds.channelId) : null;
+
+  // Quem está online AGORA — uma chamada só, para todo mundo. O getUserStatus
+  // por usuário custaria uma chamada por ticket.
+  //
+  // Só o "offline" é levado a sério. Em 12/09, um sábado ao meio-dia, o Z-PRO
+  // ainda listava a Laiz como online: ela saiu na sexta e nunca desmarcou. Ou
+  // seja, `isOnline: true` não prova presença — prova apenas que ninguém clicou.
+  // Quem depende de presença é só o prazo curto de 30 min; os outros dois
+  // (expediente fechado, ocioso demais) funcionam sem essa informação.
+  const online = new Map<number, boolean>();
+  // Quem é admin fica FORA da varredura. O dono e a conta "CBT" não estão no
+  // rodízio de plantão: o pedido era sobre atendente que vai embora às 16h e
+  // deixa a ficha suja, não sobre o médico que guardou uma conversa no nome
+  // dele de propósito. Para passar a varrer admin também, apagar este Set.
+  const admins = new Set<number>();
+  try {
+    const r = await fetch(`${creds.baseUrl}/v2/api/external/${creds.apiId}/listUsers?pageNumber=1`, { headers: auth });
+    if (r.ok) {
+      const d = await r.json();
+      for (const u of (d?.data || [])) {
+        if (!u || u.id == null) continue;
+        online.set(Number(u.id), !!u.isOnline);
+        if (String(u.profile || "").toLowerCase() === "admin") admins.add(Number(u.id));
+      }
+    }
+  } catch { /* sem a lista, `donaOnline` fica null e o prazo de 30 min não dispara */ }
+
+  const aberto = expedienteAberto(agoraSP);
+
+  // open E pending: o ticket "pending com dona" é o caso do dono.
+  const tickets: any[] = [];
+  for (const status of ["open", "pending"]) {
+    try {
+      const r = await fetch(
+        `${creds.baseUrl}/v2/api/external/${creds.apiId}/listTickets?pageNumber=1&status=${status}`,
+        { headers: { Authorization: `Bearer ${creds.bearerToken}` } },
+      );
+      if (!r.ok) { pulou(`listTickets_${status}_${r.status}`); continue; }
+      const d = await r.json();
+      for (const t of (d?.data || [])) tickets.push(t);
+    } catch { pulou(`listTickets_${status}_erro`); }
+  }
+
+  const agoraMs = Date.now();
+  for (const t of tickets) {
+    // CANAL: a clínica tem outras linhas (143 desligada, 164 do marketing) e o
+    // dono foi explícito que não quer o robô mexendo nelas.
+    if (canal != null && Number(t?.whatsappId) !== canal) { pulou("outro_canal"); continue; }
+
+    const donaId = t?.userId != null ? Number(t.userId) : null;
+    const donaNome = String(t?.username || "").trim();
+    if (!donaId) { pulou("sem_dona"); continue; }
+    if (admins.has(donaId)) { pulou("dona_admin"); continue; }
+
+    // lastMessageAt vem como epoch em MILISSEGUNDOS, string. Ticket antigo às
+    // vezes vem sem ele — aí o updatedAt é o melhor que existe.
+    let ultimaMs = Number(t?.lastMessageAt || 0);
+    if (!Number.isFinite(ultimaMs) || ultimaMs <= 0) {
+      ultimaMs = Date.parse(String(t?.updatedAt || "")) || 0;
+    }
+    if (!ultimaMs) { pulou("sem_data"); continue; }
+
+    const ociosoMin = (agoraMs - ultimaMs) / 60000;
+    const idadeDias = ociosoMin / 1440;
+    out.avaliados++;
+
+    const d = decideLiberarFicha({
+      temDona: true,
+      ociosoMin,
+      idadeDias,
+      donaOnline: online.has(donaId) ? online.get(donaId)! : null,
+      expedienteAberto: aberto,
+    }, limites);
+    if (!d.liberar) { pulou(d.motivo); continue; }
+    if (out.liberados >= TETO_POR_RODADA) { pulou("teto_da_rodada"); continue; }
+
+    const ticketId = Number(t?.id || 0);
+    if (!ticketId) { pulou("sem_ticket_id"); continue; }
+
+    try {
+      const r = await fetch(`${creds.baseUrl}/v2/api/external/${creds.apiId}/updateticketinfo`, {
+        method: "POST",
+        headers: auth,
+        body: JSON.stringify({
+          ticketId,
+          status: "pending",
+          userId: null,
+          ...(canal != null ? { channelId: canal, whatsappId: canal } : {}),
+        }),
+      });
+      if (!r.ok) { pulou(`updateticketinfo_${r.status}`); continue; }
+      out.liberados++;
+      out.detalhes.push(`#${ticketId} (${donaNome || donaId}, ${Math.round(ociosoMin)}min, ${d.motivo}) → pendentes`);
+
+      // O telefone não vem no listTickets. Ele sai do remoteJid da última
+      // mensagem — e só para os tickets que REALMENTE vão ser liberados, que são
+      // no máximo dez por rodada. Sem telefone a linha de auditoria fica órfã:
+      // aparece na aba Transferências sem levar a conversa nenhuma.
+      let phone: string | null = null;
+      try {
+        const rm = await fetch(`${creds.baseUrl}/v2/api/external/${creds.apiId}/showAllMessages`, {
+          method: "POST", headers: auth, body: JSON.stringify({ ticket: String(ticketId) }),
+        });
+        if (rm.ok) {
+          const dm = await rm.json();
+          const jid = (dm?.data || []).map((m: any) => m?.remoteJid).find((j: any) => typeof j === "string");
+          const so = String(jid || "").replace(/\D/g, "");
+          if (so.length >= 10) phone = so;
+        }
+      } catch { /* auditoria sem telefone ainda é melhor que nenhuma */ }
+
+      let conversationId: string | null = null;
+      if (phone) {
+        const curto = phone.slice(-8);
+        const { data: conv } = await supabase
+          .from("chat_conversations")
+          .select("id")
+          .eq("clinic_token_id", clinicTokenId)
+          .like("phone", `%${curto}`)
+          .order("last_message_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        conversationId = (conv as { id?: string } | null)?.id || null;
+        if (conversationId) {
+          await supabase.from("chat_conversations")
+            .update({ assigned_agent_name: null, ticket_status: "pending" })
+            .eq("id", conversationId);
+        }
+      }
+
+      await supabase.from("transfer_audit").insert({
+        clinic_token_id: clinicTokenId,
+        conversation_id: conversationId,
+        phone,
+        from_attendant: donaNome || String(donaId),
+        to_attendant: null,
+        initiated_by: "sistema",
+        trigger: "ficha_parada",
+        reason: d.motivo,
+        detail: `ticket #${ticketId} parado ha ${Math.round(ociosoMin)}min com ${donaNome || donaId} — tirei o nome para todos verem`,
+      } as any).then(() => {}, () => {});
+    } catch (e) {
+      out.detalhes.push(`#${ticketId}: ${(e as Error).message.slice(0, 80)}`);
+      pulou("erro_ao_liberar");
+    }
+  }
+
+  return out;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
@@ -921,6 +1155,48 @@ Deno.serve(async (req) => {
           }
         }
       }
+
+    // ── FASE 4: varredura da ficha ──────────────────────────────────────────
+    // FORA do `if (DEVOLVER_FILA_ENABLED)` de propósito. A chave da Fase 2 é uma
+    // variável de ambiente que o dono desliga pelo Easypanel num expediente
+    // ruim; se a Fase 4 morasse dentro dela, esse gesto apagaria junto uma coisa
+    // que ele nunca pediu para apagar. Esta tem o próprio botão, no banco:
+    //     update clinic_tokens set varredura_ficha_min = 0;
+    try {
+      const agoraSP = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
+      const agora = { diaDaSemana: agoraSP.getDay(), hora: agoraSP.getHours(), minuto: agoraSP.getMinutes() };
+      // FALHA FECHADA: enquanto as colunas de 20260912120000_varredura_da_ficha.sql
+      // não existirem, este select devolve erro, a lista vem vazia e a varredura
+      // não roda. É de propósito — sem a coluna não existe o botão de desligar,
+      // e ligar uma varredura que mexe em ticket de paciente sem ter como desligá-la
+      // é exatamente o tipo de coisa que não se faz. O log diz isso em voz alta
+      // em vez de deixar "0 avaliados" parecendo "não havia caso nenhum".
+      const { data: clinicasF4, error: erroF4 } = await supabase
+        .from("clinic_tokens")
+        .select("id, avanceai_base_url, avanceai_api_id, avanceai_bearer_token, avanceai_active_channel, varredura_ficha_min, varredura_ficha_offline_min, varredura_ficha_fora_min");
+      if (erroF4) {
+        console.log(`[ficha] DESLIGADA — falta a migration 20260912120000_varredura_da_ficha.sql (${erroF4.message})`);
+      }
+      for (const cl of (clinicasF4 || [])) {
+        const creds = canalVivo(cl);
+        if (!creds) { console.log(`[ficha] clinica ${cl.id}: sem canal unico — pulando`); continue; }
+        const limites: LimitesDaFicha = {
+          ocioso: Number(cl.varredura_ficha_min ?? LIMITES_PADRAO_DA_FICHA.ocioso) || 0,
+          donaOffline: Number(cl.varredura_ficha_offline_min ?? LIMITES_PADRAO_DA_FICHA.donaOffline) || 0,
+          foraDeExpediente: Number(cl.varredura_ficha_fora_min ?? LIMITES_PADRAO_DA_FICHA.foraDeExpediente) || 0,
+          idadeMaximaDias: LIMITES_PADRAO_DA_FICHA.idadeMaximaDias,
+        };
+        if (limites.ocioso <= 0) continue;   // desligada nesta clínica
+        const r4 = await varrerFichasParadas(supabase, cl.id, creds, limites, agora);
+        (summary as any).ficha_avaliados = ((summary as any).ficha_avaliados || 0) + r4.avaliados;
+        (summary as any).ficha_liberados = ((summary as any).ficha_liberados || 0) + r4.liberados;
+        const p4 = Object.entries(r4.pulos).map(([k, v]) => `${k}=${v}`).join(",") || "nenhum";
+        console.log(`[ficha] clinica=${cl.id} canal=${creds.channelId || "plano"} avaliados=${r4.avaliados} liberados=${r4.liberados} pulos: ${p4}`);
+        if (r4.detalhes.length) console.log(`[ficha] ${r4.detalhes.join(" | ")}`);
+      }
+    } catch (e) {
+      console.error(`[ficha] fatal: ${(e as Error).message}`);
+    }
 
     return new Response(JSON.stringify({ ok: true, summary }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
