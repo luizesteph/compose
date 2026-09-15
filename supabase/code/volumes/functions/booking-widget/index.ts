@@ -1,4 +1,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+// Mesmas regras de convênio do WhatsApp — uma fonte só. insurance.ts não importa
+// nada, então pode ser usado aqui sem arrastar o webhook junto.
+import { isInsuranceRejection, readPatientInsurance } from "../whatsapp-webhook/insurance.ts";
 
 // DE ONDE VEIO O AGENDAMENTO DO SITE (28/08) ─────────────────────────────────
 // O link que a Julia manda no WhatsApp carrega
@@ -425,43 +428,67 @@ Deno.serve(async (req) => {
           delete attendanceBody.insurance_id;
         }
 
+        // PACIENTE NOVO COM CONVÊNIO SAÍA PARTICULAR (15/09). A tela cadastra o
+        // paciente e em seguida marca. O convênio escolhido no cadastro não
+        // chegava na marcação: a tela procurava o id numa chave que o Amigo não
+        // devolve, e a releitura do cadastro, segundos depois, também voltava
+        // vazia. Resultado medido: paciente cadastrado com Bradesco, Omint e
+        // SulAmérica marcado como particular (11/09 e 05/09). Agora a tela manda o
+        // GRUPO que o paciente escolheu, e o plano sai daqui — o mesmo que o
+        // create_patient usou para o cadastro. Nunca vai para o Amigo como campo.
+        const _grupoConvenio = attendanceBody.insurance_group_id;
+        delete attendanceBody.insurance_group_id;
+        if (!attendanceBody.insurance_id && _grupoConvenio && /^\d+$/.test(String(_grupoConvenio).trim())) {
+          try {
+            const plansRes = await tryFetch(`insurances/plans/${_grupoConvenio}?company_id=${companyId}`, amigoToken);
+            let plans: unknown[] = [];
+            const pd: any = plansRes.data;
+            if (Array.isArray(pd)) plans = pd;
+            else if (pd && typeof pd === "object" && Array.isArray(pd.data)) plans = pd.data;
+            const planoId = plans.length > 0 ? (plans[0] as Record<string, unknown>).id : _grupoConvenio;
+            if (planoId && /^\d+$/.test(String(planoId))) {
+              attendanceBody.insurance_id = Number(planoId);
+              console.log(`[BookingWidget] create_attendance: convênio do cadastro recém-feito — grupo ${_grupoConvenio} → plano ${planoId}`);
+            }
+          } catch (gErr) {
+            console.log(`[BookingWidget] create_attendance: plano do grupo ${_grupoConvenio} não resolvido (${(gErr as Error).message})`);
+          }
+        }
+
         // Nome do convênio para a confirmação (pedido do dono, 08/09). Preenchido
         // aqui quando o cadastro é lido, e buscado adiante se o front já mandou o id.
         let _nomeConvenio = "";
         // BILLING FIX: if frontend didn't send insurance_id but patient has one in Amigo, auto-resolve.
         if (!attendanceBody.insurance_id && attendanceBody.patient_id) {
           try {
-            const fullRes = await tryFetch(`patients/${attendanceBody.patient_id}?company_id=${companyId}`, amigoToken);
-            if (fullRes.status >= 200 && fullRes.status < 300 && fullRes.data) {
-              let fp: any = fullRes.data;
-              if (fp && typeof fp === "object" && "data" in fp) fp = (fp as any).data;
-              if (Array.isArray(fp)) fp = fp[0];
-              // Lê tolerando o formato do cadastro (insurance_id, insurance.id,
-              // convenio_id…). Ler só `insurance_id` é o que fez 84% dos
-              // agendamentos do WhatsApp saírem como particular.
-              const numOk = (v: unknown) =>
-                (typeof v === "number" && Number.isFinite(v) && v > 0) ||
-                (typeof v === "string" && /^\d+$/.test(v.trim()) && Number(v) > 0);
-              let insId: unknown = null;
-              for (const k of ["insurance_id", "insurance_plan_id", "health_insurance_id", "convenio_id", "plan_id"]) {
-                if (numOk(fp?.[k])) { insId = fp[k]; break; }
+            // RELEITURA (15/09): logo depois do cadastro o Amigo devolvia o paciente
+            // SEM convênio — os dois casos de 11/09 foram lidos 21s e 59s depois de
+            // cadastrados e hoje os dois cadastros têm o convênio. Antes de decidir
+            // "particular", espera e lê de novo. Custa 2,5s só para quem não tem
+            // convênio no cadastro.
+            let insId: string | null = null;
+            for (let tentativa = 1; tentativa <= 2 && !insId; tentativa++) {
+              if (tentativa === 2) await new Promise((r) => setTimeout(r, 2500));
+              const fullRes = await tryFetch(`patients/${attendanceBody.patient_id}?company_id=${companyId}`, amigoToken);
+              if (fullRes.status >= 200 && fullRes.status < 300 && fullRes.data) {
+                // readPatientInsurance: a mesma leitura tolerante do WhatsApp
+                // (insurance_id, health_insurance.id, …). Ler só `insurance_id` é o
+                // que fez 84% dos agendamentos do WhatsApp saírem como particular.
+                insId = readPatientInsurance(fullRes.data).id;
+                let fp: any = fullRes.data;
+                if (fp && typeof fp === "object" && "data" in fp) fp = (fp as any).data;
+                if (Array.isArray(fp)) fp = fp[0];
+                _nomeConvenio = nomeDoConvenio(fp) || _nomeConvenio;
               }
-              if (!insId) {
-                for (const k of ["insurance", "insurance_plan", "health_insurance", "convenio", "plan"]) {
-                  const nested = fp?.[k];
-                  if (nested && typeof nested === "object" && numOk((nested as any).id)) {
-                    insId = (nested as any).id;
-                    break;
-                  }
-                }
+              if (!insId && tentativa === 1) {
+                console.log(`[BookingWidget] create_attendance: patient ${attendanceBody.patient_id} sem convênio na 1ª leitura — relendo em 2,5s`);
               }
-              _nomeConvenio = nomeDoConvenio(fp) || _nomeConvenio;
-              if (insId) {
-                attendanceBody.insurance_id = Number(insId);
-                console.log(`[BookingWidget] create_attendance auto-resolved insurance_id=${insId} for patient ${attendanceBody.patient_id}`);
-              } else {
-                console.log(`[BookingWidget] create_attendance: patient ${attendanceBody.patient_id} has no insurance — booking as particular`);
-              }
+            }
+            if (insId) {
+              attendanceBody.insurance_id = Number(insId);
+              console.log(`[BookingWidget] create_attendance auto-resolved insurance_id=${insId} for patient ${attendanceBody.patient_id}`);
+            } else {
+              console.log(`[BookingWidget] create_attendance: patient ${attendanceBody.patient_id} has no insurance — booking as particular`);
             }
           } catch (insErr) {
             console.log(`[BookingWidget] create_attendance insurance lookup error (non-blocking): ${(insErr as Error).message}`);
@@ -550,13 +577,11 @@ Deno.serve(async (req) => {
         );
 
         // RETRY: API rejected insurance_id ("Convênio não encontrado"). Fall back to particular.
-        const errBody: any = result.data;
+        // Só quando o Amigo recusa o CONVÊNIO. "001" sozinho não serve: é o código
+        // de TODO erro dele — os 20 reenvios de 11 a 15/09 eram "Limite de
+        // atendimentos atingido". Ver isInsuranceRejection (insurance.ts).
         const insuranceRejected =
-          result.status >= 400 &&
-          attendanceBody.insurance_id &&
-          (errBody?.code === "001" ||
-            String(errBody?.message || "").toLowerCase().includes("convênio") ||
-            String(errBody?.message || "").toLowerCase().includes("convenio"));
+          !!attendanceBody.insurance_id && isInsuranceRejection(result.status, result.data);
         if (insuranceRejected) {
           console.log(`[BookingWidget] Insurance ${attendanceBody.insurance_id} rejected by API — retrying as particular`);
           const retryBody = { ...attendanceBody };
@@ -919,6 +944,16 @@ Deno.serve(async (req) => {
           "POST",
           patientBody
         );
+        // Devolve à tela o PLANO que foi para o cadastro. A tela lia o convênio da
+        // resposta do Amigo por `insurance_id`/`insurance.id`, e o Amigo guarda em
+        // `health_insurance` — voltava vazio e a marcação seguinte saía particular.
+        if (result.status >= 200 && result.status < 300 && patientBody.insurance_id && /^\d+$/.test(String(patientBody.insurance_id))) {
+          const d: any = result.data;
+          const alvo = d && typeof d === "object" && d.data && typeof d.data === "object" && !Array.isArray(d.data) ? d.data : d;
+          if (alvo && typeof alvo === "object" && !Array.isArray(alvo)) {
+            alvo.insurance_id_resolvido = Number(patientBody.insurance_id);
+          }
+        }
         break;
       }
       case "patient_attendances": {

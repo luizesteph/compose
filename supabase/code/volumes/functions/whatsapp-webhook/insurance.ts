@@ -166,16 +166,28 @@ export function isNegativeInsuranceClaim(text: string): boolean {
 }
 
 /**
- * A API rejeitou o convênio? Mesma detecção já provada no booking-widget
- * (code "001" / mensagem citando convênio). Serve para reenviar sem o
- * insurance_id em vez de perder o agendamento inteiro.
+ * A API rejeitou o CONVÊNIO? Serve para reenviar sem o insurance_id em vez de
+ * perder o agendamento inteiro — e só para isso.
+ *
+ * `code: "001"` NÃO é sinal de convênio (15/09). O Amigo usa "001" para TODO
+ * erro de aplicação: "Paciente não encontrado", "Limite de atendimentos
+ * atingido", horário ocupado. Com o "001" valendo sozinho, qualquer erro virava
+ * "convênio recusado" e o agendamento era reenviado como PARTICULAR. Medido de
+ * 11 a 15/09 no widget: 20 reenvios como particular, os 20 por "Limite de
+ * atendimentos atingido". Ali o reenvio falhou de novo, mas um erro que o
+ * particular contornasse marcaria a consulta sem o convênio do paciente — que é
+ * exatamente a queixa que a equipe trouxe. Agora precisa a mensagem falar de
+ * convênio ou plano, e o limite do mês nunca conta.
  */
 export function isInsuranceRejection(status: number, data: unknown): boolean {
   if (status < 400) return false;
   const body = (data && typeof data === "object" ? data : {}) as Record<string, unknown>;
-  if (String(body.code || "") === "001") return true;
-  const msg = String(body.message || body.error || "").toLowerCase();
-  return msg.includes("convênio") || msg.includes("convenio") || msg.includes("insurance");
+  const msg = String(body.message || body.error || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  if (msg.includes("limite de atendimentos")) return false;
+  return msg.includes("convenio") || msg.includes("insurance") || /\bplano\b/.test(msg);
 }
 
 function normalizeName(s: unknown): string {
