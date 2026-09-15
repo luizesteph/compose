@@ -531,3 +531,31 @@ export function respostaFoiFalha(texto: unknown): boolean {
   if (!t.trim()) return true; // saída vazia é falha, e das piores
   return FALHA_DE_VERDADE_RE.some((re) => re.test(t));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LINK DO GOOGLE MAPS SEMPRE O CADASTRADO (15/09)
+// ─────────────────────────────────────────────────────────────────────────────
+// A resposta ao paciente passou para o GPT-5.6 Luna. No teste de 13/09, com o
+// prompt no tamanho real da produção, ele copiou o link do mapa com o ÚLTIMO
+// CARACTERE a menos em 7 de 12 respostas: `…JW5b7` virou `…JW5b` — link quebrado
+// para quem está tentando chegar à clínica. O link chegava inteiro na entrada;
+// o erro é de cópia do modelo, e só aparece com contexto grande (com prompt curto
+// acertou 6 de 6).
+//
+// Não dá para pedir ao modelo que copie direito. Dá para não depender dele: todo
+// link curto do Maps que aparecer na resposta vira o link cadastrado da clínica.
+// A clínica tem um endereço só, então não há link "certo" diferente do oficial.
+
+/**
+ * Troca qualquer link curto do Google Maps no texto pelo link oficial da clínica.
+ * Sem link oficial válido, devolve o texto intacto.
+ */
+export function corrigirLinkDoMapa(texto: string, linkOficial?: string | null): string {
+  if (typeof texto !== "string" || !texto) return texto;
+  const oficial = String(linkOficial || "").trim();
+  if (!/^https?:\/\/\S+$/.test(oficial)) return texto;
+  return texto.replace(
+    /https?:\/\/(?:maps\.app\.goo\.gl|goo\.gl\/maps)\/[A-Za-z0-9_-]*/g,
+    (achado) => (achado === oficial ? achado : oficial),
+  );
+}

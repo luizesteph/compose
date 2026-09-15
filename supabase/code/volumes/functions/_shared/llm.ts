@@ -24,6 +24,11 @@
 //
 // Trocar de modelo ou até de provedor continua sendo variável de ambiente, sem
 // deploy: LLM_MODEL, LLM_MODEL_FALLBACK e LLM_GATEWAY_URL.
+//
+// ATENÇÃO (15/09): isso só vale se a variável estiver mapeada no bloco
+// `environment:` do serviço functions no docker-compose do fork. Conferido em
+// 15/09: só OPENROUTER_API_KEY está lá. Criar LLM_MODEL no Easypanel NÃO chega ao
+// contêiner — na prática, hoje, trocar de modelo é mudar o padrão aqui e publicar.
 
 // `typeof Deno` em vez de `Deno.env` direto: a suíte de testes roda em Node e
 // importa este módulo. Sem o guard, o import explode antes de qualquer teste.
@@ -78,6 +83,27 @@ export const LLM_MODEL = env("LLM_MODEL") || "google/gemini-3.7-flash";
 // substituto responde rápido e barato, sem risco de estourar max_tokens.
 export const LLM_MODEL_FALLBACK = env("LLM_MODEL_FALLBACK") || "google/gemini-3-flash-preview";
 
+// RESPOSTA AO PACIENTE NO GPT-5.6 LUNA (decisão do dono, 15/09). SÓ a etapa que
+// escreve a resposta (generateAIResponse). Classificação, triagem, resumo de áudio
+// e as outras funções continuam no LLM_MODEL.
+//
+// Medido em 13/09 com 35 conversas reais da semana, mesmo roteiro, mesmo histórico,
+// e 14 delas de novo com o prompt no tamanho real da produção:
+//   resposta         Gemini 3.7   Luna
+//   tempo típico       5,8 s      2,8 s
+//   pior caso         11,2 s      3,9 s
+//   raciocínio        544 tok     96 tok
+//   custo/semana      US$ 4,31   ~US$ 0,98
+// As respostas saíram equivalentes, mais curtas, e mais fiéis ao que o sistema
+// fez ("reservado por 3 minutos, ainda não confirmado" onde o Gemini escreveu
+// "já reservei"). A classificação ficou no Gemini de propósito: ali o Luna errou
+// 3 casos a mais em 35 e mudou de resposta entre duas passadas em 3.
+//
+// DEFEITO CONHECIDO: com o prompt grande, o Luna cortou o último caractere do link
+// do Google Maps em 7 de 12 respostas (…JW5b7 → …JW5b). O Gemini, 93 links em 30
+// dias, nenhum cortado. Por isso a resposta passa por corrigirLinkDoMapa (guards.ts).
+export const LLM_MODEL_RESPOSTA = env("LLM_MODEL_RESPOSTA") || "openai/gpt-5.6-luna";
+
 // O gateway recusa modelo desconhecido com 400/404 e o texto citando o modelo.
 // Erro de cota (429) ou queda (5xx) NÃO é caso de trocar de modelo — trocar ali
 // só esconderia o problema real e gastaria no modelo errado.
@@ -116,6 +142,9 @@ const PRECO_POR_TOKEN: Record<string, { input: number; output: number }> = {
   // o OpenRouter devolve `usage.cost` e custoDaChamada prefere sempre esse valor —
   // 1.183 chamadas em 7 dias, zero caíram na estimativa.)
   "google/gemini-3.7-flash":       { input: 0.75 / 1e6, output: 3.75 / 1e6 },
+  // Lido de https://openrouter.ai/api/v1/models em 13/09 — o síncrono, não o :batch
+  // (que custa metade e não serve para responder paciente, ver o bloco acima).
+  "openai/gpt-5.6-luna":           { input: 0.20 / 1e6, output: 1.20 / 1e6 },
   "google/gemini-2.5-flash":       { input: 0.30 / 1e6, output: 2.50 / 1e6 },
 };
 

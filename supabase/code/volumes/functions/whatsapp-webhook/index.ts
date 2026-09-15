@@ -49,7 +49,7 @@ import {
   slotJaPassou,
 } from "./helpers.ts";
 import { tryFetch } from "./amigoApi.ts";
-import { LLM_MODEL, LLM_MODEL_FALLBACK, LLM_GATEWAY, ehErroDeModeloDesconhecido, llmApiKey, llmHeaders, LLM_USAGE_INCLUDE, custoDaChamada } from "../_shared/llm.ts";
+import { LLM_MODEL, LLM_MODEL_FALLBACK, LLM_MODEL_RESPOSTA, LLM_GATEWAY, ehErroDeModeloDesconhecido, llmApiKey, llmHeaders, LLM_USAGE_INCLUDE, custoDaChamada } from "../_shared/llm.ts";
 import { STT_ENDPOINT, STT_MODEL, STT_LANGUAGE, STT_RESPONSE_FORMAT, sttApiKey } from "../_shared/stt.ts";
 import {
   AttendantUser,
@@ -69,6 +69,7 @@ import {
   isDuplicateReply,
   nearDuplicate,
   respostaFoiFalha,
+  corrigirLinkDoMapa,
 } from "./guards.ts";
 import {
   readPatientInsurance,
@@ -286,6 +287,7 @@ function ddmmWH(iso: string | null | undefined): string {
 const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   "google/gemini-3-flash-preview": { input: 0.15 / 1e6, output: 0.6 / 1e6 },
   "google/gemini-3.7-flash": { input: 0.75 / 1e6, output: 3.75 / 1e6 },
+  "openai/gpt-5.6-luna": { input: 0.2 / 1e6, output: 1.2 / 1e6 },
   "google/gemini-3.6-flash": { input: 0.75 / 1e6, output: 3.75 / 1e6 },
   "google/gemini-2.5-flash": { input: 0.15 / 1e6, output: 0.6 / 1e6 },
   "google/gemini-2.5-flash-lite": { input: 0.075 / 1e6, output: 0.3 / 1e6 },
@@ -310,10 +312,16 @@ function logAiUsage(
   const promptTokens = usage?.prompt_tokens || 0;
   const completionTokens = usage?.completion_tokens || 0;
   const totalTokens = usage?.total_tokens || promptTokens + completionTokens;
+  // Custo REAL devolvido pelo OpenRouter (usage.cost) vence a tabela. A tabela
+  // só conhecia Gemini: com o Luna na resposta (15/09), um modelo fora dela caía
+  // no preço genérico e o painel mostraria um custo inventado.
+  const informado = Number(usage?.cost);
   const cost =
     precomputedCostUsd !== undefined
       ? precomputedCostUsd
-      : promptTokens * pricing.input + completionTokens * pricing.output;
+      : Number.isFinite(informado) && informado > 0
+        ? informado
+        : promptTokens * pricing.input + completionTokens * pricing.output;
 
   const url = Deno.env.get("SUPABASE_URL")!;
   const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -10559,49 +10567,77 @@ Responda APENAS com o texto da mensagem, sem aspas, sem prefixos, sem explicaç�
 
   // Timeout de 28s: 2ª chamada LLM (resposta ao paciente). Em AbortError, lanca e
   // o call-site cai no fallback deterministico (generateResponseText).
-  const response = await postLLM({
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: LLM_MODEL,
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...(conversationHistory || []).map((msg) => ({ role: msg.role, content: msg.content })),
-        { role: "user", content: contextInfo },
-      ],
-      // TETO DE SAIDA — INCIDENTE DE 17/08 (caso Fernando, 8h45 a 8h49).
-      // O teto de 350 existia desde 23/06 como limite FISICO das 3-5 linhas da
-      // Regra 5, porque o prompt sozinho o modelo ignorava. Funcionou por dois
-      // meses. Ao trocar para o Gemini 3.6 Flash (16/08) ele quebrou: o 3.6
-      // PENSA antes de responder, e os tokens de raciocinio saem do MESMO
-      // orcamento. Medido em producao:
-      //   gemini-3-flash-preview: 565 chamadas, 61 tokens de saida, msg de 233 chars
-      //   gemini-3.6-flash:        36 chamadas, 179 tokens de saida, msg de 135 chars
-      // Tres vezes mais tokens gastos e mensagem 40% menor — o raciocinio comia o
-      // teto e o texto do paciente saia cortado no meio da frase: "Bom dia,
-      // Fernando! Tudo otimo por aqui, e com".
-      //
-      // O teto sobe para caber raciocinio + resposta. O limite das 3-5 linhas
-      // deixa de ser o corte fisico (que corta no meio da palavra) e passa a ser
-      // o corte por FRASE, logo abaixo — que nunca entrega meia frase ao paciente.
-      max_tokens: 1500,
-    }),
-  }, 28000);
+  // RESPOSTA NO GPT-5.6 LUNA, COM O GEMINI DE REDE (15/09). Ver LLM_MODEL_RESPOSTA
+  // em _shared/llm.ts. Se o Luna falhar — erro do provedor, cota, ou 15s sem
+  // resposta (o pior caso medido foi 3,9s) — a MESMA resposta é pedida ao Gemini
+  // antes de cair no texto fixo do generateResponseText. Trocar de provedor não
+  // pode transformar uma queda da OpenAI em respostas robóticas para todo mundo.
+  const _modelosResposta = Array.from(new Set([LLM_MODEL_RESPOSTA, LLM_MODEL]));
+  let response: Response | null = null;
+  let modeloUsado = _modelosResposta[0];
+  let _erroResposta = "";
+  for (let _t = 0; _t < _modelosResposta.length; _t++) {
+    modeloUsado = _modelosResposta[_t];
+    const _temReserva = _t < _modelosResposta.length - 1;
+    try {
+      response = await postLLM({
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: modeloUsado,
+          usage: LLM_USAGE_INCLUDE,
+          messages: [
+            { role: "system", content: systemPrompt },
+            ...(conversationHistory || []).map((msg) => ({ role: msg.role, content: msg.content })),
+            { role: "user", content: contextInfo },
+          ],
+          // TETO DE SAIDA — INCIDENTE DE 17/08 (caso Fernando, 8h45 a 8h49).
+          // O teto de 350 existia desde 23/06 como limite FISICO das 3-5 linhas da
+          // Regra 5, porque o prompt sozinho o modelo ignorava. Funcionou por dois
+          // meses. Ao trocar para o Gemini 3.6 Flash (16/08) ele quebrou: o 3.6
+          // PENSA antes de responder, e os tokens de raciocinio saem do MESMO
+          // orcamento. Medido em producao:
+          //   gemini-3-flash-preview: 565 chamadas, 61 tokens de saida, msg de 233 chars
+          //   gemini-3.6-flash:        36 chamadas, 179 tokens de saida, msg de 135 chars
+          // Tres vezes mais tokens gastos e mensagem 40% menor — o raciocinio comia o
+          // teto e o texto do paciente saia cortado no meio da frase: "Bom dia,
+          // Fernando! Tudo otimo por aqui, e com".
+          //
+          // O teto sobe para caber raciocinio + resposta. O limite das 3-5 linhas
+          // deixa de ser o corte fisico (que corta no meio da palavra) e passa a ser
+          // o corte por FRASE, logo abaixo — que nunca entrega meia frase ao paciente.
+          max_tokens: 1500,
+        }),
+      }, _temReserva ? 15000 : 28000);
+    } catch (e) {
+      response = null;
+      _erroResposta = (e as Error).message;
+    }
+    if (response && response.ok) break;
+    if (response) _erroResposta = `${response.status} - ${await response.text()}`;
+    if (_temReserva) {
+      console.error(`[LLM] resposta: ${modeloUsado} falhou (${_erroResposta.slice(0, 160)}) — repetindo com ${_modelosResposta[_t + 1]}`);
+    }
+  }
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`AI gateway error: ${response.status} - ${errorText}`);
+  if (!response || !response.ok) {
+    throw new Error(`AI gateway error: ${_erroResposta}`);
   }
 
   const result = await response.json();
-  logAiUsage(clinicTokenId, "whatsapp-webhook/response", LLM_MODEL, result.usage);
+  logAiUsage(clinicTokenId, "whatsapp-webhook/response", modeloUsado, result.usage);
   const content = result.choices?.[0]?.message?.content;
   if (!content) throw new Error("Empty AI response");
   // Strip markdown bold/italic formatting for natural WhatsApp messages
-  const _limpo = content.trim().replace(/\*{1,2}([^*]+)\*{1,2}/g, "$1");
+  // corrigirLinkDoMapa: o Luna corta o último caractere do link do Maps com prompt
+  // grande (7 de 12 no teste de 13/09). Aplicado aqui, cobre os dois retornos abaixo.
+  const _limpo = corrigirLinkDoMapa(
+    content.trim().replace(/\*{1,2}([^*]+)\*{1,2}/g, "$1"),
+    clinicLocationInfo?.google_maps_link,
+  );
 
   // NUNCA ENTREGAR MEIA FRASE (17/08). Se o modelo bateu no teto, `finish_reason`
   // vem "length" e o texto termina no meio — foi o que o paciente Fernando leu.
