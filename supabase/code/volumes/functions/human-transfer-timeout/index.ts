@@ -22,6 +22,8 @@ import {
   prazoDeRespostaEmMinutos,
   decideLiberarFicha,
   expedienteAberto,
+  minutosParado,
+  telefoneDasMensagens,
   LIMITES_PADRAO_DA_FICHA,
   type LimitesDaFicha,
 } from "../_shared/atendimento.ts";
@@ -669,9 +671,11 @@ function canalVivo(cl: any): { baseUrl: string; apiId: string; bearerToken: stri
 // por ela no `nao_esta_open`. Esta fase lê o listTickets direto: é a lista de
 // verdade, inclui pending, e não depende do espelho estar em dia.
 //
-// SEM PINGUE-PONGUE, por construção: ela nunca entrega o ticket a alguém, só
-// tira o nome. Rodada seguinte, o mesmo ticket já não tem dona e é ignorado.
-// O freio da Fase 2 (TETO_DEVOLUCOES) não faz falta aqui.
+// PINGUE-PONGUE — eu tinha escrito aqui que ele era impossível "por construção".
+// Estava errado, e o primeiro dia inteiro (14/09) provou: a atendente pega o
+// ticket da fila, o ticket ganha dona de novo, continua "parado há horas" pela
+// última mensagem, e dois minutos depois volta para a fila. 43 das 74 liberações
+// foram repetição. O relógio agora sai de `minutosParado` (ver _shared).
 async function varrerFichasParadas(
   supabase: any,
   clinicTokenId: string,
@@ -695,15 +699,9 @@ async function varrerFichasParadas(
   const auth = { Authorization: `Bearer ${creds.bearerToken}`, "Content-Type": "application/json" };
   const canal = creds.channelId ? Number(creds.channelId) : null;
 
-  // Quem está online AGORA — uma chamada só, para todo mundo. O getUserStatus
-  // por usuário custaria uma chamada por ticket.
+  // Só serve para saber quem é ADMIN. O status online/offline não entra mais na
+  // decisão — ver "OFFLINE NÃO PROVA QUE SAIU" em _shared/atendimento.ts.
   //
-  // Só o "offline" é levado a sério. Em 12/09, um sábado ao meio-dia, o Z-PRO
-  // ainda listava a Laiz como online: ela saiu na sexta e nunca desmarcou. Ou
-  // seja, `isOnline: true` não prova presença — prova apenas que ninguém clicou.
-  // Quem depende de presença é só o prazo curto de 30 min; os outros dois
-  // (expediente fechado, ocioso demais) funcionam sem essa informação.
-  const online = new Map<number, boolean>();
   // Quem é admin fica FORA da varredura. O dono e a conta "CBT" não estão no
   // rodízio de plantão: o pedido era sobre atendente que vai embora às 16h e
   // deixa a ficha suja, não sobre o médico que guardou uma conversa no nome
@@ -715,11 +713,32 @@ async function varrerFichasParadas(
       const d = await r.json();
       for (const u of (d?.data || [])) {
         if (!u || u.id == null) continue;
-        online.set(Number(u.id), !!u.isOnline);
         if (String(u.profile || "").toLowerCase() === "admin") admins.add(Number(u.id));
       }
     }
-  } catch { /* sem a lista, `donaOnline` fica null e o prazo de 30 min não dispara */ }
+  } catch { /* sem a lista, admin não é reconhecido — admin quase nunca tem ticket parado */ }
+
+  // Quando esta varredura liberou cada ticket pela última vez. Sai do próprio
+  // transfer_audit (o número do ticket está no `detail`), sem coluna nova. É o
+  // cinto de segurança do pingue-pongue: liberou às 7h42, a Glaucia pegou às
+  // 7h43 — o ticket só pode voltar para a fila depois de um prazo inteiro.
+  const ultimaLiberacao = new Map<number, number>();
+  try {
+    const desde = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { data: libs } = await supabase
+      .from("transfer_audit")
+      .select("detail, created_at")
+      .eq("clinic_token_id", clinicTokenId)
+      .eq("trigger", "ficha_parada")
+      .gte("created_at", desde)
+      .order("created_at", { ascending: false })
+      .limit(500);
+    for (const l of (libs || [])) {
+      const n = Number(String(l?.detail || "").match(/#(\d+)/)?.[1] || 0);
+      const quando = Date.parse(String(l?.created_at || ""));
+      if (n && quando && !ultimaLiberacao.has(n)) ultimaLiberacao.set(n, quando);
+    }
+  } catch { /* sem o histórico vale só a atualização do ticket */ }
 
   const aberto = expedienteAberto(agoraSP);
 
@@ -748,30 +767,28 @@ async function varrerFichasParadas(
     if (!donaId) { pulou("sem_dona"); continue; }
     if (admins.has(donaId)) { pulou("dona_admin"); continue; }
 
-    // lastMessageAt vem como epoch em MILISSEGUNDOS, string. Ticket antigo às
-    // vezes vem sem ele — aí o updatedAt é o melhor que existe.
-    let ultimaMs = Number(t?.lastMessageAt || 0);
-    if (!Number.isFinite(ultimaMs) || ultimaMs <= 0) {
-      ultimaMs = Date.parse(String(t?.updatedAt || "")) || 0;
-    }
-    if (!ultimaMs) { pulou("sem_data"); continue; }
-
-    const ociosoMin = (agoraMs - ultimaMs) / 60000;
-    const idadeDias = ociosoMin / 1440;
-    out.avaliados++;
-
-    const d = decideLiberarFicha({
-      temDona: true,
-      ociosoMin,
-      idadeDias,
-      donaOnline: online.has(donaId) ? online.get(donaId)! : null,
-      expedienteAberto: aberto,
-    }, limites);
-    if (!d.liberar) { pulou(d.motivo); continue; }
-    if (out.liberados >= TETO_POR_RODADA) { pulou("teto_da_rodada"); continue; }
-
     const ticketId = Number(t?.id || 0);
     if (!ticketId) { pulou("sem_ticket_id"); continue; }
+
+    // lastMessageAt vem como epoch em MILISSEGUNDOS, string. Ticket antigo às
+    // vezes vem sem ele — aí o updatedAt é o melhor que existe.
+    const atualizadoMs = Date.parse(String(t?.updatedAt || "")) || 0;
+    let ultimaMsgMs = Number(t?.lastMessageAt || 0);
+    if (!Number.isFinite(ultimaMsgMs) || ultimaMsgMs <= 0) ultimaMsgMs = atualizadoMs;
+    if (!ultimaMsgMs) { pulou("sem_data"); continue; }
+
+    const ociosoMin = minutosParado({
+      agoraMs,
+      ultimaMensagemMs: ultimaMsgMs,
+      atualizadoMs,
+      ultimaLiberacaoMs: ultimaLiberacao.get(ticketId) ?? null,
+    });
+    const idadeDias = (agoraMs - ultimaMsgMs) / 86400000;
+    out.avaliados++;
+
+    const d = decideLiberarFicha({ temDona: true, ociosoMin, idadeDias, expedienteAberto: aberto }, limites);
+    if (!d.liberar) { pulou(d.motivo); continue; }
+    if (out.liberados >= TETO_POR_RODADA) { pulou("teto_da_rodada"); continue; }
 
     try {
       const r = await fetch(`${creds.baseUrl}/v2/api/external/${creds.apiId}/updateticketinfo`, {
@@ -788,21 +805,15 @@ async function varrerFichasParadas(
       out.liberados++;
       out.detalhes.push(`#${ticketId} (${donaNome || donaId}, ${Math.round(ociosoMin)}min, ${d.motivo}) → pendentes`);
 
-      // O telefone não vem no listTickets. Ele sai do remoteJid da última
-      // mensagem — e só para os tickets que REALMENTE vão ser liberados, que são
-      // no máximo dez por rodada. Sem telefone a linha de auditoria fica órfã:
-      // aparece na aba Transferências sem levar a conversa nenhuma.
+      // O telefone não vem no listTickets: sai das mensagens do ticket, e só para
+      // os tickets que REALMENTE vão ser liberados (no máximo dez por rodada).
+      // Sem telefone a linha de auditoria fica órfã na aba Transferências.
       let phone: string | null = null;
       try {
         const rm = await fetch(`${creds.baseUrl}/v2/api/external/${creds.apiId}/showAllMessages`, {
           method: "POST", headers: auth, body: JSON.stringify({ ticket: String(ticketId) }),
         });
-        if (rm.ok) {
-          const dm = await rm.json();
-          const jid = (dm?.data || []).map((m: any) => m?.remoteJid).find((j: any) => typeof j === "string");
-          const so = String(jid || "").replace(/\D/g, "");
-          if (so.length >= 10) phone = so;
-        }
+        if (rm.ok) phone = telefoneDasMensagens((await rm.json())?.data);
       } catch { /* auditoria sem telefone ainda é melhor que nenhuma */ }
 
       let conversationId: string | null = null;
@@ -902,7 +913,7 @@ Deno.serve(async (req) => {
       // em vez de deixar "0 avaliados" parecendo "não havia caso nenhum".
       const { data: clinicasF4, error: erroF4 } = await supabase
         .from("clinic_tokens")
-        .select("id, avanceai_base_url, avanceai_api_id, avanceai_bearer_token, avanceai_active_channel, varredura_ficha_min, varredura_ficha_offline_min, varredura_ficha_fora_min");
+        .select("id, avanceai_base_url, avanceai_api_id, avanceai_bearer_token, avanceai_active_channel, varredura_ficha_min, varredura_ficha_fora_min");
       if (erroF4) {
         console.log(`[ficha] DESLIGADA — falta a migration 20260912120000_varredura_da_ficha.sql (${erroF4.message})`);
       }
@@ -910,8 +921,9 @@ Deno.serve(async (req) => {
         const creds = canalVivo(cl);
         if (!creds) { console.log(`[ficha] clinica ${cl.id}: sem canal unico — pulando`); continue; }
         const limites: LimitesDaFicha = {
+          // varredura_ficha_offline_min continua no banco e NÃO é mais lida: a regra
+          // do offline saiu em 14/09 (a Lidiane marcada offline trabalhou o dia todo).
           ocioso: Number(cl.varredura_ficha_min ?? LIMITES_PADRAO_DA_FICHA.ocioso) || 0,
-          donaOffline: Number(cl.varredura_ficha_offline_min ?? LIMITES_PADRAO_DA_FICHA.donaOffline) || 0,
           foraDeExpediente: Number(cl.varredura_ficha_fora_min ?? LIMITES_PADRAO_DA_FICHA.foraDeExpediente) || 0,
           idadeMaximaDias: LIMITES_PADRAO_DA_FICHA.idadeMaximaDias,
         };

@@ -135,38 +135,40 @@ export function prazoDeRespostaEmMinutos(
 // então a regra dos 10 minutos não dispara — mas quando o paciente escrever
 // amanhã, a conversa cai na lista de quem não está mais lá.
 //
-// Medido em 12/09, no sábado de manhã, direto no Z-PRO (não no espelho):
-//   • 13 tickets desta semana ainda abertos com nome de atendente
-//   •  5 tickets em "pending" AINDA carregando o nome da Lidiane — pendente e
-//      com dona ao mesmo tempo, que é literalmente "deixou na própria fila"
-//   •  1 ticket aberto com a Vânia desde 23/03 (4.150 horas)
-//   • nenhum ticket é fechado às 18h: o quadro dorme como estava
-//   • a Laiz aparecia ONLINE no sábado ao meio-dia — saiu na sexta e o Z-PRO
-//     nunca soube. É exatamente o "não desligar o offline".
+// ── O PRIMEIRO DIA INTEIRO (seg 14/09) MOSTROU DOIS ERROS MEUS ─────────────────
 //
-// Por isso a decisão tem TRÊS prazos, do mais curto ao mais longo, e não um só:
-// fora do expediente a clínica está fechada e ninguém está trabalhando aquilo;
-// dona marcada offline é a evidência mais forte que existe de que ela saiu;
-// e o prazo longo é a rede embaixo, para quando o Z-PRO acha que todo mundo
-// ainda está online.
+// 1. PINGUE-PONGUE. O tempo parado era medido pela ÚLTIMA MENSAGEM do ticket.
+//    Quando a atendente pegava um ticket antigo da fila, ele continuava "parado
+//    há 14 horas" — e dois minutos depois a varredura tirava o ticket dela de
+//    novo. 74 liberações em só 46 tickets: 43 foram repetição. A Glaucia pegou o
+//    #228408 cinco vezes entre 7h42 e 8h06; o #228823 voltou seis vezes. Em 12
+//    casos a dona respondeu logo depois — estava trabalhando naquilo.
+//    Correção: o relógio conta do MAIS RECENTE entre última mensagem, última
+//    atualização do ticket (pegar o ticket atualiza) e a última vez que ESTA
+//    varredura liberou o mesmo ticket. Pegou, ganha o prazo inteiro.
 //
-// Assimetria de propósito: só agimos com `donaOnline === false`. "Online" no
-// Z-PRO é palpite (a Laiz prova isso); "offline" é alguém tendo dito que saiu.
+// 2. "OFFLINE" NÃO PROVA QUE SAIU. Eu tinha escrito que só o offline era
+//    confiável. Não é: o Z-PRO marcou a Lidiane como OFFLINE o dia inteiro e ela
+//    respondeu 82 mensagens entre 7h34 e 17h32 — perdeu 18 tickets por isso. Com
+//    a Laiz ONLINE num sábado ao meio-dia (12/09), o status não vale para lado
+//    nenhum. A regra do offline saiu. Ficam as duas que não dependem dele:
+//    clínica fechada, e ticket parado demais.
+//
+// Assimetria de propósito que continua valendo: um prazo zerado DESLIGA a regra
+// dele — nunca vira "libera na hora". Com `>= 0` sempre verdadeiro, um zero posto
+// para desligar faria exatamente o contrário.
 
 export type LimitesDaFicha = {
-  /** minutos sem mensagem nenhuma, dona online, dentro do expediente. 0 desliga a varredura inteira. */
+  /** minutos parado dentro do expediente. 0 desliga a varredura INTEIRA. */
   ocioso: number;
-  /** minutos sem mensagem quando o Z-PRO diz que a dona está offline. */
-  donaOffline: number;
-  /** minutos sem mensagem com a clínica fechada. */
+  /** minutos parado com a clínica fechada. 0 desliga só esta regra. */
   foraDeExpediente: number;
-  /** acima disto o ticket não é resíduo do dia, é arqueologia — não mexe. */
+  /** acima disto (desde a última mensagem) não é resíduo do dia, é arqueologia — não mexe. */
   idadeMaximaDias: number;
 };
 
 export const LIMITES_PADRAO_DA_FICHA: LimitesDaFicha = {
   ocioso: 120,
-  donaOffline: 30,
   foraDeExpediente: 15,
   idadeMaximaDias: 7,
 };
@@ -193,6 +195,60 @@ export function expedienteAberto(
 }
 
 /**
+ * Há quantos minutos NINGUÉM mexe neste ticket.
+ *
+ * Conta do mais recente dos três sinais — é isto que acaba com o pingue-pongue:
+ * - a última mensagem (paciente, atendente ou Julia);
+ * - a última atualização do ticket no Z-PRO (assumir o ticket atualiza);
+ * - a última vez que a varredura liberou este mesmo ticket. Este é o cinto de
+ *   segurança: mesmo que o Z-PRO não atualize o ticket quando alguém o pega, o
+ *   ticket só pode ser liberado de novo depois de um prazo inteiro.
+ * Valor ausente, inválido ou no futuro (relógio torto) não conta.
+ */
+export function minutosParado(s: {
+  agoraMs: number;
+  ultimaMensagemMs?: number | null;
+  atualizadoMs?: number | null;
+  ultimaLiberacaoMs?: number | null;
+}): number {
+  const validos = [s.ultimaMensagemMs, s.atualizadoMs, s.ultimaLiberacaoMs]
+    .map((v) => Number(v))
+    .filter((v) => Number.isFinite(v) && v > 0 && v <= s.agoraMs);
+  if (!validos.length) return 0;
+  return (s.agoraMs - Math.max(...validos)) / 60000;
+}
+
+/**
+ * Telefone do paciente a partir das mensagens de um ticket (showAllMessages).
+ *
+ * Em 14/09, 58 das 74 linhas de auditoria saíram SEM telefone: as mensagens
+ * enviadas pela clínica vêm com `remoteJid: ""`, e o código pegava a primeira
+ * string que aparecia — a vazia. Agora só vale identificador com cara de
+ * telefone; `@lid` é id interno do WhatsApp, não número. Sem remoteJid bom, tenta
+ * o `chatid` de dentro do `dataJson`.
+ */
+export function telefoneDasMensagens(msgs: unknown): string | null {
+  if (!Array.isArray(msgs)) return null;
+  const candidatos: string[] = [];
+  for (const m of msgs as Array<Record<string, unknown>>) {
+    if (!m || typeof m !== "object") continue;
+    if (typeof m.remoteJid === "string") candidatos.push(m.remoteJid);
+    if (typeof m.dataJson === "string" && m.dataJson.includes("chatid")) {
+      try {
+        const dj = JSON.parse(m.dataJson) as Record<string, unknown>;
+        if (typeof dj.chatid === "string") candidatos.push(dj.chatid);
+      } catch { /* dataJson malformado: ignora */ }
+    }
+  }
+  for (const c of candidatos) {
+    if (!c || c.includes("@lid") || c.includes("@g.us")) continue;
+    const so = c.split("@")[0].replace(/\D/g, "");
+    if (so.length >= 10 && so.length <= 13) return so;
+  }
+  return null;
+}
+
+/**
  * Este ticket deve perder o dono e voltar para a fila de pendentes?
  *
  * Só decide — quem chama é que fala com o Z-PRO. Devolve o motivo junto para a
@@ -203,17 +259,15 @@ export function decideLiberarFicha(
   f: {
     /** o ticket tem nome de atendente? sem dono não há de quem tirar. */
     temDona: boolean;
-    /** minutos desde a última mensagem, em QUALQUER direção. */
+    /** minutos parado — use `minutosParado`, nunca só a última mensagem. */
     ociosoMin: number;
-    /** dias desde a última mensagem. */
+    /** dias desde a última MENSAGEM (idade da conversa, não do ticket). */
     idadeDias: number;
-    /** `false` = o Z-PRO confirmou que ela saiu. `true`/`null` = não confiamos. */
-    donaOnline: boolean | null;
     expedienteAberto: boolean;
   },
   lim: LimitesDaFicha = LIMITES_PADRAO_DA_FICHA,
 ): { liberar: boolean; motivo: string } {
-  if (lim.ocioso <= 0) return { liberar: false, motivo: "varredura_desligada" };
+  if (!(lim.ocioso > 0)) return { liberar: false, motivo: "varredura_desligada" };
   if (!f.temDona) return { liberar: false, motivo: "sem_dona" };
 
   // Arqueologia não é resíduo do expediente. O ticket aberto com a Vânia desde
@@ -222,13 +276,8 @@ export function decideLiberarFicha(
   // com quem está esperando hoje. Esses saem numa limpeza combinada, não sozinhos.
   if (f.idadeDias > lim.idadeMaximaDias) return { liberar: false, motivo: "velho_demais" };
 
-  // Ordem do mais forte para o mais fraco: a clínica fechada vale mais que o
-  // status da dona, e o status da dona vale mais que o relógio genérico.
-  if (!f.expedienteAberto && f.ociosoMin >= lim.foraDeExpediente) {
+  if (lim.foraDeExpediente > 0 && !f.expedienteAberto && f.ociosoMin >= lim.foraDeExpediente) {
     return { liberar: true, motivo: "fora_de_expediente" };
-  }
-  if (f.donaOnline === false && f.ociosoMin >= lim.donaOffline) {
-    return { liberar: true, motivo: "dona_offline" };
   }
   if (f.ociosoMin >= lim.ocioso) {
     return { liberar: true, motivo: "ocioso" };
