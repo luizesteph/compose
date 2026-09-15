@@ -5,7 +5,7 @@
 // (fim de semana / fora do expediente) e dedup de respostas quase-identicas.
 // Extraido byte a byte do index.ts — comportamento identico. Sem @ts-nocheck.
 import { stripAccents, PROMESSA_DE_HUMANO_RE } from "./helpers.ts";
-import { FRASE_ENCERRAMENTO, pertoDoEncerramento } from "../_shared/atendimento.ts";
+import { FRASE_ENCERRAMENTO, pertoDoEncerramento, expedienteAberto, fraseForaDoExpediente } from "../_shared/atendimento.ts";
 
 export function normalizeForSimilarity(s: string): string {
   return stripAccents(String(s || "").toLowerCase())
@@ -582,8 +582,13 @@ export function corrigirLinkDoMapa(texto: string, linkOficial?: string | null): 
 //
 // Não mexe em: oferecimento ("se preferir falar com um atendente, é só me pedir"
 // não é promessa); frase sem gente do outro lado ("vou te passar os horários",
-// "já vou transferir sua consulta para o dia 14"); mensagem que já fala de
-// encerramento ("encerra às", o aviso de buildLateHandoffMessage).
+// "já vou transferir sua consulta para o dia 14"); mensagem que já diz quando a
+// equipe responde ("encerra às", "equipe volta em", "amanhã de manhã").
+//
+// FORA DO EXPEDIENTE (15/09, caso Cristiano): da noite até 7h30 e no fim de
+// semana, a mesma troca usa fraseForaDoExpediente — "Vou deixar seu caso com a
+// nossa equipe — o atendimento de hoje já encerrou, então te respondem amanhã de
+// manhã." Durante o expediente (7h30–17h30) nada muda.
 
 // "ela" só conta como gente quando vem com verbo de promessa ("já estou
 // encaminhando sua mensagem para ela", Fabio 08/09); "dela" não é "ela".
@@ -617,21 +622,28 @@ function emPedacos(texto: string, sep: RegExp): Array<{ t: string; sep: string }
 
 /**
  * Das 17h30 às 18h15 (seg–sex), troca a promessa de atendimento humano pela frase
- * do dono. Fora da janela, ou sem promessa, devolve o texto intacto.
+ * do dono; fora do expediente, pela versão da noite. Das 7h30 às 17h30, ou sem
+ * promessa, devolve o texto intacto.
  */
 export function avisoDeEncerramento(
   texto: string,
   agora: { diaDaSemana: number; hora: number; minuto: number },
 ): string {
   if (typeof texto !== "string" || !texto.trim()) return texto;
-  if (!pertoDoEncerramento(agora)) return texto;
-  if (/encerramento do atendimento|encerra às/i.test(texto)) return texto;
+  const noturno = !expedienteAberto(agora);
+  if (!noturno && !pertoDoEncerramento(agora)) return texto;
+  // Já diz quando a equipe responde: não repetir. "Como estamos fora do horário
+  // comercial, assim que a equipe iniciar o expediente pela manhã eles te
+  // responderão" (27/08 01h13) virava a frase da noite MAIS a frase original.
+  if (/encerramento do atendimento|encerra às|equipe volta em|assim que voltarmos|amanh[ãa] de manh[ãa]|segunda-feira de manh[ãa]|hoje de manh[ãa]|pr[óo]ximo dia [úu]til|fora do hor[áa]rio|pela manh[ãa]|in[íi]cio do expediente|iniciar o expediente/i.test(texto)) {
+    return texto;
+  }
 
   const estado = { trocou: false, maos: false };
   const frasesSaida: Array<{ t: string; sep: string }> = [];
 
   for (const frase of emPedacos(texto, FIM_DE_FRASE_RE)) {
-    const trechosSaida: Array<{ t: string; sep: string }> = [];
+    const trechosSaida: Array<{ t: string; sep: string; dono?: boolean }> = [];
     for (const tr of emPedacos(frase.t, /(\s+[—–]\s+|;\s+)/)) {
       const ini = inicioDaPromessa(tr.t);
       if (ini >= 0) {
@@ -643,12 +655,18 @@ export function avisoDeEncerramento(
           // encaminhando sua mensagem para ela").
           const acha = (x: string) => NOMES_NA_PROMESSA.find(([chave]) => stripAccents(x.toLowerCase()).includes(chave));
           const nome = acha(tr.t) || (/(?<![\p{L}])elas?(?![\p{L}])/iu.test(tr.t) ? acha(texto) : undefined);
-          let dono = nome ? FRASE_ENCERRAMENTO.replace("para um atendente", `para a ${nome[1]}`) : FRASE_ENCERRAMENTO;
+          let dono = noturno
+            ? fraseForaDoExpediente(agora, nome?.[1] ?? null)
+            : nome ? FRASE_ENCERRAMENTO.replace("para um atendente", `para a ${nome[1]}`) : FRASE_ENCERRAMENTO;
           const antes = tr.t.slice(0, ini);
-          if (/,\s*$/.test(antes) && antes.trim().length >= 3) {
+          if (/^[\s\p{Extended_Pictographic}\uFE0F]+$/u.test(antes)) {
+            // só emoji antes ("😊 Já avisei a Vânia"): o emoji fica
+            dono = antes + dono;
+          } else if (/(,|\se)\s*$/u.test(antes) && antes.trim().length >= 3) {
+            // o motivo ou o "recebi seu pedido e" ficam: "Recebi seu pedido e vou deixar..."
             dono = antes + dono.charAt(0).toLowerCase() + dono.slice(1);
           }
-          trechosSaida.push({ t: dono, sep: tr.sep });
+          trechosSaida.push({ t: dono, sep: tr.sep, dono: true });
         }
         continue;   // promessa repetida depois da troca: sai
       }
@@ -663,7 +681,7 @@ export function avisoDeEncerramento(
       .map((x, i) => {
         const ultimo = i === trechosSaida.length - 1;
         // a frase do dono termina em ponto; seguida de outro trecho, o ponto sai
-        const corpo = !ultimo && x.t.endsWith("encerramento do atendimento.") ? x.t.slice(0, -1) : x.t;
+        const corpo = !ultimo && x.dono && x.t.endsWith(".") ? x.t.slice(0, -1) : x.t;
         return corpo + (ultimo ? "" : (x.sep || " — "));
       })
       .join("");

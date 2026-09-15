@@ -40,6 +40,7 @@ import {
   amigoFailReason,
   amigoAuthAlert,
   PROMESSA_DE_HUMANO_RE,
+  sinalDeFrustracao,
   decodeJwtPayload,
   getPhoneVariants,
   normalizeApiResponse,
@@ -8626,7 +8627,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         {
           const _sp = getNowSPParts();
           const _closeH = businessHoursOpts?.businessCloseHour ?? 18;
-          const _lateMsg = buildLateHandoffMessage(_sp.hour, _sp.minute, _closeH);
+          const _lateMsg = buildLateHandoffMessage(_sp.hour, _sp.minute, _closeH, _sp.weekday);
           if (_lateMsg && supabaseClient && conversationIdParam) {
             let _alreadyWarned = false;
             try {
@@ -13363,18 +13364,9 @@ Deno.serve(async (req) => {
       // Quando o paciente sinaliza frustração explícita, a IA sai de cena imediatamente
       // e o ticket vai pra um humano sem nova rodada de classificação.
       if (!keywordForcedIntent) {
-        const frustrationPatterns = [
-          /\beu\s+n[aã]o\s+estou\b/i,
-          /\bvoc[eê]s?\s+est[aã]o\s+(me\s+)?(enrolando|brincando|errando)/i,
-          /\bqual\s+(seu|teu)\s+nome\b/i,
-          /\bvoc[eê]\s+[eé]\s+(um\s+)?(rob[oô]|bot|m[aá]quina|ia)\b/i,
-          /\b(atendente|humano|pessoa)\s+(humano|de\s+verdade|agora|j[aá])\b/i,
-          /\bquero\s+falar\s+com\s+(algu[eé]m|atendente|humano|pessoa)\b/i,
-          /\bn[aã]o\s+(est[aá]\s+)?funcionando\b/i,
-          /[A-ZÁÉÍÓÚÃÕÂÊÔÇ]{4,}.*[A-ZÁÉÍÓÚÃÕÂÊÔÇ]{4,}/, // duas palavras em CAPS LOCK
-          /!{2,}/, // 2+ exclamações seguidas
-        ];
-        const isFrustrated = frustrationPatterns.some((p) => p.test(finalMessage));
+        // Caixa alta e "!!" SAÍRAM (14/09, caso Cristiano) — ver sinalDeFrustracao
+        // em helpers.ts: 154 mensagens em 45 dias disparavam só por pontuação.
+        const isFrustrated = sinalDeFrustracao(finalMessage);
 
         if (isFrustrated) {
           console.log(

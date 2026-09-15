@@ -243,10 +243,29 @@ export function buildLateHandoffMessage(
   hourSP: number,
   minuteSP: number,
   closeHour: number = 18,
+  weekdaySP?: number,
 ): string | null {
   const nowMin = hourSP * 60 + minuteSP;
   const warnFrom = closeHour * 60 - 30;
   if (nowMin < warnFrom) return null;
+  // DEPOIS DO FECHAMENTO (15/09, pedido do dono): às 23h04 de 03/09 esta mensagem
+  // dizia "pode ser que não consigam te responder ainda hoje" — à noite não há
+  // "pode ser": a equipe responde amanhã de manhã, ou na segunda se for sexta à
+  // noite ou fim de semana. 15 min de folga no fechamento, como no resto do
+  // projeto (as meninas respondem até ~18h10). O marcador "encerra às" continua
+  // no texto: é por ele que o fluxo sabe que o aviso já foi dado.
+  const fechou = nowMin >= closeHour * 60 + 15;
+  const fimDeSemana = weekdaySP === 0 || weekdaySP === 6 || (weekdaySP === 5 && fechou);
+  if (fechou || fimDeSemana) {
+    const quando = fimDeSemana ? "na segunda-feira de manhã" : "amanhã de manhã";
+    return (
+      `Nosso atendimento com atendente encerra às ${closeHour}h e já terminou por hoje — ` +
+      `a equipe te responde ${quando}. 🙏\n\n` +
+      `Você prefere que eu deixe sua solicitação registrada para uma atendente te retornar, ` +
+      `ou quer que eu continue te ajudando por aqui agora mesmo? ` +
+      `Eu consigo *agendar, remarcar ou cancelar consultas* normalmente! É só me dizer. 😊`
+    );
+  }
   return (
     `Já é fim do dia por aqui e nosso atendimento com atendente encerra às ${closeHour}h — ` +
     `pode ser que não consigam te responder ainda hoje. 🙏\n\n` +
@@ -378,6 +397,43 @@ export function classificarPedidoDeFisioterapia(texto: unknown): IntencaoFisio {
   }
   if (FISIO_FALAR_RE.test(t)) return "falar_com_fisio";
   return "agendar";
+}
+
+// SINAL DE FRUSTRAÇÃO — SEM CAIXA ALTA E SEM "!!" (caso Cristiano, 14/09) ─────
+// O detector transferia na hora qualquer mensagem com duas palavras em CAIXA ALTA
+// ou com "!!". Às 22h24 de 14/09 o Cristiano respondeu o nome do médico como está
+// no sistema — "LUCAS MIOTTO JOSE" — e virou "paciente frustrado", passado para
+// uma equipe que tinha ido embora. Às 22h42 o aviso de fila; ele desistiu.
+//
+// Medido em 45 dias (6.959 mensagens de paciente): 154 disparavam SÓ por caixa
+// alta ou "!!", e das 32 transferências por frustração quase todas eram isso —
+// "Obrigada!!", "Bom dia !!", "OURO 2 EMPRESARIAL", nome em maiúsculas, link de
+// exame da Dasa, confirmação automática do Amigo ("Olá, EDUARDO..."). Frustração
+// de verdade tem PALAVRA: "Que confusão!", "Estou perguntando isso há 5 msg já",
+// "Que absurdo isso". Com as palavras e sem os dois padrões de pontuação, os
+// mesmos 45 dias dão 9 disparos — e os 9 são pedido de gente ou queixa real.
+//
+// A queixa só vale em mensagem curta (até 280 caracteres): texto longo colado
+// (relatório, e-mail encaminhado) fala de problema de outros, não do paciente.
+const FRUSTRACAO_PADROES: RegExp[] = [
+  /\beu\s+n[aã]o\s+estou\b/i,
+  /\bvoc[eê]s?\s+est[aã]o\s+(me\s+)?(enrolando|brincando|errando)/i,
+  /\bqual\s+(seu|teu)\s+nome\b/i,
+  // `(?![\p{L}])` e não `\b`: "robô" termina em letra acentuada, e o `\b` do JS
+  // é ASCII — "você é um robô?" nunca casou, nem no detector antigo.
+  /\bvoc[eê]\s+[eé]\s+(um\s+)?(rob[oô]|bot|m[aá]quina|ia)(?![\p{L}])/iu,
+  /\b(atendente|humano|pessoa)\s+(humano|de\s+verdade|agora|j[aá])\b/i,
+  /\bquero\s+falar\s+com\s+(algu[eé]m|atendente|humano|pessoa)\b/i,
+  /\bn[aã]o\s+(est[aá]\s+)?funcionando\b/i,
+];
+const QUEIXA_RE =
+  /(que\s+confus[aã]o|absurd|rid[ií]cul|p[ée]ssim|desrespeit|palha[çc]ada|falta\s+de\s+respeito|ningu[eé]m\s+(me\s+)?respond|n[aã]o\s+(me\s+)?respondem|j[aá]\s+(falei|disse|perguntei|expliquei)(?![\p{L}])|perguntando\s+(isso\s+)?h[aá]|h[aá]\s+\d+\s+(msg|mensagens|vezes)|cansad[oa]\s+de|vou\s+desistir|desisto)/iu;
+
+export function sinalDeFrustracao(texto: unknown): boolean {
+  const t = typeof texto === "string" ? texto : "";
+  if (!t.trim()) return false;
+  if (FRUSTRACAO_PADROES.some((p) => p.test(t))) return true;
+  return t.length <= 280 && QUEIXA_RE.test(t);
 }
 
 // "ATENDENTE", SOZINHO, E UM PEDIDO (26/08) ──────────────────────────────────

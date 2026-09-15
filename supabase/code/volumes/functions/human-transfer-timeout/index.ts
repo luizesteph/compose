@@ -1042,6 +1042,25 @@ Deno.serve(async (req) => {
                 `Obrigado pela paciência! 🙏`)
           : warnMsgDoDia;
 
+        // FORA DO EXPEDIENTE, NENHUM AVISO (caso Cristiano, 14/09). Às 22h42 este
+        // aviso disse "seu caso continua na fila da nossa equipe e ainda não foi
+        // respondido" para quem a Julia tinha passado às 22h24 — a equipe tinha ido
+        // embora havia quatro horas. Ele respondeu "Não quero mais". À noite a
+        // própria mensagem da transferência já diz quando a equipe responde
+        // (fraseForaDoExpediente); um segundo aviso só lembra que ninguém veio.
+        // A linha expira ANTES do claim, e expira de vez: não sobra aviso velho
+        // para disparar às 7h30.
+        if (!expedienteAberto({ diaDaSemana: _spAviso.getDay(), hora: _spAviso.getHours(), minuto: _spAviso.getMinutes() })) {
+          await supabase
+            .from("pending_human_transfers")
+            .update({ status: "expired", resolved_at: nowIso, resolved_reason: "fora_do_expediente_sem_aviso" })
+            .eq("id", row.id)
+            .eq("status", "pending");
+          console.log(`[human-transfer-timeout] fora do expediente — aviso de espera NÃO enviado (row ${row.id})`);
+          summary.expired++;
+          continue;
+        }
+
         // ── COMPARE-AND-SWAP ANTES DO ENVIO (spam 28/07) ────────────────────────
         // Até hoje a linha só saía de 'pending' DEPOIS do envio, e o erro do UPDATE
         // não era checado. Como o CHECK da tabela não aceitava 'warned', a gravação

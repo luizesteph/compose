@@ -315,3 +315,34 @@ export function pertoDoEncerramento(
   const m = agora.hora * 60 + agora.minuto;
   return m >= inicioMin && m < fimMin;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FORA DO EXPEDIENTE — A VERSÃO DA NOITE (pedido do dono, 15/09)
+// ─────────────────────────────────────────────────────────────────────────────
+// Depois das 18h15 "antes do encerramento" já não é verdade. Caso Cristiano
+// (14/09): 22h24 a Julia passou o caso para a equipe, 22h42 saiu "seu caso
+// continua na fila da nossa equipe", e ele respondeu "Não quero mais" — estava a
+// um passo de marcar com o Dr. Lucas. À noite a frase precisa dizer QUANDO:
+// amanhã de manhã, hoje de manhã (madrugada), ou segunda-feira (sexta à noite e
+// fim de semana). Feriado não entra aqui: o dia fechado tem fluxo próprio
+// (getClosedDayInfo no webhook), que já diz "em DD/MM, quando voltarmos".
+
+/**
+ * Frase para a noite, a madrugada e o fim de semana. Com `nome`, a frase fala da
+ * atendente ("ela te responde"); sem, da equipe.
+ */
+export function fraseForaDoExpediente(
+  agora: { diaDaSemana: number; hora: number; minuto: number },
+  nome?: string | null,
+): string {
+  const alvo = nome ? `a ${nome}` : "a nossa equipe";
+  const m = agora.hora * 60 + agora.minuto;
+  const fecha = 18 * 60 + 15;
+  const abre = 7 * 60 + 30;
+  const fimDeSemana = agora.diaDaSemana === 0 || agora.diaDaSemana === 6 || (agora.diaDaSemana === 5 && m >= fecha);
+  if (fimDeSemana) return `Vou deixar seu caso com ${alvo} — o atendimento volta na segunda-feira de manhã.`;
+  if (m < abre) {
+    return `Vou deixar seu caso com ${alvo} — ${nome ? "ela te responde" : "te respondem"} hoje de manhã, quando o atendimento começar.`;
+  }
+  return `Vou deixar seu caso com ${alvo} — o atendimento de hoje já encerrou, então ${nome ? "ela te responde" : "te respondem"} amanhã de manhã.`;
+}
