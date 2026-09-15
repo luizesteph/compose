@@ -284,3 +284,34 @@ export function decideLiberarFicha(
   }
   return { liberar: false, motivo: "dentro_do_prazo" };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIM DO EXPEDIENTE — NÃO PROMETER QUEM JÁ ESTÁ INDO EMBORA (pedido do dono, 15/09)
+// ─────────────────────────────────────────────────────────────────────────────
+// "A partir das 17:30, fala assim: 'Vou tentar passar para um atendente antes do
+//  encerramento do atendimento.' Falando assim, o pessoal vai entender que, se não
+//  conseguir a resposta, fica para amanhã de manhã."
+//
+// O que a Julia dizia nessa hora (09–14/09, mensagens reais): "Já estou te
+// transferindo para nossa equipe... Só um instante", "vou te transferir agora
+// mesmo para a Lidiane", "uma atendente vai continuar com você em instantes", e o
+// aviso de 15 min "a Laiz está finalizando outro atendimento e já já te responde"
+// às 17h54, 18h06, 18h28. Promessa de agora para uma equipe que está saindo — foi
+// o que fez o Vitor (14/09, 17h49) escrever "Estou perguntando isso há 5 msg já".
+//
+// A janela fecha às 18h15, junto com `expedienteAberto`: é até quando as meninas
+// ainda respondem (Vânia às 18:09 em 08/09). Depois disso a frase "antes do
+// encerramento" deixaria de ser verdade.
+
+export const FRASE_ENCERRAMENTO = "Vou tentar passar para um atendente antes do encerramento do atendimento.";
+
+/** Seg–sex, das 17h30 às 18h15 (São Paulo). `agora` por parâmetro para a função seguir pura. */
+export function pertoDoEncerramento(
+  agora: { diaDaSemana: number; hora: number; minuto: number },
+  inicioMin = 17 * 60 + 30,
+  fimMin = 18 * 60 + 15,
+): boolean {
+  if (agora.diaDaSemana === 0 || agora.diaDaSemana === 6) return false;
+  const m = agora.hora * 60 + agora.minuto;
+  return m >= inicioMin && m < fimMin;
+}

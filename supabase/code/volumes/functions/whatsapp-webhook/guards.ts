@@ -4,7 +4,8 @@
 // horarios (tokens de agenda so saem com respaldo verificado), pre-book guard
 // (fim de semana / fora do expediente) e dedup de respostas quase-identicas.
 // Extraido byte a byte do index.ts — comportamento identico. Sem @ts-nocheck.
-import { stripAccents } from "./helpers.ts";
+import { stripAccents, PROMESSA_DE_HUMANO_RE } from "./helpers.ts";
+import { FRASE_ENCERRAMENTO, pertoDoEncerramento } from "../_shared/atendimento.ts";
 
 export function normalizeForSimilarity(s: string): string {
   return stripAccents(String(s || "").toLowerCase())
@@ -485,7 +486,7 @@ export function validateBookingDate(
 // As regras de atendimento humano moraram aqui por um tempo; foram para
 // _shared/atendimento.ts quando o cron human-transfer-timeout passou a precisar
 // das mesmas funções. Re-exportadas para não quebrar quem já importava daqui.
-export { exigeRespostaDaAtendente, prazoDeRespostaEmMinutos } from "../_shared/atendimento.ts";
+export { exigeRespostaDaAtendente, prazoDeRespostaEmMinutos, pertoDoEncerramento, FRASE_ENCERRAMENTO } from "../_shared/atendimento.ts";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // COMBUSTÍVEL DO DISJUNTOR: só conta o que foi FALHA DE VERDADE (auditoria 01/09)
@@ -558,4 +559,119 @@ export function corrigirLinkDoMapa(texto: string, linkOficial?: string | null): 
     /https?:\/\/(?:maps\.app\.goo\.gl|goo\.gl\/maps)\/[A-Za-z0-9_-]*/g,
     (achado) => (achado === oficial ? achado : oficial),
   );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A PARTIR DAS 17H30, A PROMESSA DE ATENDENTE VIRA A FRASE DO DONO (15/09)
+// ─────────────────────────────────────────────────────────────────────────────
+// Ver FRASE_ENCERRAMENTO em _shared/atendimento.ts. Aqui é o texto: o TRECHO que
+// promete gente ("vou te transferir", "já passei para a Lidiane", "em instantes
+// nossa equipe já vai te atender") vira a frase do dono, e o "Só um instante!"
+// que vinha junto sai — ele só existia para a promessa.
+//
+// Troca o trecho, não a mensagem: o que vem ANTES na mesma frase fica ("Como se
+// trata de infiltração, vou tentar passar para a Lidiane..."), e o que vem depois
+// de um travessão também ("... antes do encerramento do atendimento — se você
+// quiser remarcar, é só me dizer"). Se a promessa citava uma atendente, o nome
+// fica: quem cuida de infiltração e cirurgia é informação útil para o paciente.
+//
+// Ensaiado nas 115 mensagens reais da Julia nessa janela em 21 dias. A primeira
+// versão quebrava "Dr. Hugo" como fim de frase ("...do atendimento. Hugo para o
+// dia 18/09.") e deixava passar "ela vai te responder por aqui" logo depois da
+// troca — os dois viraram teste.
+//
+// Não mexe em: oferecimento ("se preferir falar com um atendente, é só me pedir"
+// não é promessa); frase sem gente do outro lado ("vou te passar os horários",
+// "já vou transferir sua consulta para o dia 14"); mensagem que já fala de
+// encerramento ("encerra às", o aviso de buildLateHandoffMessage).
+
+// "ela" só conta como gente quando vem com verbo de promessa ("já estou
+// encaminhando sua mensagem para ela", Fabio 08/09); "dela" não é "ela".
+const ALVO_HUMANO_RE = /(atendente|equipe|colega|recep[çc][ãa]o|pessoa|humano|algu[ée]m|lidiane|v[âa]nia|glaucia|la[ií]z|mardila|(?<![\p{L}])elas?(?![\p{L}]))/iu;
+// Promessa de resposta que não começa por "eu": "em instantes nossa equipe já vai
+// te atender", "ela vai te responder por aqui". PROMESSA_DE_HUMANO_RE não cobre.
+const PROMESSA_DE_RESPOSTA_RE = /em\s+instantes|j[áa]\s+j[áa]|(equipe|atendentes?|colegas?|ela|elas)\s+(j[áa]\s+)?(vai|v[ãa]o|ir[áa])\s+(te\s+)?(atender|responder|retornar|continuar)(?![\p{L}])|(equipe|atendentes?|colegas?|ela|elas)\s+(j[áa]\s+)?(entra|entram|vai\s+entrar|v[ãa]o\s+entrar|entrar[áa])\s+em\s+contato/iu;
+const SO_ESPERA_RE = /^[\s\p{Extended_Pictographic}️]*(s[óo]\s+)?(aguardar\s+)?(um|uns)\s+(instante|momento|minutinho)s?(,?\s*por\s+favor)?[\s!.…\p{Extended_Pictographic}️]*$/iu;
+// Fim de frase — menos depois de abreviação ("Dr. Hugo", "Sra. Keiko").
+const FIM_DE_FRASE_RE = /((?<=[.!?…])(?<!\b(?:Dr|Dra|Sr|Sra|Srta|Prof|Profa|Av)\.)\s+)/u;
+const NOMES_NA_PROMESSA: Array<[string, string]> = [
+  ["lidiane", "Lidiane"], ["vania", "Vânia"], ["glaucia", "Glaucia"], ["laiz", "Laiz"], ["mardila", "Mardila"],
+];
+
+/** Onde começa a promessa de gente neste trecho, ou -1. */
+function inicioDaPromessa(trecho: string): number {
+  if (!ALVO_HUMANO_RE.test(trecho)) return -1;
+  const a = PROMESSA_DE_HUMANO_RE.exec(trecho);
+  const b = PROMESSA_DE_RESPOSTA_RE.exec(trecho);
+  const ids = [a?.index, b?.index].filter((x): x is number => typeof x === "number");
+  return ids.length ? Math.min(...ids) : -1;
+}
+
+/** Quebra mantendo o separador que seguia cada pedaço. */
+function emPedacos(texto: string, sep: RegExp): Array<{ t: string; sep: string }> {
+  const partes = texto.split(sep);
+  const out: Array<{ t: string; sep: string }> = [];
+  for (let i = 0; i < partes.length; i += 2) out.push({ t: partes[i], sep: partes[i + 1] ?? "" });
+  return out;
+}
+
+/**
+ * Das 17h30 às 18h15 (seg–sex), troca a promessa de atendimento humano pela frase
+ * do dono. Fora da janela, ou sem promessa, devolve o texto intacto.
+ */
+export function avisoDeEncerramento(
+  texto: string,
+  agora: { diaDaSemana: number; hora: number; minuto: number },
+): string {
+  if (typeof texto !== "string" || !texto.trim()) return texto;
+  if (!pertoDoEncerramento(agora)) return texto;
+  if (/encerramento do atendimento|encerra às/i.test(texto)) return texto;
+
+  const estado = { trocou: false, maos: false };
+  const frasesSaida: Array<{ t: string; sep: string }> = [];
+
+  for (const frase of emPedacos(texto, FIM_DE_FRASE_RE)) {
+    const trechosSaida: Array<{ t: string; sep: string }> = [];
+    for (const tr of emPedacos(frase.t, /(\s+[—–]\s+|;\s+)/)) {
+      const ini = inicioDaPromessa(tr.t);
+      if (ini >= 0) {
+        if (tr.t.includes("🙏")) estado.maos = true;
+        if (!estado.trocou) {
+          estado.trocou = true;
+          // Nome no próprio trecho; se o trecho só diz "para ela", o nome está antes
+          // na mensagem ("...agendamento específico com a Lidiane. Já estou
+          // encaminhando sua mensagem para ela").
+          const acha = (x: string) => NOMES_NA_PROMESSA.find(([chave]) => stripAccents(x.toLowerCase()).includes(chave));
+          const nome = acha(tr.t) || (/(?<![\p{L}])elas?(?![\p{L}])/iu.test(tr.t) ? acha(texto) : undefined);
+          let dono = nome ? FRASE_ENCERRAMENTO.replace("para um atendente", `para a ${nome[1]}`) : FRASE_ENCERRAMENTO;
+          const antes = tr.t.slice(0, ini);
+          if (/,\s*$/.test(antes) && antes.trim().length >= 3) {
+            dono = antes + dono.charAt(0).toLowerCase() + dono.slice(1);
+          }
+          trechosSaida.push({ t: dono, sep: tr.sep });
+        }
+        continue;   // promessa repetida depois da troca: sai
+      }
+      if (estado.trocou && SO_ESPERA_RE.test(tr.t)) {
+        if (tr.t.includes("🙏")) estado.maos = true;
+        continue;
+      }
+      trechosSaida.push(tr);
+    }
+    if (!trechosSaida.length) continue;
+    const t = trechosSaida
+      .map((x, i) => {
+        const ultimo = i === trechosSaida.length - 1;
+        // a frase do dono termina em ponto; seguida de outro trecho, o ponto sai
+        const corpo = !ultimo && x.t.endsWith("encerramento do atendimento.") ? x.t.slice(0, -1) : x.t;
+        return corpo + (ultimo ? "" : (x.sep || " — "));
+      })
+      .join("");
+    frasesSaida.push({ t, sep: frase.sep });
+  }
+  if (!estado.trocou) return texto;
+
+  let r = frasesSaida.map((f, i) => f.t + (i < frasesSaida.length - 1 ? (f.sep || " ") : "")).join("").trim();
+  if (estado.maos && !r.includes("🙏")) r += " 🙏";
+  return r;
 }

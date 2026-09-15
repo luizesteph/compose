@@ -24,6 +24,8 @@ import {
   expedienteAberto,
   minutosParado,
   telefoneDasMensagens,
+  pertoDoEncerramento,
+  FRASE_ENCERRAMENTO,
   LIMITES_PADRAO_DA_FICHA,
   type LimitesDaFicha,
 } from "../_shared/atendimento.ts";
@@ -1022,11 +1024,23 @@ Deno.serve(async (req) => {
         // honesto: diz que o caso continua na fila, sem prometer prazo.
         const _semDona = !row.assigned_attendant_name || String(row.assigned_attendant_name).trim().startsWith("(");
         const attName = String(row.assigned_attendant_name || "nossa atendente").split(/\s+/)[0];
-        const warnMsg = _semDona
+        const warnMsgDoDia = _semDona
           ? `Oi! 👋 Só passando pra avisar que seu caso continua na fila da nossa equipe e ainda não foi respondido. ` +
             `Se for uma emergência, por favor não espere por aqui: procure um pronto-socorro. 🙏`
           : `Oi! 👋 Só passando pra avisar: a ${attName} está finalizando outro atendimento e já já te responde. ` +
             `Obrigado pela paciência! 🙏`;
+        // FIM DO EXPEDIENTE (pedido do dono, 15/09): das 17h30 às 18h15 este aviso
+        // saía às 17h54, 18h06, 18h28 prometendo "já já te responde" para uma equipe
+        // que estava indo embora. Na janela, a frase do dono — quem lê entende que,
+        // se não der tempo, fica para amanhã de manhã. Ver FRASE_ENCERRAMENTO.
+        const _spAviso = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
+        const warnMsg = pertoDoEncerramento({ diaDaSemana: _spAviso.getDay(), hora: _spAviso.getHours(), minuto: _spAviso.getMinutes() })
+          ? (_semDona
+              ? `Oi! 👋 Só passando pra avisar que seu caso continua na fila da nossa equipe. ${FRASE_ENCERRAMENTO} ` +
+                `Se for uma emergência, por favor não espere por aqui: procure um pronto-socorro. 🙏`
+              : `Oi! 👋 Só passando pra avisar: ${FRASE_ENCERRAMENTO.replace("Vou tentar passar para um atendente", `vou tentar passar para a ${attName}`)} ` +
+                `Obrigado pela paciência! 🙏`)
+          : warnMsgDoDia;
 
         // ── COMPARE-AND-SWAP ANTES DO ENVIO (spam 28/07) ────────────────────────
         // Até hoje a linha só saía de 'pending' DEPOIS do envio, e o erro do UPDATE

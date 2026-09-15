@@ -70,6 +70,7 @@ import {
   nearDuplicate,
   respostaFoiFalha,
   corrigirLinkDoMapa,
+  avisoDeEncerramento,
 } from "./guards.ts";
 import {
   readPatientInsurance,
@@ -382,6 +383,14 @@ const corsHeaders = {
 // cadastro) -> "primeira consulta" se existir. Fallback: primeiro evento.
 
 // ── Canonical clock helpers (America/Sao_Paulo via Intl.DateTimeFormat) ──
+// FIM DO EXPEDIENTE (pedido do dono, 15/09): das 17h30 às 18h15, a promessa de
+// atendente vira "Vou tentar passar para um atendente antes do encerramento do
+// atendimento." Ver avisoDeEncerramento (guards.ts). Hora sempre de São Paulo.
+function comAvisoDeEncerramento(texto: string): string {
+  const sp = getNowSPParts();
+  return avisoDeEncerramento(texto, { diaDaSemana: sp.weekday, hora: sp.hour, minuto: sp.minute });
+}
+
 function getNowSPParts(): {
   year: number;
   month: number;
@@ -12276,8 +12285,9 @@ Deno.serve(async (req) => {
 
           // Tell the patient AND transfer to a human, instead of going silent.
           if (avanceaiBaseUrl && avanceaiApiId && avanceaiBearerToken && phone && !isTestMode && !_cbJaAvisou) {
-            const breakerMsg =
-              "Estou com dificuldade pra te ajudar por aqui agora. Já estou transferindo pra nossa equipe — uma atendente vai continuar com você em instantes. 🙏";
+            const breakerMsg = comAvisoDeEncerramento(
+              "Estou com dificuldade pra te ajudar por aqui agora. Já estou transferindo pra nossa equipe — uma atendente vai continuar com você em instantes. 🙏",
+            );
             let _cbSent = false;
             try {
               await sendAvanceaiReply(
@@ -12383,8 +12393,9 @@ Deno.serve(async (req) => {
 
               // Send empathetic message to patient
               if (avanceaiBaseUrl && avanceaiApiId && avanceaiBearerToken && phone && !isTestMode) {
-                const errorMsg =
-                  "Desculpe pelo inconveniente! Estou com uma dificuldade técnica para concluir essa ação. Vou transferir você para nossa equipe de atendimento para que possam te ajudar diretamente. 🙏";
+                const errorMsg = comAvisoDeEncerramento(
+                  "Desculpe pelo inconveniente! Estou com uma dificuldade técnica para concluir essa ação. Vou transferir você para nossa equipe de atendimento para que possam te ajudar diretamente. 🙏",
+                );
                 await sendAvanceaiReply(
                   avanceaiBaseUrl,
                   avanceaiApiId,
@@ -12479,8 +12490,9 @@ Deno.serve(async (req) => {
                 .eq("id", messageId);
 
               if (avanceaiBaseUrl && avanceaiApiId && avanceaiBearerToken && phone && !isTestMode) {
-                const errMsg =
-                  "Vou chamar uma de nossas atendentes pra te ajudar diretamente nesse caso, tudo bem? 🙏";
+                const errMsg = comAvisoDeEncerramento(
+                  "Vou chamar uma de nossas atendentes pra te ajudar diretamente nesse caso, tudo bem? 🙏",
+                );
                 await sendAvanceaiReply(
                   avanceaiBaseUrl,
                   avanceaiApiId,
@@ -12602,8 +12614,9 @@ Deno.serve(async (req) => {
         }
 
         // Fixed reply message
-        const mediaReply =
-          "Recebi seu arquivo! 📎 Infelizmente ainda não consigo analisar documentos e imagens diretamente. Vou encaminhar para nossa equipe, que entrará em contato em breve.";
+        const mediaReply = comAvisoDeEncerramento(
+          "Recebi seu arquivo! 📎 Infelizmente ainda não consigo analisar documentos e imagens diretamente. Vou encaminhar para nossa equipe, que entrará em contato em breve.",
+        );
 
         // Transfer ticket to human attendant via AvanceAI (unified helper)
         if (avanceaiBaseUrl && avanceaiApiId && avanceaiBearerToken && phone) {
@@ -13334,7 +13347,7 @@ Deno.serve(async (req) => {
               avanceaiApiId,
               avanceaiBearerToken,
               phone,
-              urgencyReply,
+              comAvisoDeEncerramento(urgencyReply),
               resolvedChannelId,
             );
           }
@@ -13410,8 +13423,9 @@ Deno.serve(async (req) => {
             .eq("id", messageId);
 
           if (avanceaiBaseUrl && avanceaiApiId && avanceaiBearerToken && phone && !isTestMode) {
-            const ack =
-              "Entendi, vou chamar uma de nossas atendentes pra te ajudar diretamente. Um momento, por favor 🙏";
+            const ack = comAvisoDeEncerramento(
+              "Entendi, vou chamar uma de nossas atendentes pra te ajudar diretamente. Um momento, por favor 🙏",
+            );
             await sendAvanceaiReply(
               avanceaiBaseUrl,
               avanceaiApiId,
@@ -14968,8 +14982,9 @@ Deno.serve(async (req) => {
           ).length;
           if (_emptyCount >= 2) {
             console.log(`[Webhook] ⛔ REGRA 7: ${_emptyCount} negativas de horario em 45min — transferindo pra humano`);
-            const _r7Msg =
-              "Pra não te deixar tentando datas sem sucesso, vou te passar pra uma colega da equipe que consegue verificar um encaixe especial pra você. 🙏 Só um instante!";
+            const _r7Msg = comAvisoDeEncerramento(
+              "Pra não te deixar tentando datas sem sucesso, vou te passar pra uma colega da equipe que consegue verificar um encaixe especial pra você. 🙏 Só um instante!",
+            );
             if (avanceaiBaseUrl && avanceaiApiId && avanceaiBearerToken && phone && !isTestMode) {
               try {
                 await sendAvanceaiReply(avanceaiBaseUrl, avanceaiApiId, avanceaiBearerToken, phone, _r7Msg, resolvedChannelId);
@@ -15039,8 +15054,9 @@ Deno.serve(async (req) => {
             ).length;
             if (_vezes >= 3) {
               console.log(`[Webhook] ⛔ REGRA 8: pedi "${_campo}" ${_vezes}x em 20min — parando e passando pra humano`);
-              const _r8Msg =
-                "Pra não te fazer repetir de novo, vou passar pra uma colega da equipe finalizar isso com você. 🙏 Só um instante!";
+              const _r8Msg = comAvisoDeEncerramento(
+                "Pra não te fazer repetir de novo, vou passar pra uma colega da equipe finalizar isso com você. 🙏 Só um instante!",
+              );
               if (avanceaiBaseUrl && avanceaiApiId && avanceaiBearerToken && phone && !isTestMode) {
                 try {
                   await sendAvanceaiReply(avanceaiBaseUrl, avanceaiApiId, avanceaiBearerToken, phone, _r8Msg, resolvedChannelId);
@@ -15417,8 +15433,9 @@ Deno.serve(async (req) => {
                   console.log(
                     `[AntiHallucination] ⛔ FALLBACK_NO_SCHEDULE loop (sends=${fallbackCount}, blocks=${blockedCount}) em 15min — escalando pra humano`,
                   );
-                  const escalateMsg =
-                    "Vou pedir pra uma colega da equipe continuar com você daqui, pra agilizar e não te deixar esperando. 🙏";
+                  const escalateMsg = comAvisoDeEncerramento(
+                    "Vou pedir pra uma colega da equipe continuar com você daqui, pra agilizar e não te deixar esperando. 🙏",
+                  );
                   if (avanceaiBaseUrl && avanceaiApiId && avanceaiBearerToken && phone && !isTestMode) {
                     try {
                       await sendAvanceaiReply(
@@ -16273,6 +16290,10 @@ Deno.serve(async (req) => {
               })
               .eq("id", messageId);
           }
+          // Fim do expediente: DEPOIS da rede de promessa (que decide se transfere de
+          // verdade olhando a promessa original) e ANTES de enviar e gravar — o que o
+          // paciente lê é o que fica no histórico.
+          replyText = comAvisoDeEncerramento(replyText);
           console.log(`[Webhook] Sending auto-reply to ${phone}: ${replyText.substring(0, 80)}...`);
           const sent = await sendAvanceaiReply(
             avanceaiBaseUrl,
@@ -16588,8 +16609,9 @@ Deno.serve(async (req) => {
               if (recentErrors >= 2) {
                 // 2nd+ error in 10 min — transfer immediately
                 console.log(`[Webhook] ⚡ ${recentErrors} recent errors — transferring to human immediately`);
-                const fallbackText =
-                  "Desculpe, estou com uma instabilidade técnica. Vou transferir você para um atendente agora. 🙏";
+                const fallbackText = comAvisoDeEncerramento(
+                  "Desculpe, estou com uma instabilidade técnica. Vou transferir você para um atendente agora. 🙏",
+                );
                 await sendAvanceaiReply(
                   avanceaiBaseUrl,
                   avanceaiApiId,
@@ -16623,8 +16645,9 @@ Deno.serve(async (req) => {
                 }
               } else {
                 // 1st error — send empathetic message
-                const fallbackText =
-                  "Desculpe, tive uma falha técnica momentânea. Pode reenviar sua mensagem, por favor? 🙏";
+                const fallbackText = comAvisoDeEncerramento(
+                  "Desculpe, tive uma falha técnica momentânea. Pode reenviar sua mensagem, por favor? 🙏",
+                );
                 await sendAvanceaiReply(
                   avanceaiBaseUrl,
                   avanceaiApiId,
