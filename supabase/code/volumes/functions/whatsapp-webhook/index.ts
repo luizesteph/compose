@@ -50,6 +50,13 @@ import {
   slotJaPassou,
 } from "./helpers.ts";
 import { tryFetch } from "./amigoApi.ts";
+import {
+  atendenteDeCasoLongo,
+  decideNovaIdaAFila,
+  desdeJanelaCasoLongo,
+  FILTRO_GATILHOS_SEM_MOVIMENTO,
+  JANELA_CASO_LONGO_DIAS,
+} from "../_shared/atendimento.ts";
 import { LLM_MODEL, LLM_MODEL_FALLBACK, LLM_MODEL_RESPOSTA, LLM_GATEWAY, ehErroDeModeloDesconhecido, llmApiKey, llmHeaders, LLM_USAGE_INCLUDE, custoDaChamada } from "../_shared/llm.ts";
 import { STT_ENDPOINT, STT_MODEL, STT_LANGUAGE, STT_RESPONSE_FORMAT, sttApiKey } from "../_shared/stt.ts";
 import {
@@ -8561,6 +8568,55 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
       }
 
       case "falar_com_atendente": {
+        // === CASO LONGO: Vânia e Lidiane vão para pendentes UMA vez (15/09) ===
+        // Paciente delas cuja conversa já passou pela fila nos últimos 7 dias NÃO é
+        // transferido de novo: o ticket fica com quem cuida do caso, e a Julia só
+        // diz isso. Urgência clínica passa. Regra e números em _shared/atendimento.ts.
+        // Era este caminho que mandava o mesmo paciente para a fila seis vezes em
+        // quatro minutos (15/09, 8h36) — e cada ida disparava o aviso de 15 min
+        // "seu caso continua na fila" num caso que é de dias.
+        if (supabaseClient && conversationIdParam) {
+          const _pedida = entities.attendant_name ? String(entities.attendant_name) : "";
+          // Pediu outra pessoa pelo nome? Então não é caso delas, mesmo que já tenha sido.
+          const _donaLonga = _pedida
+            ? atendenteDeCasoLongo(_pedida)
+            : atendenteDeCasoLongo(await findOwnerAttendant(supabaseClient, clinicTokenId, senderPhone));
+          if (_donaLonga) {
+            let _jaPassou = false;
+            try {
+              const { count: _idas, error: _erroIdas } = await supabaseClient
+                .from("transfer_audit")
+                .select("id", { count: "exact", head: true })
+                .eq("conversation_id", conversationIdParam)
+                .not("trigger", "in", FILTRO_GATILHOS_SEM_MOVIMENTO)
+                .gte("created_at", desdeJanelaCasoLongo());
+              // na dúvida transfere, como antes: segurar sem saber deixaria paciente sem ninguém
+              _jaPassou = !_erroIdas && (_idas || 0) > 0;
+            } catch { /* idem */ }
+            const _dLonga = decideNovaIdaAFila({
+              casoLongo: true,
+              jaPassouPelaFila: _jaPassou,
+              urgenciaClinica: classificarUrgencia(currentMessageText || "") === "clinica",
+            });
+            if (!_dLonga.mover) {
+              console.log(
+                `[CasoLongo] conversa ${conversationIdParam} já passou pela fila em ${JANELA_CASO_LONGO_DIAS}d — fica com a ${_donaLonga}, sem nova transferência`,
+              );
+              return {
+                status: "success",
+                response: `A mensagem ficou com a ${_donaLonga}, que já cuida deste caso (sem nova transferência).`,
+                internal_instruction:
+                  `Não diga que vai transferir, encaminhar, chamar ou avisar alguém, e não diga que o paciente está na fila. ` +
+                  `Diga que a mensagem ficou com a ${_donaLonga}, que já está cuidando do caso e responde por aqui. ` +
+                  `Se a mensagem tiver uma pergunta que você sabe responder (endereço, telefone, horário da clínica), responda. Não prometa prazo.`,
+                // A rede da promessa (TransferPromiseGuard) transferiria de novo ao ler
+                // "a Vânia te responde" sem transferência nos últimos 3 minutos.
+                casoLongoSemNovaTransferencia: true,
+              } as any;
+            }
+          }
+        }
+
         // === DIA FECHADO (feriado/emenda — 10/07) ===
         // A equipe não está na clínica: avisa 1x (com a data de volta) e oferece a IA.
         // Se o paciente insistir (2ª vez, marcador "equipe volta em" na outgoing
@@ -15763,7 +15819,10 @@ Deno.serve(async (req) => {
         // numa variável de turno: a mesma isolate atende várias conversas ao mesmo
         // tempo e um flag de módulo mentiria entre pacientes.
         try {
-          if (PROMESSA_DE_HUMANO_RE.test(replyText) && conversationId) {
+          // Caso longo (15/09): a Julia decidiu NÃO transferir de novo porque o caso
+          // já está com a Vânia/Lidiane. "Ela te responde por aqui" é verdade ali —
+          // cumprir a "promessa" aqui seria mandar para a fila pela segunda vez.
+          if (PROMESSA_DE_HUMANO_RE.test(replyText) && conversationId && !actionResult?.casoLongoSemNovaTransferencia) {
             const _desde = new Date(Date.now() - 3 * 60_000).toISOString();
             const [{ data: _audit }, { data: _pend }] = await Promise.all([
               supabase.from("transfer_audit").select("id")

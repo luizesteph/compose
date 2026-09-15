@@ -114,12 +114,87 @@ export function prazoDeRespostaEmMinutos(
   nomeAtendente: unknown,
   prazoPadrao = 10,
   prazoEstendido = 60,
-  nomesEstendidos: string[] = ["vania", "lidiane"],
+  nomesEstendidos: string[] = Object.keys(ATENDENTES_DE_CASO_LONGO),
 ): number {
   const n = _normalizarCurta(typeof nomeAtendente === "string" ? nomeAtendente : "");
   if (!n) return prazoPadrao;
   const primeiro = n.split(/\s+/)[0];
   return nomesEstendidos.includes(primeiro) ? prazoEstendido : prazoPadrao;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CASO LONGO — Vânia e Lidiane vão para pendentes UMA vez (pedido do dono, 15/09)
+// ─────────────────────────────────────────────────────────────────────────────
+// "Os pacientes da Vânia e da Lidiane podem estar precisando de ajuda realmente,
+//  mas não pode ficar transferindo várias vezes. Transfere uma vez para
+//  pendentes e, caso as meninas vejam que não tem urgência, volta para elas —
+//  as respostas delas são de longa duração, às vezes dias."
+//
+// Três caminhos tiravam o paciente delas, cada um por conta própria e sem saber
+// do outro: a Julia (pedido de atendente), a devolução por inatividade (60 min)
+// e a varredura da ficha (2h). Medido de 08 a 15/09: 187 idas para pendentes de
+// pacientes das duas, 129 com a mesma conversa já passada pela fila nos 7 dias
+// anteriores — 57 da Julia, 64 da inatividade, 8 da varredura. Um paciente da
+// Vânia foi para a fila SEIS vezes em quatro minutos (15/09, 8h36–8h40).
+//
+// A regra é uma só para os três: caso da Vânia ou da Lidiane que já passou pela
+// fila nos últimos 7 dias fica com ela. Só volta para a fila se a mensagem é
+// urgência CLÍNICA (classificarUrgencia, helpers.ts). Nos 57 textos que a Julia
+// teria segurado nenhum era urgência: "algum retorno?", "ok no aguardo", laudo.
+
+/** Primeiro nome sem acento → como escrever para o paciente. */
+export const ATENDENTES_DE_CASO_LONGO: Record<string, string> = {
+  vania: "Vânia",
+  lidiane: "Lidiane",
+};
+
+/** Quanto tempo "já passou pela fila" continua valendo. */
+export const JANELA_CASO_LONGO_DIAS = 7;
+
+/**
+ * Linhas do transfer_audit que só AVISAM — não tiram o ticket de ninguém.
+ * Todo o resto (pedido_paciente, inatividade, ficha_parada, urgencia...) é ida
+ * para a fila e conta.
+ */
+export const GATILHOS_SEM_MOVIMENTO = [
+  "aviso_timeout",
+  "mensagem_engolida",
+  "cancelamento_engolido",
+  "inatividade_travada",
+];
+
+/** Pronto para `.not("trigger", "in", ...)` do supabase-js. */
+export const FILTRO_GATILHOS_SEM_MOVIMENTO = `(${GATILHOS_SEM_MOVIMENTO.join(",")})`;
+
+/** Início da janela, em ISO, para o `.gte("created_at", ...)`. */
+export function desdeJanelaCasoLongo(agoraMs: number = Date.now()): string {
+  return new Date(agoraMs - JANELA_CASO_LONGO_DIAS * 24 * 60 * 60 * 1000).toISOString();
+}
+
+/**
+ * "Vânia" ou "Lidiane" quando o nome é de uma delas; null para o resto.
+ * Aceita a grafia do Z-PRO ("VÂNIA", "Lidiane Souza") e a da classificação
+ * ("vania").
+ */
+export function atendenteDeCasoLongo(nome: unknown): string | null {
+  const n = _normalizarCurta(typeof nome === "string" ? nome : "");
+  if (!n) return null;
+  const primeiro = n.split(/\s+/)[0];
+  return Object.prototype.hasOwnProperty.call(ATENDENTES_DE_CASO_LONGO, primeiro)
+    ? ATENDENTES_DE_CASO_LONGO[primeiro]
+    : null;
+}
+
+/** O ticket pode ir (de novo) para a fila? */
+export function decideNovaIdaAFila(s: {
+  casoLongo: boolean;
+  jaPassouPelaFila: boolean;
+  urgenciaClinica: boolean;
+}): { mover: boolean; motivo: string } {
+  if (!s.casoLongo) return { mover: true, motivo: "regra_normal" };
+  if (!s.jaPassouPelaFila) return { mover: true, motivo: "primeira_ida" };
+  if (s.urgenciaClinica) return { mover: true, motivo: "urgencia_clinica" };
+  return { mover: false, motivo: "caso_longo_fica_com_a_dona" };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

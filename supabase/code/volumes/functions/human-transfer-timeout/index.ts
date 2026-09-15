@@ -28,7 +28,12 @@ import {
   FRASE_ENCERRAMENTO,
   LIMITES_PADRAO_DA_FICHA,
   type LimitesDaFicha,
+  atendenteDeCasoLongo,
+  decideNovaIdaAFila,
+  desdeJanelaCasoLongo,
+  FILTRO_GATILHOS_SEM_MOVIMENTO,
 } from "../_shared/atendimento.ts";
+import { classificarUrgencia } from "../whatsapp-webhook/helpers.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -158,6 +163,12 @@ function stripAccents(s: string): string {
 // Um erro escondia o outro, e o silêncio escondia os dois: a função só logava
 // quando devolvia alguma coisa. Agora ela loga o resultado SEMPRE, com o motivo
 // de cada pulo — zero devoluções passa a ser uma frase no log, não um vazio.
+// Marca gravada no action_error da mensagem do paciente quando a Fase 2 decide
+// que o caso é da Vânia/Lidiane e fica com ela (15/09). Mesmo esquema das marcas
+// da Fase 3: sem coluna nova, e a próxima mensagem do paciente chega sem marca,
+// então é avaliada de novo (inclusive se for urgência).
+const MARCA_CASO_LONGO = "| caso longo: fica com a dona";
+
 async function devolverInativosAFila(
   supabase: any,
   clinicTokenId: string,
@@ -237,7 +248,7 @@ async function devolverInativosAFila(
     // Última mensagem DO PACIENTE nesta conversa.
     const { data: ultimas } = await supabase
       .from("webhook_messages")
-      .select("id, direction, ai_intent, message_text, created_at, raw_payload")
+      .select("id, direction, ai_intent, message_text, created_at, raw_payload, action_error")
       .eq("conversation_id", c.id)
       .order("created_at", { ascending: false })
       .limit(15);
@@ -274,6 +285,11 @@ async function devolverInativosAFila(
     // 2 em 2 minutos para conversa que ainda nem venceu o prazo mais curto.
     const esperandoMin = (Date.now() - new Date(ultimaDoPaciente.created_at).getTime()) / 60000;
     if (esperandoMin < Math.min(prazoPadrao, prazoEstendido)) { pulou("dentro_do_prazo"); continue; }
+
+    // CASO LONGO já decidido para ESTA mensagem (15/09): fica com a Vânia/Lidiane
+    // até o paciente escrever de novo. Sem a marca, cada rodada gastaria um
+    // showticket para chegar à mesma resposta — de 2 em 2 minutos, por dias.
+    if (String(ultimaDoPaciente.action_error || "").includes(MARCA_CASO_LONGO)) { pulou("caso_longo_ja_decidido"); continue; }
 
     if (out.devolvidos >= TETO_POR_RODADA) { pulou("teto_da_rodada"); continue; }
 
@@ -366,6 +382,34 @@ async function devolverInativosAFila(
     const prazoMin = prazoDeRespostaEmMinutos(nome, prazoPadrao, prazoEstendido);
     if (esperandoMin < prazoMin) { pulou("dentro_do_prazo_da_dona"); continue; }
 
+    // CASO LONGO (pedido do dono, 15/09): a Vânia e a Lidiane perdem o paciente
+    // para a fila UMA vez por caso. Se esta conversa já passou pela fila nos
+    // últimos 7 dias — por esta devolução, pela Julia ou pela varredura —, o
+    // ticket fica com ela; só urgência clínica devolve de novo. De 08 a 15/09,
+    // 64 das 86 devoluções delas foram de conversa que já tinha ido para a fila.
+    if (atendenteDeCasoLongo(nome)) {
+      const { count: _idas, error: _erroIdas } = await supabase
+        .from("transfer_audit")
+        .select("id", { count: "exact", head: true })
+        .eq("conversation_id", c.id)
+        .not("trigger", "in", FILTRO_GATILHOS_SEM_MOVIMENTO)
+        .gte("created_at", desdeJanelaCasoLongo());
+      if (_erroIdas) { pulou("caso_longo_erro"); continue; } // fail-closed: na dúvida não devolve
+      const _dLonga = decideNovaIdaAFila({
+        casoLongo: true,
+        jaPassouPelaFila: (_idas || 0) > 0,
+        urgenciaClinica: classificarUrgencia(String(ultimaDoPaciente.message_text || "")) === "clinica",
+      });
+      if (!_dLonga.mover) {
+        await supabase.from("webhook_messages")
+          .update({ action_error: `${String(ultimaDoPaciente.action_error || "")} ${MARCA_CASO_LONGO}`.trim().slice(0, 480) })
+          .eq("id", ultimaDoPaciente.id)
+          .then(() => {}, () => {});
+        pulou(_dLonga.motivo);
+        continue;
+      }
+    }
+
     // Devolve para a fila: status pending, sem dono.
     try {
       const r = await fetch(`${creds.baseUrl}/v2/api/external/${creds.apiId}/updateticketinfo`, {
@@ -400,7 +444,7 @@ async function devolverInativosAFila(
         initiated_by: "sistema",
         trigger: "inatividade",
         reason: "devolvido_a_fila",
-        detail: `${nome} sem responder ha ${Math.round(esperandoMin)}min (prazo ${prazoMin}min)`,
+        detail: `ticket #${ticketId}: ${nome} sem responder ha ${Math.round(esperandoMin)}min (prazo ${prazoMin}min)`,
       } as any).then(() => {}, () => {});   // auditoria nunca derruba a ação
     } catch (e) {
       out.detalhes.push(`ticket ${ticketId}: ${(e as Error).message.slice(0, 80)}`);
@@ -654,6 +698,46 @@ function canalVivo(cl: any): { baseUrl: string; apiId: string; bearerToken: stri
   };
 }
 
+// A varredura só conhece o número do ticket; a conversa sai da mensagem que o
+// Z-PRO mandou para o webhook (raw_payload.ticket.id). Usada só no CASO LONGO,
+// e só para ticket que já ia ser liberado: no máximo algumas consultas ao banco
+// por rodada, nenhuma chamada ao Z-PRO.
+//   true  = a conversa já passou pela fila nos últimos 7 dias
+//   false = não passou (ou não há mensagem deste ticket na janela: primeira ida)
+//   null  = não deu para saber — quem chama NÃO libera
+async function conversaDoTicketJaPassouPelaFila(
+  supabase: any,
+  clinicTokenId: string,
+  ticketId: number,
+): Promise<boolean | null> {
+  try {
+    const desde = desdeJanelaCasoLongo();
+    const { data: msg, error } = await supabase
+      .from("webhook_messages")
+      .select("conversation_id")
+      .eq("clinic_token_id", clinicTokenId)
+      .eq("raw_payload->ticket->>id", String(ticketId))
+      .not("conversation_id", "is", null)
+      .gte("created_at", desde)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) return null;
+    const conversa = (msg as { conversation_id?: string } | null)?.conversation_id;
+    if (!conversa) return false;
+    const { count, error: erro2 } = await supabase
+      .from("transfer_audit")
+      .select("id", { count: "exact", head: true })
+      .eq("conversation_id", conversa)
+      .not("trigger", "in", FILTRO_GATILHOS_SEM_MOVIMENTO)
+      .gte("created_at", desde);
+    if (erro2) return null;
+    return (count || 0) > 0;
+  } catch {
+    return null;
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // FASE 4 — VARREDURA DA FICHA (pedido do dono, 12/09)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -724,9 +808,14 @@ async function varrerFichasParadas(
   // transfer_audit (o número do ticket está no `detail`), sem coluna nova. É o
   // cinto de segurança do pingue-pongue: liberou às 7h42, a Glaucia pegou às
   // 7h43 — o ticket só pode voltar para a fila depois de um prazo inteiro.
+  //
+  // Desde 15/09 o mesmo mapa também diz se o ticket da Vânia/Lidiane já foi
+  // liberado por aqui (CASO LONGO, no laço abaixo), então olha a janela do caso
+  // longo — mas NUNCA menos de 24h: zerar JANELA_CASO_LONGO_DIAS para desligar
+  // o caso longo não pode desligar junto este cinto do pingue-pongue.
   const ultimaLiberacao = new Map<number, number>();
   try {
-    const desde = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const desde = new Date(Math.min(Date.parse(desdeJanelaCasoLongo()), Date.now() - 24 * 60 * 60 * 1000)).toISOString();
     const { data: libs } = await supabase
       .from("transfer_audit")
       .select("detail, created_at")
@@ -734,7 +823,7 @@ async function varrerFichasParadas(
       .eq("trigger", "ficha_parada")
       .gte("created_at", desde)
       .order("created_at", { ascending: false })
-      .limit(500);
+      .limit(1000);
     for (const l of (libs || [])) {
       const n = Number(String(l?.detail || "").match(/#(\d+)/)?.[1] || 0);
       const quando = Date.parse(String(l?.created_at || ""));
@@ -790,6 +879,19 @@ async function varrerFichasParadas(
 
     const d = decideLiberarFicha({ temDona: true, ociosoMin, idadeDias, expedienteAberto: aberto }, limites);
     if (!d.liberar) { pulou(d.motivo); continue; }
+
+    // CASO LONGO (pedido do dono, 15/09): ticket da Vânia ou da Lidiane sai da
+    // ficha dela UMA vez por caso. Já liberado por esta varredura, ou a conversa
+    // já passou pela fila por outro caminho (a Julia, a inatividade) nos últimos
+    // 7 dias — fica com ela. Caso de 15/09: a Julia mandou para a fila às 10h, a
+    // Lidiane pegou de volta, e às 12h18 a varredura tirou de novo.
+    if (atendenteDeCasoLongo(donaNome)) {
+      const _liberadoEm = ultimaLiberacao.get(ticketId);
+      if (_liberadoEm && _liberadoEm >= Date.parse(desdeJanelaCasoLongo())) { pulou("caso_longo_ja_liberado"); continue; }
+      const jaPassou = await conversaDoTicketJaPassouPelaFila(supabase, clinicTokenId, ticketId);
+      if (jaPassou !== false) { pulou(jaPassou ? "caso_longo_ja_passou_pela_fila" : "caso_longo_erro"); continue; }
+    }
+
     if (out.liberados >= TETO_POR_RODADA) { pulou("teto_da_rodada"); continue; }
 
     try {
