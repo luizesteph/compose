@@ -2090,6 +2090,14 @@ NUNCA classifique como falar_com_atendente: "ok", "obrigada", "obrigado", "aguar
         type: "function",
         function: { name: "classify_patient_intent" },
       },
+      // RACIOCÍNIO BAIXO NA CLASSIFICAÇÃO (19/09). O Gemini 3.7 Flash pensa ~270
+      // tokens antes de preencher a ferramenta, e paga por eles a preço de saída
+      // (US$ 3,75/M): 15% do custo da chamada e ~1 s de espera. Medido em 52
+      // mensagens reais, duas passadas: padrão 49 e 48 acertos, "low" 48 e 47 —
+      // mesma coisa dentro do ruído; p50 de 3,9 s para 2,9 s; US$ 0,0042 para
+      // 0,0035 por chamada. Desligar de vez ("enabled: false") o OpenRouter recusa
+      // para este modelo ("Reasoning is mandatory for this endpoint").
+      reasoning: { effort: "low" },
     }),
   }, 22000);
   } catch (e) {
