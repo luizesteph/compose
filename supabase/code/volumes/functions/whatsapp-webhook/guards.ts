@@ -448,6 +448,33 @@ export function fallbackSemAgenda(mensagemDoPaciente?: string): string {
   return `${base} Pode me confirmar ${falta.join(" e ")}?`;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// O TEXTO DA PRÓPRIA AÇÃO VALE MAIS QUE O TEXTO GENÉRICO (19/09)
+// ─────────────────────────────────────────────────────────────────────────────
+// Quando o guard barra a resposta do modelo, o que saía era o `fallbackSemAgenda`
+// ("Vou conferir os horários reais da agenda... me confirma o médico e a data?").
+// Só que em 19 dos 28 bloqueios de 04 a 18/09 a ação JÁ tinha uma pergunta pronta
+// para o paciente — "Encontrei sua consulta com X no dia 16/09. É essa que deseja
+// reagendar?", a lista real de horários, "preciso do seu CPF" — e o modelo
+// reescrevia acrescentando a hora que o paciente pediu. O texto da ação vem da
+// API, não do modelo: é ele que deve sair. Só `needs_info` tem texto voltado ao
+// paciente; `needs_registration` descreve o caso em terceira pessoa ("O paciente
+// solicitou infiltração mas não está cadastrado") e fica de fora.
+export function textoDaAcaoParaOPaciente(
+  acao: { status?: unknown; response?: unknown; error?: unknown } | null | undefined,
+): string {
+  if (!acao || String(acao.status || "") !== "needs_info") return "";
+  for (const bruto of [acao.response, acao.error]) {
+    const t = String(bruto || "").trim();
+    if (!t) continue;
+    if (t.startsWith("[")) continue;                                  // "[PreBookGuard] ..." é marcador interno
+    if (/^o\s+paciente\b/i.test(t)) continue;                         // fala DO paciente, não COM ele
+    if (/\{"|\[object Object\]|\bundefined\b|\bnull\b/.test(t)) continue;
+    return t;
+  }
+  return "";
+}
+
 export function validateBookingDate(
   startDate: string, // canonical "YYYY-MM-DD HH:mm"
   opts?: { businessOpenHour?: number; businessCloseHour?: number },

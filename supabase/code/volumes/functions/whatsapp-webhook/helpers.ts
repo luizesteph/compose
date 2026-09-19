@@ -764,6 +764,52 @@ export function diaDaSemanaPedido(texto: unknown): number | null {
   return null;
 }
 
+/**
+ * O paciente citou ESTA hora ("HH:MM") no texto? Aceita "15:40", "15h40", "15.40",
+ * "15 h 40", "15h" / "às 15" para hora cheia. Mesma lógica de `mensagemFalaDeDia`,
+ * pelo mesmo motivo (19/09): `entities.time` herdava a hora da consulta velha —
+ * "Dia 22/09" virava 22/09 08:40 e ia para o PUT do reagendamento sem o paciente
+ * ter escolhido hora nenhuma. Hora que ele disse em QUALQUER mensagem dele vale
+ * (medido de 04 a 18/09: 7 remarcações boas tinham a hora dita antes do CPF).
+ */
+export function mensagemCitaHora(texto: unknown, hhmm: unknown): boolean {
+  const m = String(hhmm || "").match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return false;
+  const h = String(parseInt(m[1], 10));
+  const mm = m[2];
+  const t = String(texto || "").toLowerCase();
+  // 15:40 / 15h40 / 15.40 / 15 h 40 — o 0 à esquerda é opcional ("08:40" ou "8:40")
+  const comMinuto = new RegExp(`(?<![\\d/])0?${h}\\s*[:h.]\\s*${mm}(?!\\d)`);
+  if (comMinuto.test(t)) return true;
+  // hora cheia: "15h", "15hs", "às 15" (mas não "às 21/09" nem "15/09")
+  if (mm === "00") {
+    if (new RegExp(`(?<![\\d/])0?${h}\\s*h(?![\\d])`).test(t)) return true;
+    // (?:^|\s) e não \b: "à" é letra acentuada e o \b do JS é ASCII (mesmo tropeço do "você")
+    if (new RegExp(`(?:^|\\s)[aà]s\\s+0?${h}(?![\\d/:h.])`).test(t)) return true;
+  }
+  return false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// "NÃO ENCONTREI" NÃO É INSTABILIDADE (19/09)
+// ─────────────────────────────────────────────────────────────────────────────
+// Status "failed" fazia o modelo dizer "tivemos uma instabilidade" (regra FALHA
+// TÉCNICA do prompt) para o que era só um cadastro sem consulta futura ou um CPF
+// digitado errado — 9 + 3 + 4 casos de 04 a 18/09, cada um seguido de
+// transferência por "instabilidade" que não existiu. Texto fixo, sem reescrita:
+// diz o que houve e o próximo passo. "Vou passar para a nossa equipe" casa a
+// PROMESSA_DE_HUMANO_RE de propósito — é ela que faz a transferência acontecer.
+export const TEXTO_SEM_CONSULTA_FUTURA =
+  "Não encontrei nenhuma consulta futura no seu CPF aqui no sistema. Vou passar para a nossa equipe conferir e te responder por aqui.";
+export const TEXTO_SEM_CONSULTA_PARA_CANCELAR =
+  "Não encontrei nenhuma consulta futura no seu CPF para cancelar. Vou passar para a nossa equipe conferir e te responder por aqui.";
+/** CPF sem cadastro: pede para conferir os números, sem prometer gente ainda. */
+export function textoCpfNaoEncontrado(cpf?: unknown): string {
+  const d = String(cpf || "").replace(/\D/g, "");
+  const fmt = d.length === 11 ? `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9)}` : "";
+  return `Não encontrei cadastro com ${fmt ? `o CPF ${fmt}` : "esse CPF"}. Pode conferir os números e me mandar de novo? Se preferir, me diga o nome completo que eu passo para a equipe.`;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SAUDAÇÃO PURA: CONSUMO GULOSO, NÃO UM REGEX DE UMA LINHA (auditoria 01/09)
 // ─────────────────────────────────────────────────────────────────────────────

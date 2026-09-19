@@ -7,6 +7,10 @@ import {
   getWeekday,
   mensagemFalaDeDia,
   diaDaSemanaPedido,
+  mensagemCitaHora,
+  TEXTO_SEM_CONSULTA_FUTURA,
+  TEXTO_SEM_CONSULTA_PARA_CANCELAR,
+  textoCpfNaoEncontrado,
   formatDateLabel,
   buildColdOpenGreeting,
   buildLateHandoffMessage,
@@ -56,6 +60,7 @@ import {
   desdeJanelaCasoLongo,
   FILTRO_GATILHOS_SEM_MOVIMENTO,
   JANELA_CASO_LONGO_DIAS,
+  relogioDaGuarda,
 } from "../_shared/atendimento.ts";
 import { LLM_MODEL, LLM_MODEL_FALLBACK, LLM_MODEL_RESPOSTA, LLM_GATEWAY, ehErroDeModeloDesconhecido, llmApiKey, llmHeaders, LLM_USAGE_INCLUDE, custoDaChamada } from "../_shared/llm.ts";
 import { STT_ENDPOINT, STT_MODEL, STT_LANGUAGE, STT_RESPONSE_FORMAT, sttApiKey } from "../_shared/stt.ts";
@@ -79,6 +84,7 @@ import {
   respostaFoiFalha,
   corrigirLinkDoMapa,
   avisoDeEncerramento,
+  textoDaAcaoParaOPaciente,
 } from "./guards.ts";
 import {
   readPatientInsurance,
@@ -3216,7 +3222,7 @@ async function executeAction(
           return { status: "transient_error", response: TRANSIENT_API_MESSAGE, bypassAiRewrite: true, error: `Amigo transient ${patientResult.status} (consultar) [${amigoFailReason(patientResult.data)}]` };
         }
         if (!patientData || patientResult.status >= 400) {
-          return { status: "failed", response: "", error: "Paciente não encontrado com este CPF" };
+          return { status: "failed", response: textoCpfNaoEncontrado(entities.cpf), error: "Paciente não encontrado com este CPF", bypassAiRewrite: true } as any;
         }
         const patientId = patientData.id || patientData.patient_id;
         if (!patientId) {
@@ -6375,7 +6381,8 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         }
 
         if (!attId) {
-          return { status: "failed", response: "", error: "Agendamento não encontrado para cancelar" };
+          // "Não encontrei" não é instabilidade (19/09) — texto fixo, ver helpers.ts
+          return { status: "failed", response: TEXTO_SEM_CONSULTA_PARA_CANCELAR, error: "Agendamento não encontrado para cancelar", bypassAiRewrite: true } as any;
         }
 
         const cancelResult = await tryFetch(
@@ -6755,12 +6762,12 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               return { status: "transient_error", response: TRANSIENT_API_MESSAGE, bypassAiRewrite: true, error: `Amigo transient ${patResult.status} (reagendar) [${amigoFailReason(patResult.data)}]` };
             }
             if (!patData || patResult.status >= 400) {
-              return { status: "failed", response: "", error: "Paciente não encontrado com este CPF." };
+              return { status: "failed", response: textoCpfNaoEncontrado(entities.cpf), error: "Paciente não encontrado com este CPF.", bypassAiRewrite: true } as any;
             }
 
             const patientId = patData.id || patData.patient_id;
             if (!patientId) {
-              return { status: "failed", response: "", error: "Paciente não encontrado com este CPF." };
+              return { status: "failed", response: textoCpfNaoEncontrado(entities.cpf), error: "Paciente não encontrado com este CPF.", bypassAiRewrite: true } as any;
             }
 
             const attResult = await tryFetch(`attendances/${patientId}?company_id=${companyId}`, amigoToken);
@@ -6768,7 +6775,8 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             console.log("[Webhook] reagendar - Raw attendances count: " + (Array.isArray(atts) ? atts.length : 0));
 
             if (!Array.isArray(atts) || atts.length === 0) {
-              return { status: "failed", response: "", error: "Não encontrei agendamentos para este paciente." };
+              // "Não encontrei" não é instabilidade (19/09) — texto fixo, ver helpers.ts
+              return { status: "failed", response: TEXTO_SEM_CONSULTA_FUTURA, error: "Não encontrei agendamentos para este paciente.", bypassAiRewrite: true } as any;
             }
 
             const todayStr = getTodayISO_SP();
@@ -6804,7 +6812,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             console.log("[Webhook] reagendar - Future appointments found: " + upcoming.length);
 
             if (upcoming.length === 0) {
-              return { status: "failed", response: "", error: "Não encontrei consultas futuras para reagendar." };
+              return { status: "failed", response: TEXTO_SEM_CONSULTA_FUTURA, error: "Não encontrei consultas futuras para reagendar.", bypassAiRewrite: true } as any;
             }
 
             // ── 1 appointment: ask for confirmation ──
@@ -6866,21 +6874,34 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           };
         }
 
-        // ── Real-slot search BEFORE PUT ──
-        // If patient gave only weekday/period, only date (no time), or nothing:
-        // fetch the original attendance to extract event/place/doctor, then list REAL
-        // calendar slots filtered by date and/or weekday+period — never invent.
-        const needsSlotSearch =
-          !entities.date ||
-          !entities.time ||
-          !!entities.preferred_weekday ||
-          !!entities.preferred_period;
+        // ── Real-slot search BEFORE PUT — SEMPRE (19/09) ──
+        // Até 18/09 a busca só rodava quando faltava data ou hora; com as duas na mão
+        // o código mandava o PUT direto. Só que "as duas na mão" quase nunca era o
+        // destino: era a consulta ATUAL copiada do contexto pelo classificador ("21/09
+        // às 14h40" respondendo "me informe a data atual"), ou a hora velha grudada
+        // numa data nova ("dia 22/09" → 22/09 08:40). O Amigo recusava ("O horário
+        // selecionado não está disponível") e a Julia dizia "tivemos uma
+        // instabilidade" — 11 vezes em 8 conversas de 04 a 18/09, sempre seguidas de
+        // transferência. A agenda passa a ser conferida em todo caminho: hora livre
+        // segue para o PUT; hora ocupada vira a lista real; hora da própria consulta
+        // vira pergunta; hora que o paciente não disse agora não vale como destino.
+        const needsSlotSearch = true;
+        // A hora só vale como destino se o PACIENTE a citou — nesta mensagem ou em
+        // qualquer mensagem dele na conversa ("remarcar para 15:40" → "preciso do
+        // CPF" → CPF: a hora veio dele, duas mensagens antes). O que não vale é a
+        // hora que ele nunca disse: a da consulta velha, copiada pelo classificador.
+        const _horaAlvo = entities.time ? (normalizeTimeToHHMM(entities.time) || entities.time) : "";
+        const _horaCitadaPeloPaciente = !!_horaAlvo && [
+          String(currentMessageText || ""),
+          ...(recentMessages || []).filter((m: any) => m?.role === "user").map((m: any) => String(m?.content || "")),
+        ].some((t) => mensagemCitaHora(t, _horaAlvo));
+        let origDoctorName = entities.doctor_name || "";
+        let origStart = "";   // "YYYY-MM-DD HH:MM" da consulta que vai ser remarcada
 
         if (needsSlotSearch) {
           try {
             // 1) Fetch the original attendance to get doctor_id, event_id, place_id
             let origDoctorId = "";
-            let origDoctorName = entities.doctor_name || "";
             let origEventId = "";
             let origPlaceId = "";
 
@@ -6906,6 +6927,8 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                     origDoctorName = (matchAtt.doctor_name || matchAtt.user_name || userObj?.name || origDoctorName) as string;
                     origEventId = String(matchAtt.event_id || (matchAtt.agenda_event as any)?.id || "");
                     origPlaceId = String(matchAtt.place_id || (matchAtt.place as any)?.id || "");
+                    // "2026-09-21T14:40:00.000Z" — o Z é enfeite, a hora é local (ver CLAUDE.md)
+                    origStart = String(matchAtt.start_date || matchAtt.date || "").replace("T", " ").slice(0, 16);
                   }
                 }
               }
@@ -6979,9 +7002,25 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                 (entities.preferred_weekday ? _weekdayMap[entities.preferred_weekday.toLowerCase()] : undefined) ??
                 null;
               const _falouDeDia = mensagemFalaDeDia(currentMessageText);
+              // A HORA TAMBÉM PRECISA TER SAÍDO DA BOCA DO PACIENTE (19/09). `entities.time`
+              // herdava a hora da consulta velha: "Dia 22/09" virava 22/09 08:40 e ia para
+              // o PUT sem ele ter escolhido hora nenhuma. Hora que ele nunca citou não
+              // vale como destino — vale a lista do dia, e a escolha é dele.
+              const _temHoraValida = _horaCitadaPeloPaciente;
+              const _wantedAgora = entities.date && _temHoraValida
+                ? `${normalizeDateToISO(entities.date) || entities.date} ${normalizeTimeToHHMM(entities.time) || entities.time}`
+                : "";
+              // A CONSULTA ATUAL NÃO É O DESTINO (19/09): "21/09 às 14h40" respondendo
+              // "me informe a data atual" ia para o PUT como horário novo. O próprio
+              // horário do paciente nunca aparece livre, o Amigo recusava e a Julia
+              // falava em instabilidade (caso Edison, 16/09). Aqui vira a lista inteira.
+              const _ehAConsultaAtual = !!origStart && !!_wantedAgora && _wantedAgora === origStart;
 
               let candidateDates: string[] = [];
-              if (_diaPedido !== null && _diaPedido !== undefined) {
+              if (_ehAConsultaAtual) {
+                candidateDates = _todasAsDatas;
+                console.log(`[Webhook] reagendar - ${_wantedAgora} é a consulta ATUAL, não o destino — varrendo o calendário inteiro`);
+              } else if (_diaPedido !== null && _diaPedido !== undefined) {
                 candidateDates = _todasAsDatas.filter((d) => getWeekday(d) === _diaPedido);
                 console.log(`[Webhook] reagendar - dia da semana pedido AGORA (${_diaPedido}) vence data herdada — ${candidateDates.length} data(s)`);
               } else if (entities.date && _falouDeDia) {
@@ -7016,11 +7055,13 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
 
               if (datesWithSlots.length > 0) {
                 // If patient gave EXACT date+time AND it's in the verified slots → proceed to PUT
-                if (entities.date && entities.time) {
+                if (entities.date && _temHoraValida && !_ehAConsultaAtual) {
                   const wantedDate = normalizeDateToISO(entities.date) || entities.date;
                   const wantedTime = normalizeTimeToHHMM(entities.time) || entities.time;
-                  const dayHit = datesWithSlots.find((p) => p.date === wantedDate);
-                  if (dayHit && dayHit.slots.includes(wantedTime)) {
+                  // A lista do dia INTEIRA, não a fatia de 4 que vai para a tela: com oito
+                  // horários livres, pedir o sexto dava "não está livre" sem estar.
+                  const _livresNoDia = slotsMap.get(wantedDate) || [];
+                  if (_livresNoDia.includes(wantedTime)) {
                     console.log(`[Webhook] reagendar — exact slot ${wantedDate} ${wantedTime} verified, proceeding to PUT`);
                     // fall through to PUT below
                   } else {
@@ -7046,7 +7087,9 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                   // No exact time — present real slots
                   const periodLabel =
                     periodFilter === "manha" ? " (manhã)" : periodFilter === "tarde" ? " (tarde)" : "";
-                  const header = `Confirmei aqui na agenda do ${origDoctorName || "médico"}${periodLabel}. Estes são os horários reais para reagendar:\n\n`;
+                  const header = _ehAConsultaAtual
+                    ? `Essa é a data e o horário da sua consulta atual com ${origDoctorName || "o médico"}. Para mudar, estes são os horários reais disponíveis${periodLabel}:\n\n`
+                    : `Confirmei aqui na agenda do ${origDoctorName || "médico"}${periodLabel}. Estes são os horários reais para reagendar:\n\n`;
                   const body = datesWithSlots.map((p) => `${p.label}: ${p.slots.join(", ")}`).join("\n");
                   const footer = "\n\nQual data e horário prefere?";
                   const fullMsg = header + body + footer;
@@ -7072,7 +7115,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                   entities: { ...entities, attendance_id: attId, doctor_name: origDoctorName },
                 } as any;
               }
-            } else if (!entities.date || !entities.time) {
+            } else if (!entities.date || !_horaCitadaPeloPaciente) {
               // Couldn't resolve doctor/event/place AND missing date/time — ask for full info
               return {
                 status: "needs_info",
@@ -7082,7 +7125,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             }
           } catch (slotErr) {
             console.log(`[Webhook] reagendar slot-search error (non-blocking): ${(slotErr as Error).message}`);
-            if (!entities.date || !entities.time) {
+            if (!entities.date || !_horaCitadaPeloPaciente) {
               return {
                 status: "needs_info",
                 response: "Para qual data e horário deseja reagendar? Pode me passar uma data útil.",
@@ -7195,6 +7238,17 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             status: "success",
             response: `Agendamento ${attId} reagendado para ${entities.date}${entities.time ? " às " + entities.time : ""} ✅`,
           };
+        }
+        // HORÁRIO OCUPADO NÃO É INSTABILIDADE (19/09). Com a agenda conferida antes do
+        // PUT, isto só acontece se alguém pegou o horário entre a lista e a escolha (ou
+        // se a agenda não pôde ser lida). O texto diz o que houve e o próximo passo.
+        if (/n[ãa]o est[áa] dispon[ií]vel/i.test(JSON.stringify(reschedFinal.data || ""))) {
+          return {
+            status: "failed",
+            response: `Esse horário não está mais livre na agenda${origDoctorName ? ` do ${origDoctorName}` : ""} — alguém pegou antes. 🙏 Me diga outra data ou período que eu confiro os horários livres para você.`,
+            error: "Amigo recusou o reagendamento: horário não disponível",
+            bypassAiRewrite: true,
+          } as any;
         }
         return {
           status: "failed",
@@ -10065,7 +10119,8 @@ async function isHumanActive(
         .limit(1)
         .maybeSingle();
       if (falou) return false;
-      // senão, o relógio começa na primeira mensagem pulada desde a última fala humana
+      // senão, o relógio começa na primeira mensagem pulada desde o último MARCO:
+      // a última fala humana ou o último handoff (relogioDaGuarda, 19/09).
       const { data: ultimaFala } = await supabaseClient
         .from("webhook_messages")
         .select("created_at")
@@ -10075,6 +10130,25 @@ async function isHumanActive(
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle();
+      // O HANDOFF ZERA O RELÓGIO (19/09). Sem isto, conversa com mensagem pulada dias
+      // atrás já nascia "calada há mais de 30 min": a Julia transferia e, na mensagem
+      // seguinte, falava por cima da transferência que acabara de fazer — 53 das 242
+      // transferências de 04 a 18/09. Só gatilho que MOVE o ticket conta.
+      const { data: ultimoHandoff } = await supabaseClient
+        .from("transfer_audit")
+        .select("created_at")
+        .eq("conversation_id", conversationId)
+        .not("trigger", "in", FILTRO_GATILHOS_SEM_MOVIMENTO)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const _relogio = relogioDaGuarda({
+        agoraMs: Date.now(),
+        prazoMin: _prazo,
+        ultimaFalaMs: ultimaFala?.created_at ? Date.parse(String(ultimaFala.created_at)) : null,
+        ultimoHandoffMs: ultimoHandoff?.created_at ? Date.parse(String(ultimoHandoff.created_at)) : null,
+      });
+      if (_relogio.equipeAindaTemPrazo) { _caladoCache = false; return false; }
       let q = supabaseClient
         .from("webhook_messages")
         .select("created_at")
@@ -10083,7 +10157,7 @@ async function isHumanActive(
         .like("action_error", "Humano ativo%")
         .order("created_at", { ascending: true })
         .limit(1);
-      if (ultimaFala?.created_at) q = q.gt("created_at", ultimaFala.created_at);
+      if (_relogio.contarDesdeMs) q = q.gt("created_at", new Date(_relogio.contarDesdeMs).toISOString());
       const { data: primeiroPulo } = await q.maybeSingle();
       // nunca pulamos nada ainda: dá a vez à atendente
       if (!primeiroPulo?.created_at) return false;
@@ -10642,6 +10716,7 @@ Responda APENAS com o texto da mensagem, sem aspas, sem prefixos, sem explicaç�
   let response: Response | null = null;
   let modeloUsado = _modelosResposta[0];
   let _erroResposta = "";
+  let _resultado: any = null;
   for (let _t = 0; _t < _modelosResposta.length; _t++) {
     modeloUsado = _modelosResposta[_t];
     const _temReserva = _t < _modelosResposta.length - 1;
@@ -10682,19 +10757,32 @@ Responda APENAS com o texto da mensagem, sem aspas, sem prefixos, sem explicaç�
       response = null;
       _erroResposta = (e as Error).message;
     }
-    if (response && response.ok) break;
-    if (response) _erroResposta = `${response.status} - ${await response.text()}`;
+    if (response && response.ok) {
+      // RESPOSTA VAZIA CONTA COMO FALHA (19/09). O Luna devolve `content` vazio quando
+      // acha que não deve responder (o script manda calar no "obrigado" final, e ele
+      // obedece calando) — e o vazio virava o menu "Não consegui entender sua
+      // mensagem. Posso ajudar com: • Agendar...": 6 vezes em 3 dias, todas em cima
+      // de um obrigado ou de uma frase simples. Vazio pede a MESMA resposta ao
+      // Gemini antes de desistir; o custo da chamada vazia é registrado igual.
+      _resultado = await response.json();
+      logAiUsage(clinicTokenId, "whatsapp-webhook/response", modeloUsado, _resultado.usage);
+      if (String(_resultado.choices?.[0]?.message?.content || "").trim()) break;
+      _erroResposta = "resposta vazia";
+      _resultado = null;
+      response = null;
+    } else if (response) {
+      _erroResposta = `${response.status} - ${await response.text()}`;
+    }
     if (_temReserva) {
       console.error(`[LLM] resposta: ${modeloUsado} falhou (${_erroResposta.slice(0, 160)}) — repetindo com ${_modelosResposta[_t + 1]}`);
     }
   }
 
-  if (!response || !response.ok) {
+  if (!response || !response.ok || !_resultado) {
     throw new Error(`AI gateway error: ${_erroResposta}`);
   }
 
-  const result = await response.json();
-  logAiUsage(clinicTokenId, "whatsapp-webhook/response", modeloUsado, result.usage);
+  const result = _resultado;
   const content = result.choices?.[0]?.message?.content;
   if (!content) throw new Error("Empty AI response");
   // Strip markdown bold/italic formatting for natural WhatsApp messages
@@ -14454,10 +14542,22 @@ Deno.serve(async (req) => {
                   const pick = candidates[0];
                   classification.intent = "agendar";
                   classification.date = pick.date;
-                  classification.time = pick.time;
-                  console.log(
-                    `[SlotMatch] ✅ reused offered slot date=${pick.date} time=${pick.time} from message="${(finalMessage || "").slice(0, 60)}"`,
-                  );
+                  // SÓ A HORA DITA PELO PACIENTE VIRA MARCAÇÃO (19/09). "Está sexta feira
+                  // pela manhã teria?" casava o único horário de sexta da oferta e virava
+                  // consulta marcada às 8h40 sem a paciente escolher hora nem confirmar
+                  // (caso Andrea, 16/09 — "Não quero essa data"). Sem hora na mensagem
+                  // fica só a data: o fluxo lista os horários do dia e a escolha é dela.
+                  if (askedTime) {
+                    classification.time = pick.time;
+                    console.log(
+                      `[SlotMatch] ✅ reused offered slot date=${pick.date} time=${pick.time} from message="${(finalMessage || "").slice(0, 60)}"`,
+                    );
+                  } else {
+                    classification.time = "";
+                    console.log(
+                      `[SlotMatch] 📅 casou só o DIA ${pick.date} (sem hora na mensagem) — a hora fica para o paciente escolher`,
+                    );
+                  }
                 } else if (candidates.length > 1 && askedTime && !classification.date) {
                   // Mesma hora em múltiplos dias — força agendar mantendo hora; date virá
                   // da próxima resposta. Só entra quando NÃO há data do classificador:
@@ -15201,7 +15301,13 @@ Deno.serve(async (req) => {
             );
           } catch (e) {
             console.error("[Webhook] AI response generation failed, using fallback:", e);
-            replyText = generateResponseText(
+            // "OBRIGADA" NÃO RECEBE O MENU (19/09): quando os dois modelos devolvem vazio
+            // para um agradecimento (o script manda não responder ao obrigado final), o
+            // texto fixo era "Não consegui entender sua mensagem. Posso ajudar com: •
+            // Agendar..." — 9 vezes de 04 a 18/09, todas em cima de um obrigado.
+            replyText = isClosingThanks(finalMessage || "")
+              ? "Por nada! 😊 Qualquer coisa, é só chamar."
+              : generateResponseText(
               classification.intent,
               actionResult,
               {
@@ -15422,21 +15528,29 @@ Deno.serve(async (req) => {
             verifiedScheduleFlag = true;
           } else {
             console.log(`[AntiHallucination] blocked_unverified_schedule_terms — ${_scheduleGuard.reason}`);
-            replyText = _scheduleGuard.cleaned;
-            verifiedScheduleFlag = false;
+            // O TEXTO DA PRÓPRIA AÇÃO VALE MAIS QUE O GENÉRICO (19/09) — ver
+            // textoDaAcaoParaOPaciente em guards.ts. A lista de horários da ação
+            // continua marcada como verificada: é ela que o SlotMatch lê quando o
+            // paciente responde "14:00".
+            const _textoDaAcao = textoDaAcaoParaOPaciente(actionResult);
+            const _usouTextoDaAcao = !!_textoDaAcao;
+            replyText = _textoDaAcao || _scheduleGuard.cleaned;
+            verifiedScheduleFlag = _usouTextoDaAcao ? Boolean((actionResult as any).verifiedSchedule) : false;
+            if (_usouTextoDaAcao) console.log(`[AntiHallucination] ↩️ saiu o texto da própria ação no lugar do genérico`);
             try {
               await supabase
                 .from("webhook_messages")
                 .update({
-                  action_error: `[AntiHallucination] ${_scheduleGuard.reason}`,
+                  action_error: `[AntiHallucination] ${_scheduleGuard.reason}${_usouTextoDaAcao ? " | texto_da_acao" : ""}`,
                 })
                 .eq("id", messageId);
             } catch { /* non-blocking */ }
 
             // Loop guard: if this same fallback already went out 2+ times in the
             // last 15min on this conversation, the model is stuck. Stop sending
-            // the same generic line forever and hand off to a human.
-            if (conversationId) {
+            // the same generic line forever and hand off to a human. Só conta quando
+            // o genérico saiu de verdade — o texto da ação não é loop.
+            if (conversationId && !_usouTextoDaAcao) {
               try {
                 const since15 = new Date(Date.now() - 15 * 60 * 1000).toISOString();
                 // S2B: pega variacoes da frase, nao so' a canonica. O LLM as vezes
@@ -15474,7 +15588,8 @@ Deno.serve(async (req) => {
                     .eq("conversation_id", conversationId)
                     .eq("direction", "incoming")
                     .gte("created_at", since15)
-                    .like("action_error", "[AntiHallucination]%");
+                    .like("action_error", "[AntiHallucination]%")
+                    .not("action_error", "like", "%texto_da_acao%");
                   blockedCount = _bc || 0;
                 } catch { /* non-blocking */ }
                 if ((fallbackCount || 0) >= 2 || blockedCount >= 2) {
@@ -16554,7 +16669,13 @@ Deno.serve(async (req) => {
             );
           } catch (e) {
             console.error("[Webhook] AI response generation failed, using fallback:", e);
-            replyText = generateResponseText(
+            // "OBRIGADA" NÃO RECEBE O MENU (19/09): quando os dois modelos devolvem vazio
+            // para um agradecimento (o script manda não responder ao obrigado final), o
+            // texto fixo era "Não consegui entender sua mensagem. Posso ajudar com: •
+            // Agendar..." — 9 vezes de 04 a 18/09, todas em cima de um obrigado.
+            replyText = isClosingThanks(finalMessage || "")
+              ? "Por nada! 😊 Qualquer coisa, é só chamar."
+              : generateResponseText(
               classification.intent,
               actionResult,
               {

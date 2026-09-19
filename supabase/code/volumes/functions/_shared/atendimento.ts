@@ -198,6 +198,37 @@ export function decideNovaIdaAFila(s: {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// RELÓGIO DA GUARDA DE HUMANO — o handoff zera a contagem (19/09)
+// ─────────────────────────────────────────────────────────────────────────────
+// A guarda cala a Julia por `human_guard_timeout_min` (30) contados da PRIMEIRA
+// mensagem pulada depois da última fala humana. Faltava um marco: a própria
+// transferência. Conversa com mensagem pulada dias atrás e nenhuma fala humana
+// depois já nascia "calada há mais de 30 min" — a Julia transferia e, na mensagem
+// seguinte do paciente, falava de novo por cima da fila (e transferia de novo).
+// Medido de 04 a 18/09: em 53 das 242 transferências por pedido do paciente a
+// Julia voltou a responder antes de qualquer atendente, 30 delas em menos de 30
+// minutos; o Rommel foi para a fila seis vezes em quatro minutos (15/09).
+//
+// Regra: a equipe tem o prazo INTEIRO a partir do último marco — fala humana ou
+// handoff que MOVE o ticket (transferência da Julia, devolução por inatividade,
+// varredura da ficha). Aviso e alerta (GATILHOS_SEM_MOVIMENTO) não contam.
+export function relogioDaGuarda(s: {
+  agoraMs: number;
+  prazoMin: number;
+  ultimaFalaMs: number | null;
+  ultimoHandoffMs: number | null;
+}): { equipeAindaTemPrazo: boolean; contarDesdeMs: number | null } {
+  const prazoMs = Math.max(0, Number(s.prazoMin) || 0) * 60 * 1000;
+  const valido = (v: unknown): v is number =>
+    typeof v === "number" && Number.isFinite(v) && v > 0 && v <= s.agoraMs;
+  const marcos = [s.ultimaFalaMs, s.ultimoHandoffMs].filter(valido);
+  const contarDesdeMs = marcos.length ? Math.max(...marcos) : null;
+  const equipeAindaTemPrazo =
+    prazoMs > 0 && valido(s.ultimoHandoffMs) && s.agoraMs - s.ultimoHandoffMs < prazoMs;
+  return { equipeAindaTemPrazo, contarDesdeMs };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // VARREDURA DA FICHA — tirar o nome de quem foi embora (pedido do dono, 12/09)
 // ─────────────────────────────────────────────────────────────────────────────
 // A devolução por inatividade acima resolve UM caso: o paciente perguntou e
