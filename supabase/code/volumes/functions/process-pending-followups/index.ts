@@ -1,5 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
+import { chamadaDeCronAutorizada } from "../_shared/cron.ts";
 // Janela de silêncio 20h–7h (SP): nada de mensagem de madrugada/noite. Mesma
 // regra e mesmos limites do motor da lista de espera — lá isso já valia, aqui
 // não. Cada função tem sua cópia porque as edge functions não compartilham
@@ -57,11 +58,8 @@ Deno.serve(async (req) => {
 
   // Auth: aceita x-cron-secret (preferencial) OU apikey/Authorization (gateway já validou).
   // Função é idempotente e não aceita parâmetros do caller, então o gate de apikey é suficiente.
-  const cronSecret = req.headers.get("x-cron-secret");
-  const expectedSecret = Deno.env.get("CRON_SECRET");
-  const hasApiKey = !!(req.headers.get("apikey") || req.headers.get("authorization"));
-  const cronSecretOk = !!cronSecret && !!expectedSecret && cronSecret === expectedSecret;
-  if (!cronSecretOk && !hasApiKey) {
+  // Só o pg_cron (x-cron-secret) ou a chave de SERVIÇO entram — ver _shared/cron.ts.
+  if (!chamadaDeCronAutorizada(req, Deno.env.get("CRON_SECRET"), Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"))) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
       status: 401,
       headers: { ...corsHeaders, "Content-Type": "application/json" },

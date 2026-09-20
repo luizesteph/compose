@@ -12,6 +12,7 @@
 // Envio no MESMO contrato que funciona: channelId+whatsappId+externalKey+isClosed.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
+import { chamadaDeCronAutorizada } from "../_shared/cron.ts";
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-cron-secret",
@@ -194,10 +195,8 @@ async function isTicketHumanActive(baseUrl: string, apiId: string, bearerToken: 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
-  const cronSecret = req.headers.get("x-cron-secret");
-  const expectedSecret = Deno.env.get("CRON_SECRET");
-  const hasApiKey = !!(req.headers.get("apikey") || req.headers.get("authorization"));
-  if (!(cronSecret && expectedSecret && cronSecret === expectedSecret) && !hasApiKey) {
+  // Só o pg_cron (x-cron-secret) ou a chave de SERVIÇO entram — ver _shared/cron.ts.
+  if (!chamadaDeCronAutorizada(req, Deno.env.get("CRON_SECRET"), Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"))) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
       status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

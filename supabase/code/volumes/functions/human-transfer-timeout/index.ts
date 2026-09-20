@@ -35,6 +35,7 @@ import {
 } from "../_shared/atendimento.ts";
 import { classificarUrgencia } from "../whatsapp-webhook/helpers.ts";
 
+import { chamadaDeCronAutorizada } from "../_shared/cron.ts";
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-cron-secret",
@@ -970,11 +971,8 @@ Deno.serve(async (req) => {
   // Mesmo formato das outras seis funções de cron: aceita o segredo compartilhado
   // OU uma chamada que já passou pelo gateway com apikey/Authorization (o Kong
   // valida a chave antes de chegar aqui).
-  const cronSecret = req.headers.get("x-cron-secret");
-  const expectedSecret = Deno.env.get("CRON_SECRET");
-  const hasApiKey = !!(req.headers.get("apikey") || req.headers.get("authorization"));
-  const cronSecretOk = !!cronSecret && !!expectedSecret && cronSecret === expectedSecret;
-  if (!cronSecretOk && !hasApiKey) {
+  // Só o pg_cron (x-cron-secret) ou a chave de SERVIÇO entram — ver _shared/cron.ts.
+  if (!chamadaDeCronAutorizada(req, Deno.env.get("CRON_SECRET"), Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"))) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
       status: 401,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
