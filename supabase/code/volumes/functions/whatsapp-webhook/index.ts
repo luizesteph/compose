@@ -13,6 +13,9 @@ import {
   textoCpfNaoEncontrado,
   pedeHorarioMaisCedo,
   textoMesmaLista,
+  janelaDeDatas,
+  filtrarDatasPelaJanela,
+  textoHorariosNaJanela,
   formatDateLabel,
   buildColdOpenGreeting,
   buildLateHandoffMessage,
@@ -55,6 +58,7 @@ import {
   mesmoMedico,
   slotJaPassou,
 } from "./helpers.ts";
+import type { JanelaDeDatas } from "./helpers.ts";
 import { tryFetch } from "./amigoApi.ts";
 import {
   atendenteDeCasoLongo,
@@ -3388,6 +3392,28 @@ async function executeAction(
       }
 
       case "agendar": {
+        // A JANELA QUE O PACIENTE PEDIU (item 6, 22/09) — helpers.ts: janelaDeDatas.
+        // O classificador só sabe UMA data e UM dia da semana. "terça dia 29" virava
+        // 22/09 (a próxima terça); "mês que vem" virava 01/10 (um dia só); "esta
+        // semana", "outubro" e "quinta ou sexta" viravam nada — e a busca abaixo
+        // respondia a mesma lista de sempre ou pedia "qual data?" três vezes.
+        //   - dia explícito único: vale ele, não o chute do modelo
+        //   - período (semana/mês/faixa) ou vários dias: a data do modelo é chute;
+        //     some, e a busca de datas filtra pela janela (Step 5)
+        //   - só dia da semana: não mexe na data (pode ter vindo da lista oferecida)
+        const _janela = janelaDeDatas(currentMessageText, getTodayISO_SP());
+        if (_janela && !_janela.qualquerData) {
+          if (_janela.datas && _janela.datas.length === 1) {
+            if (entities.date !== _janela.datas[0]) {
+              console.log(`[Janela] dia explícito no texto: ${_janela.datas[0]} (classificador: "${entities.date || ""}")`);
+              entities.date = _janela.datas[0];
+            }
+          } else if ((_janela.datas && _janela.datas.length > 1) || _janela.inicio || _janela.fim) {
+            if (entities.date) console.log(`[Janela] período "${_janela.rotulo}" no texto — descartando date="${entities.date}" do classificador`);
+            entities.date = "";
+          }
+        }
+
         // REDE DE SEGURANÇA da regra "infiltração nunca é agendada pelo robô": o
         // redirecionamento acontece ANTES, logo após a classificação (busca por
         // "GUARD INFILTRAÇÃO"), onde vira solicitar_infiltracao e a transferência
@@ -4419,36 +4445,46 @@ async function executeAction(
                 }
 
                 // Build slots array (limited)
-                const docSlots: Array<{ date: string; label: string; times: string[] }> = [];
-                let totalSlots = 0;
                 const weekDays = ["domingo", "segunda", "terça", "quarta", "quinta", "sexta", "sábado"];
                 // Horário de hoje que já passou não é vaga. Os outros dois caminhos
                 // (um médico, multi-data) já cortavam; este não — às 22h58 de 21/09
                 // a busca por "joelho" ofereceu "21/09 (segunda): 17:20".
                 const _agMulti = agoraSP();
-                for (const dateStr of availDates as string[]) {
-                  if (totalSlots >= MAX_SLOTS_PER_DOCTOR) break;
-                  // Convert to ISO
-                  let isoDate = dateStr;
+                const _availIso = (availDates as string[]).map((dateStr) => {
                   if (dateStr.includes("/")) {
                     const [d, m, y] = dateStr.split("/");
-                    isoDate = `${y}-${m}-${d}`;
+                    return `${y}-${m}-${d}`;
                   }
-                  const slots = (slotsMap.get(isoDate) || []).filter((t) => !slotJaPassou(isoDate, t, _agMulti));
-                  if (slots.length === 0) continue;
-                  const remaining = MAX_SLOTS_PER_DOCTOR - totalSlots;
-                  const taken = slots.slice(0, remaining);
-                  totalSlots += taken.length;
-                  // Format date label
-                  const parts = isoDate.split("-").map(Number);
-                  const dt = new Date(parts[0], parts[1] - 1, parts[2]);
-                  const label = `${String(parts[2]).padStart(2, "0")}/${String(parts[1]).padStart(2, "0")} (${weekDays[dt.getDay()]})`;
-                  docSlots.push({ date: isoDate, label, times: taken });
-                }
+                  return dateStr;
+                });
+                const _montarDoc = (datas: string[]): Array<{ date: string; label: string; times: string[] }> => {
+                  const docSlots: Array<{ date: string; label: string; times: string[] }> = [];
+                  let totalSlots = 0;
+                  for (const isoDate of datas) {
+                    if (totalSlots >= MAX_SLOTS_PER_DOCTOR) break;
+                    const slots = (slotsMap.get(isoDate) || []).filter((t) => !slotJaPassou(isoDate, t, _agMulti));
+                    if (slots.length === 0) continue;
+                    const remaining = MAX_SLOTS_PER_DOCTOR - totalSlots;
+                    const taken = slots.slice(0, remaining);
+                    totalSlots += taken.length;
+                    // Format date label
+                    const parts = isoDate.split("-").map(Number);
+                    const dt = new Date(parts[0], parts[1] - 1, parts[2]);
+                    const label = `${String(parts[2]).padStart(2, "0")}/${String(parts[1]).padStart(2, "0")} (${weekDays[dt.getDay()]})`;
+                    docSlots.push({ date: isoDate, label, times: taken });
+                  }
+                  return docSlots;
+                };
+                // A JANELA do texto (item 6, 22/09): "especialista em pé para a próxima
+                // semana" filtra as datas de cada médico; a lista sem filtro fica
+                // guardada para o caso de nenhum médico ter horário na janela.
+                const _jbMulti = _janela && !_janela.qualquerData ? _janela : null;
+                const docSlots = _montarDoc(filtrarDatasPelaJanela(_availIso, _jbMulti));
+                const slotsSemJanela = _jbMulti ? _montarDoc(_availIso) : docSlots;
 
-                if (docSlots.length > 0) {
+                if (docSlots.length > 0 || slotsSemJanela.length > 0) {
                   const sub = subspecialtyMap.get(String(doc.id)) || "";
-                  return { docName: (doc.name as string) || "Médico", docId: String(doc.id), sub, slots: docSlots };
+                  return { docName: (doc.name as string) || "Médico", docId: String(doc.id), sub, slots: docSlots, slotsSemJanela };
                 }
               } catch (e) {
                 console.log(`[Webhook] Error fetching schedule for doctor ${doc.id}: ${e.message}`);
@@ -4457,8 +4493,17 @@ async function executeAction(
             });
 
             const results = await Promise.all(datePromises);
+            // nenhum médico tem horário na janela → mostra o que há, com o aviso
+            const _jbMulti = _janela && !_janela.qualquerData ? _janela : null;
+            let _nivelMulti: 1 | 2 | 3 = 1;
+            if (_jbMulti && !results.some((r) => r && r.slots.length > 0)) {
+              _nivelMulti = _jbMulti.inicio || _jbMulti.fim || _jbMulti.datas ? 2 : 3;
+              console.log(`[Janela] vários médicos: nenhum médico tem horário na janela "${_jbMulti.rotulo}" ${_jbMulti.rotuloDias} — mostrando o que há (nível ${_nivelMulti})`);
+            }
             for (const r of results) {
-              if (r) allSchedules.push(r);
+              if (!r) continue;
+              const slots = _nivelMulti === 1 ? r.slots : r.slotsSemJanela;
+              if (slots.length > 0) allSchedules.push({ ...r, slots });
             }
 
             if (allSchedules.length > 0) {
@@ -4492,7 +4537,19 @@ async function executeAction(
               const extraNote = extraCount > 0
                 ? `\n(Temos mais ${extraCount} especialistas com agenda — me diga a região do corpo que eu filtro pra você! 😊)\n\n`
                 : "";
-              const msg = `Encontrei estes especialistas com disponibilidade:\n\n${lines.join("\n")}${extraNote}Qual médico e horário prefere?`;
+              if (_jbMulti && _nivelMulti > 1) {
+                const _corpo = `${lines.join("\n")}${extraNote}`.trimEnd();
+                const msgJanela = textoHorariosNaJanela({
+                  nivel: _nivelMulti,
+                  medico: entities.subspecialty ? `os especialistas em ${entities.subspecialty}` : "os especialistas",
+                  janela: _jbMulti,
+                  periodo: "",
+                  corpo: _corpo,
+                });
+                return { status: "needs_info", response: msgJanela, error: msgJanela, verifiedSchedule: true, bypassAiRewrite: true } as any;
+              }
+              const _rotJanela = _jbMulti ? `${_jbMulti.rotulo ? ` ${_jbMulti.rotulo}` : ""}${_jbMulti.rotuloDias ? ` ${_jbMulti.rotuloDias}` : ""}` : "";
+              const msg = `Encontrei estes especialistas com disponibilidade${_rotJanela}:\n\n${lines.join("\n")}${extraNote}Qual médico e horário prefere?`;
               return { status: "needs_info", response: msg, error: msg, verifiedSchedule: true } as any;
             }
           }
@@ -4885,46 +4942,86 @@ async function executeAction(
                 // 4. Convert available dates to ISO and cross-reference with slotsMap
                 const availableIso = (availDates as string[]).map((d: string) => toIsoDate(d));
 
-                // 5. Apply weekday filter
-                let filteredIso = availableIso;
-                if (entities.preferred_weekday) {
-                  const weekdayMap: Record<string, number> = {
-                    domingo: 0,
-                    segunda: 1,
-                    terca: 2,
-                    terça: 2,
-                    quarta: 3,
-                    quinta: 4,
-                    sexta: 5,
-                    sabado: 6,
-                    sábado: 6,
+                // 5. Apply weekday filter — e a JANELA do texto (item 6, 22/09). O dia da
+                // semana do classificador vira um conjunto de um; a janela do texto
+                // (semana, mês, faixa, "quinta ou sexta") traz o resto. Quando a janela
+                // fica vazia, a busca afrouxa em escada e o texto diz o que soltou:
+                //   nível 1: dentro da janela
+                //   nível 2: sem o período, nos dias pedidos ("esta semana não tem; às quintas...")
+                //   nível 3: sem os dias também ("ele não atende às quintas; os primeiros...")
+                // Antes, "esta semana, quinta ou sexta" com médico que não atende quinta
+                // caía no fim deste bloco e pedia "informe a data desejada" (Clarisse).
+                const weekdayMap: Record<string, number> = {
+                  domingo: 0,
+                  segunda: 1,
+                  terca: 2,
+                  terça: 2,
+                  quarta: 3,
+                  quinta: 4,
+                  sexta: 5,
+                  sabado: 6,
+                  sábado: 6,
+                };
+                const _diaDoClassificador = entities.preferred_weekday
+                  ? weekdayMap[entities.preferred_weekday.toLowerCase()]
+                  : undefined;
+                let _jb: JanelaDeDatas | null = _janela && !_janela.qualquerData ? { ..._janela } : null;
+                if (_diaDoClassificador !== undefined && !_jb?.diasDaSemana) {
+                  const _nomes = ["domingos", "segundas", "terças", "quartas", "quintas", "sextas", "sábados"];
+                  _jb = {
+                    ...(_jb || { inicio: null, fim: null, datas: null, qualquerData: false, rotulo: "" }),
+                    diasDaSemana: [_diaDoClassificador],
+                    rotuloDias: `às ${_nomes[_diaDoClassificador]}`,
                   };
-                  const targetDay = weekdayMap[entities.preferred_weekday.toLowerCase()];
-                  if (targetDay !== undefined) {
-                    filteredIso = filteredIso.filter((d) => getWeekday(d) === targetDay);
-                    console.log(`[Webhook] Filtered to ${filteredIso.length} dates on ${entities.preferred_weekday}`);
-                  }
                 }
+                const _temPeriodo = !!(_jb && (_jb.inicio || _jb.fim || (_jb.datas && _jb.datas.length > 0)));
+                const _temDias = !!(_jb && _jb.diasDaSemana && _jb.diasDaSemana.length > 0);
 
                 // 6. Build date+slots pairs from slotsMap, apply period filter
                 const periodFilter = entities.preferred_period || undefined;
                 const MAX_TOTAL_SLOTS = 10;
-                let totalSlots = 0;
-                const datesWithSlots: Array<{ date: string; label: string; slots: string[] }> = [];
-                for (const d of filteredIso) {
-                  if (!slotsMap.has(d)) continue;
-                  if (isWeekendISO(d)) continue; // clínica fechada sáb/dom (caso Caio, 11/08)
-                  if (totalSlots >= MAX_TOTAL_SLOTS) break;
-                  // mesmo corte na montagem da oferta multi-data (foi este caminho
-                  // que imprimiu "01/09 (terça): 10:40, 11:00" às 21:06)
-                  let slots = slotsMap.get(d)!.filter((t) => !slotJaPassou(d, t, agoraSP()));
-                  if (periodFilter === "manha") slots = slots.filter((t) => t < "12:00");
-                  if (periodFilter === "tarde") slots = slots.filter((t) => t >= "12:00");
-                  if (slots.length === 0) continue;
-                  const remaining = MAX_TOTAL_SLOTS - totalSlots;
-                  const taken = slots.slice(0, remaining);
-                  totalSlots += taken.length;
-                  datesWithSlots.push({ date: d, label: formatDateLabel(d), slots: taken });
+                const _montarLista = (datas: string[]): Array<{ date: string; label: string; slots: string[] }> => {
+                  let totalSlots = 0;
+                  const lista: Array<{ date: string; label: string; slots: string[] }> = [];
+                  for (const d of datas) {
+                    if (!slotsMap.has(d)) continue;
+                    if (isWeekendISO(d)) continue; // clínica fechada sáb/dom (caso Caio, 11/08)
+                    if (totalSlots >= MAX_TOTAL_SLOTS) break;
+                    // mesmo corte na montagem da oferta multi-data (foi este caminho
+                    // que imprimiu "01/09 (terça): 10:40, 11:00" às 21:06)
+                    let slots = slotsMap.get(d)!.filter((t) => !slotJaPassou(d, t, agoraSP()));
+                    if (periodFilter === "manha") slots = slots.filter((t) => t < "12:00");
+                    if (periodFilter === "tarde") slots = slots.filter((t) => t >= "12:00");
+                    if (slots.length === 0) continue;
+                    const remaining = MAX_TOTAL_SLOTS - totalSlots;
+                    const taken = slots.slice(0, remaining);
+                    totalSlots += taken.length;
+                    lista.push({ date: d, label: formatDateLabel(d), slots: taken });
+                  }
+                  return lista;
+                };
+                let filteredIso = filtrarDatasPelaJanela(availableIso, _jb);
+                let datesWithSlots = _montarLista(filteredIso);
+                let _nivel: 1 | 2 | 3 = 1;
+                if (_jb) console.log(`[Janela] "${_jb.rotulo}" ${_jb.rotuloDias} — ${filteredIso.length} data(s), ${datesWithSlots.length} com vaga`);
+                if (datesWithSlots.length === 0 && _jb && _temPeriodo) {
+                  filteredIso = filtrarDatasPelaJanela(availableIso, _jb, { semPeriodo: true });
+                  datesWithSlots = _montarLista(filteredIso);
+                  _nivel = 2;
+                }
+                if (datesWithSlots.length === 0 && _jb && _temDias) {
+                  filteredIso = filtrarDatasPelaJanela(availableIso, _jb, { semPeriodo: true, semDias: true });
+                  datesWithSlots = _montarLista(filteredIso);
+                  _nivel = 3;
+                }
+                // a agenda acaba ANTES da janela começar: ela ainda não foi aberta — mostra
+                // as últimas datas abertas, não as primeiras
+                const _ultimaAberta = [...slotsMap.keys()].filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort().pop() || "";
+                const _agendaNaoAberta = !!(_jb && _nivel > 1 && _jb.inicio && _ultimaAberta && _ultimaAberta < _jb.inicio);
+                if (_agendaNaoAberta) {
+                  const _ultimas = availableIso.filter((d) => slotsMap.has(d) && !isWeekendISO(d)).sort().slice(-3);
+                  const _lista = _montarLista(_ultimas);
+                  if (_lista.length > 0) datesWithSlots = _lista;
                 }
 
                 if (datesWithSlots.length > 0) {
@@ -4933,8 +5030,17 @@ async function executeAction(
                   const header = `Horários disponíveis com ${doctorName || "o médico"}${periodLabel}:\n\n`;
                   const body = datesWithSlots.map((p) => `${p.label}: ${p.slots.join(", ")}`).join("\n");
                   const footer = "\n\nQual data e horário prefere?";
-                  const fullMsg = header + body + footer;
-                  console.log(`[Webhook] Returning ${datesWithSlots.length} dates with slots`);
+                  const fullMsg = _jb
+                    ? textoHorariosNaJanela({
+                        nivel: _nivel,
+                        medico: doctorName || "o médico",
+                        janela: _jb,
+                        periodo: periodFilter,
+                        corpo: body,
+                        agendaAte: _agendaNaoAberta ? _ultimaAberta : undefined,
+                      })
+                    : header + body + footer;
+                  console.log(`[Webhook] Returning ${datesWithSlots.length} dates with slots${_jb ? ` (janela nível ${_nivel})` : ""}`);
                   // Lock presented slots (1 min TTL) to prevent them from being taken while patient decides
                   if (supabaseClient && clinicTokenId && doctorId) {
                     await lockPresentedSlots(
@@ -4945,7 +5051,8 @@ async function executeAction(
                       senderPhone || "",
                     );
                   }
-                  return { status: "needs_info", response: fullMsg, error: fullMsg, verifiedSchedule: true } as any;
+                  // níveis 2 e 3 explicam o que não tem — vão literais, sem reescrita
+                  return { status: "needs_info", response: fullMsg, error: fullMsg, verifiedSchedule: true, bypassAiRewrite: _nivel > 1 } as any;
                 } else {
                   // Dates exist but no slots found from bulk fetch — fetch individually per date
                   const top5 = filteredIso.filter((d: string) => !isWeekendISO(d)).slice(0, 5);
@@ -7075,6 +7182,10 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                 (entities.preferred_weekday ? _weekdayMap[entities.preferred_weekday.toLowerCase()] : undefined) ??
                 null;
               const _falouDeDia = mensagemFalaDeDia(currentMessageText);
+              // A JANELA dita agora (item 6, 22/09): "para depois do dia 30/09", "semana
+              // que vem", "terça ou quinta", "6 ou 7 de outubro" — entra na precedência
+              // logo abaixo da consulta atual, antes do dia da semana solto.
+              const _janelaRe = janelaDeDatas(currentMessageText, getTodayISO_SP());
               // A HORA TAMBÉM PRECISA TER SAÍDO DA BOCA DO PACIENTE (19/09). `entities.time`
               // herdava a hora da consulta velha: "Dia 22/09" virava 22/09 08:40 e ia para
               // o PUT sem ele ter escolhido hora nenhuma. Hora que ele nunca citou não
@@ -7093,6 +7204,9 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               if (_ehAConsultaAtual) {
                 candidateDates = _todasAsDatas;
                 console.log(`[Webhook] reagendar - ${_wantedAgora} é a consulta ATUAL, não o destino — varrendo o calendário inteiro`);
+              } else if (_janelaRe && (_janelaRe.inicio || _janelaRe.datas || _janelaRe.diasDaSemana)) {
+                candidateDates = filtrarDatasPelaJanela(_todasAsDatas, _janelaRe);
+                console.log(`[Webhook] reagendar - janela "${_janelaRe.rotulo}" ${_janelaRe.rotuloDias} dita AGORA — ${candidateDates.length} data(s)`);
               } else if (_diaPedido !== null && _diaPedido !== undefined) {
                 candidateDates = _todasAsDatas.filter((d) => getWeekday(d) === _diaPedido);
                 console.log(`[Webhook] reagendar - dia da semana pedido AGORA (${_diaPedido}) vence data herdada — ${candidateDates.length} data(s)`);
@@ -14807,7 +14921,10 @@ Deno.serve(async (req) => {
         // faz o dia" — e a Julia procurou em 02/09 as TRÊS vezes, porque o
         // classificador preserva a data do histórico. A agenda tinha vaga (a
         // Mardila marcou 09/09 na mão 70 minutos depois).
-        if (classification.date && pedeQualquerData(finalMessage)) {
+        // 22/09 (caso Clarisse): "No dia que ele atender Tanto faz" chegou SEM data,
+        // só com preferred_weekday=quinta herdado — e a quinta grudada mandava
+        // "informe a data desejada" pela terceira vez.
+        if ((classification.date || classification.preferred_weekday) && pedeQualquerData(finalMessage)) {
           console.log(
             `[Webhook] 📅 paciente pediu qualquer data — limpando date="${classification.date}" e preferred_weekday="${classification.preferred_weekday || ""}" para buscar a próxima vaga`,
           );

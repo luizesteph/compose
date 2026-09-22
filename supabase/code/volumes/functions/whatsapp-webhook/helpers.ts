@@ -533,7 +533,13 @@ export function pedeQualquerData(texto: unknown): boolean {
     /\bqual\s+(e\s+)?(a\s+)?proxima\s+(data|vaga|hor[a]?rio)\b/.test(t) ||
     /\bquando\s+(ele|ela|o\s+dr|a\s+dra)\b[\s\S]{0,20}\btem\b/.test(t) ||
     /\bpra\s+frente\b/.test(t) ||
-    /\bmais\s+(datas?|dias?|opcoes|horarios?)\b/.test(t)
+    /\bmais\s+(datas?|dias?|opcoes|horarios?)\b/.test(t) ||
+    // 22/09 (caso Clarisse): "No dia que ele atender Tanto faz", "pode ser para
+    // quando tiver", "O horário que ela tiver", "o que tiver"
+    /\b(dia|data|horario)\s+que\s+(ele|ela|o\s+dr|a\s+dra|o\s+medico|a\s+medica|voces?|tiver)\b[\s\S]{0,12}\b(atender|atende|tiver|puder|estiver|der)\b/.test(t) ||
+    /\b(o\s+)?(dia|data|horario)\s+que\s+(ele|ela)\s+tiver\b/.test(t) ||
+    /\b(para|pra)\s+quando\s+(tiver|der|puder)\b/.test(t) ||
+    /\bo\s+que\s+tiver\b/.test(t)
   );
 }
 
@@ -1039,4 +1045,439 @@ export function slotJaPassou(
   const m = String(hhmm).match(/^(\d{1,2}):(\d{2})$/);
   if (!m) return false;
   return Number(m[1]) * 60 + Number(m[2]) < agora.hora * 60 + agora.minuto + leadMin;
+}
+
+// A JANELA DE DATAS QUE O PACIENTE PEDIU (item 6, 22/09)
+// ─────────────────────────────────────────────────────────────────────────────
+// O classificador extrai UMA data (YYYY-MM-DD) e UM dia da semana. Não tem como
+// dizer "esta semana", "outubro", "quinta ou sexta", "depois do dia 30". Em 45
+// dias, 73 mensagens de agendar/remarcar pediam um período assim — e o fluxo
+// respondia com a mesma lista de sempre, pedia "qual data?" três vezes (Clarisse,
+// 21/09: "quinta à tarde ou sexta", "Tanto faz" → "informe a data desejada"), ou
+// aceitava o chute do modelo ("mês que vem" → 01/10; "terça dia 29" → 22/09).
+//
+// Aqui a janela é lida do TEXTO, determinística, e devolve o que as buscas
+// precisam: um intervalo (inicio/fim), um conjunto de dias da semana, datas
+// explícitas, ou "qualquer data". O rótulo é o que a Julia diz de volta
+// ("na semana que vem", "em outubro", "às quintas e sextas").
+//
+// Regras de precedência, da mais específica para a mais genérica:
+//   1. "tanto faz" apaga tudo (qualquerData).
+//   2. faixa ("depois do dia 30", "até dia 25", "entre 19 e 23") vence datas
+//      soltas na mesma frase — "Dia 16/09 preciso remarcar para depois do dia
+//      30/09": o 16/09 é a consulta atual, não o destino.
+//   3. datas explícitas ("terça dia 29", "6 ou 7 de outubro", "amanhã") vencem
+//      semana e mês ("essa semana ele pode amanhã?" é amanhã).
+//   4. semana ("esta semana", "semana que vem", "daqui a 2 semanas") vence mês.
+//   5. mês ("outubro", "mês que vem", "meados de outubro").
+//   Dias da semana ("terça ou quinta", "não posso de segunda") somam-se a
+//   qualquer uma das anteriores.
+// Passado não é janela: "semana passada", "fiz essa semana", "15 dias atrás",
+// "em agosto" (mês já passado) devolvem nada.
+export type JanelaDeDatas = {
+  inicio: string | null;
+  fim: string | null;
+  diasDaSemana: number[] | null;
+  datas: string[] | null;
+  qualquerData: boolean;
+  rotulo: string;
+  rotuloDias: string;
+};
+
+const MESES = ["janeiro", "fevereiro", "marco", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
+const MESES_RE = "(janeiro|fevereiro|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)";
+const DIAS_NOMES = ["domingo", "segunda", "terca", "quarta", "quinta", "sexta", "sabado"];
+const DIAS_PLURAL = ["domingos", "segundas", "terças", "quartas", "quintas", "sextas", "sábados"];
+const DIAS_SINGULAR = ["domingo", "segunda", "terça", "quarta", "quinta", "sexta", "sábado"];
+// "segunda" também é "segunda quinzena", "segunda vez", "segunda opção"...
+const DIA_RE = "(domingo|segunda|terca|quarta|quinta|sexta|sabado)(?:s)?(?:[\\s-]*feira)?(?!\\s+(?:quinzena|vez|opcao|consulta|via|etapa|metade))(?![\\p{L}])";
+const JANELA_FAIXA_DIAS = 60;
+
+function partesISO(iso: string): [number, number, number] {
+  const [y, m, d] = String(iso).split("-").map(Number);
+  return [y, m, d];
+}
+function isoDe(y: number, m: number, d: number): string {
+  return `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+function somaDias(iso: string, n: number): string {
+  const [y, m, d] = partesISO(iso);
+  const t = new Date(Date.UTC(y, m - 1, d) + n * 86400000);
+  return isoDe(t.getUTCFullYear(), t.getUTCMonth() + 1, t.getUTCDate());
+}
+function diaDaSemanaISO(iso: string): number {
+  const [y, m, d] = partesISO(iso);
+  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+}
+function ultimoDiaDoMes(y: number, m: number): number {
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+function dataValida(y: number, m: number, d: number): boolean {
+  return m >= 1 && m <= 12 && d >= 1 && d <= ultimoDiaDoMes(y, m);
+}
+// "dia 29" → o próximo 29 a partir de hoje (este mês se ainda não passou, senão o seguinte)
+function proximoDiaDoMes(dia: number, hoje: string): string | null {
+  const [y, m, d] = partesISO(hoje);
+  for (let k = 0; k < 3; k++) {
+    const mm = ((m - 1 + k) % 12) + 1;
+    const yy = y + Math.floor((m - 1 + k) / 12);
+    if (!dataValida(yy, mm, dia)) continue;
+    if (k === 0 && dia < d) continue;
+    return isoDe(yy, mm, dia);
+  }
+  return null;
+}
+// dd/mm[/aa]: ano corrente, ou o seguinte se a data já ficou mais de 30 dias para trás
+function dataDDMM(d: number, m: number, a: string | undefined, hoje: string): string | null {
+  const [hy] = partesISO(hoje);
+  let y = a ? (a.length === 2 ? 2000 + Number(a) : Number(a)) : hy;
+  if (!dataValida(y, m, d)) return null;
+  let iso = isoDe(y, m, d);
+  if (!a && iso < somaDias(hoje, -30)) {
+    y += 1;
+    if (!dataValida(y, m, d)) return null;
+    iso = isoDe(y, m, d);
+  }
+  return iso;
+}
+// "outubro" → o próximo outubro (este ano se ainda não passou), até 6 meses à frente
+function mesPedido(nome: string, hoje: string): { y: number; m: number } | null {
+  const idx = MESES.indexOf(nome);
+  if (idx < 0) return null;
+  const [hy, hm] = partesISO(hoje);
+  const m = idx + 1;
+  const y = m >= hm ? hy : hy + 1;
+  const distancia = (y - hy) * 12 + (m - hm);
+  if (distancia < 0 || distancia > 6) return null;
+  return { y, m };
+}
+function ddmm(iso: string): string {
+  const [, m, d] = partesISO(iso);
+  return `${String(d).padStart(2, "0")}/${String(m).padStart(2, "0")}`;
+}
+function listaDeDias(dias: number[], plural: boolean): string {
+  const nomes = dias.map((d) => (plural ? DIAS_PLURAL[d] : DIAS_SINGULAR[d]));
+  if (nomes.length <= 1) return nomes.join("");
+  return `${nomes.slice(0, -1).join(", ")} e ${nomes[nomes.length - 1]}`;
+}
+// verbo no passado logo antes da expressão: "que fiz essa semana", "marcou pra semana passada"
+function ehPassado(t: string, indice: number): boolean {
+  const antes = t.slice(Math.max(0, indice - 28), indice);
+  return /\b(fiz|feito|feita|passei|estive|realizei|tive|fui|marquei|marcou|operei|operou|foi|era)\b[^.!?]*$/.test(antes);
+}
+// "não consigo essa semana", "estou fora de SP esta semana", "volto de férias em
+// outubro": o período está sendo EXCLUÍDO, não pedido. Olha antes e depois.
+function ehNegado(t: string, indice: number, tamanho: number): boolean {
+  const antes = t.slice(Math.max(0, indice - 32), indice);
+  const depois = t.slice(indice + tamanho, indice + tamanho + 26);
+  const re = /\b(nao\s+(consigo|posso|vou|estarei|estou|da|dou|tenho)|impossivel|fora\s+de|(estarei|estou|vou\s+estar|ficarei)\s+fora|viajando|viajo|viagem|ferias)\b[^.!?]*$/;
+  return re.test(antes) ||
+    /^[^.!?]*\b(nao\s+(consigo|posso|vou|estarei|estou|da|dou)|impossivel|estarei\s+fora|passei|fiz|estive|foi|operei|realizei|passad[oa]|atras)\b/.test(depois);
+}
+// "a consulta de hoje", "marcada para dia 25/09", "consulta dia 16/09": é a consulta
+// que já existe, não o destino — o destino vem com "para", "semana que vem", etc.
+function ehAConsultaAtual(t: string, indice: number): boolean {
+  const antes = t.slice(Math.max(0, indice - 40), indice);
+  // só as formas inequívocas de "já existe": "consulta de hoje", "está marcada
+  // para dia 25", "tenho sessão dia 16". "marcar consulta para o dia 25" é pedido.
+  return (
+    /\b(consulta|sessao|retorno|infiltracao|procedimento|horario)\s+de\s+$/.test(antes) ||
+    /\b(marcad[ao]|agendad[ao])\s+(?:para\s+|pra\s+|no\s+|em\s+)(?:o\s+|a\s+|essa\s+|esta\s+|nessa\s+)?(?:\w+,?\s+)?(?:dia\s+)?$/.test(antes) ||
+    /\btenho\s+(?:uma\s+)?(?:consulta|horario|sessao|retorno|infiltracao)\s+(?:marcad[ao]\s+|agendad[ao]\s+)?(?:para\s+|pra\s+|no\s+|em\s+)?(?:o\s+)?(?:dia\s+)?$/.test(antes)
+  );
+}
+
+export function janelaDeDatas(texto: unknown, hoje: string): JanelaDeDatas | null {
+  const bruto = typeof texto === "string" ? texto : "";
+  if (!bruto.trim() || !/^\d{4}-\d{2}-\d{2}$/.test(String(hoje))) return null;
+  const t = stripAccents(bruto.toLowerCase()).replace(/\s+/g, " ");
+  const vazio: JanelaDeDatas = { inicio: null, fim: null, diasDaSemana: null, datas: null, qualquerData: false, rotulo: "", rotuloDias: "" };
+
+  if (pedeQualquerData(bruto)) return { ...vazio, qualquerData: true };
+
+  const [hy, hm, hd] = partesISO(hoje);
+  const j: JanelaDeDatas = { ...vazio };
+  // "na semana do dia 21" é semana, não o dia 21: some do texto antes da leitura das datas
+  const semanaDoDia = /\bsemana\s+(?:do\s+dia\s+|de\s+|do\s+)(\d{1,2})(?:\/(\d{1,2}))?(?![\d:h])/.exec(t);
+  const tSemSemanaDoDia = semanaDoDia ? t.replace(semanaDoDia[0], " ".repeat(semanaDoDia[0].length)) : t;
+
+  // ── dias da semana ──────────────────────────────────────────────────────
+  {
+    const diaRe = new RegExp(DIA_RE, "giu");
+    const excluidos = new Set<number>();
+    const pedidos: number[] = [];
+    const faixa = new RegExp(`\\bde\\s+${DIA_RE}\\s+a(?:te)?\\s+${DIA_RE}`, "iu").exec(t);
+    if (faixa) {
+      const a = DIAS_NOMES.indexOf(faixa[1]);
+      const b = DIAS_NOMES.indexOf(faixa[2]);
+      if (a >= 0 && b >= 0 && a <= b) {
+        for (let d = a; d <= b; d++) pedidos.push(d);
+        j.rotuloDias = `de ${DIAS_SINGULAR[a]} a ${DIAS_SINGULAR[b]}`;
+      }
+    }
+    if (pedidos.length === 0) {
+      // "3a e 5a", "2ª feira", "4f" (a grafia de quem escreve rápido)
+      const numericos = [...t.matchAll(/(?<![\d/:])([2-6])\s*(?:[aª]|f)(?:\s*feira)?(?![\d\p{L}])/giu)].map((m) => ({ index: m.index!, nome: DIAS_NOMES[Number(m[1]) - 1], len: m[0].length }));
+      const nomeados = [...t.matchAll(diaRe)].map((m) => ({ index: m.index!, nome: m[1], len: m[0].length }));
+      for (const m of [...nomeados, ...numericos].sort((a, b) => a.index - b.index)) {
+        const d = DIAS_NOMES.indexOf(m.nome);
+        if (d < 0) continue;
+        const antes = t.slice(Math.max(0, m.index - 22), m.index);
+        if (/\b(nao\s+(posso|consigo|da|dou)(\s+nem)?|nem|menos|exceto|tirando|fora|sem\s+ser|so\s+nao)\s+(de\s+|na\s+|nas\s+|as\s+|a\s+|em\s+|no\s+)?$/.test(antes)) {
+          excluidos.add(d);
+        } else if (ehNegado(t, m.index, m.len) || ehAConsultaAtual(t, m.index)) {
+          continue; // "viajo no domingo", "estarei fora na quinta", "marcada para essa sexta"
+        } else if (!pedidos.includes(d)) {
+          pedidos.push(d);
+        }
+      }
+      // a clínica não abre no fim de semana: sábado/domingo só valem quando são o
+      // único pedido ("aos sábados?" recebe a resposta própria); "viajo no domingo,
+      // volto terça" não pode virar busca por domingos
+      if (pedidos.some((d) => d >= 1 && d <= 5)) {
+        for (let i = pedidos.length - 1; i >= 0; i--) if (pedidos[i] === 0 || pedidos[i] === 6) pedidos.splice(i, 1);
+      }
+      if (pedidos.length > 0) {
+        pedidos.sort((a, b) => a - b);
+        j.rotuloDias = `às ${listaDeDias(pedidos, true)}`;
+      } else if (excluidos.size > 0) {
+        for (let d = 0; d <= 6; d++) if (!excluidos.has(d)) pedidos.push(d);
+        j.rotuloDias = `sem ser ${listaDeDias([...excluidos].sort((a, b) => a - b), false)}`;
+      }
+    }
+    if (pedidos.length > 0) j.diasDaSemana = pedidos;
+  }
+
+  // ── faixa: depois do dia / a partir / até / antes / entre ───────────────
+  const diaOuData = (dia: string, mes?: string, nomeMes?: string): string | null => {
+    const d = Number(dia);
+    if (nomeMes) {
+      const mp = mesPedido(nomeMes, hoje);
+      return mp && dataValida(mp.y, mp.m, d) ? isoDe(mp.y, mp.m, d) : null;
+    }
+    if (mes) return dataDDMM(d, Number(mes), undefined, hoje);
+    return proximoDiaDoMes(d, hoje);
+  };
+  let faixaAchada = false;
+  {
+    // o número precisa ser um DIA: "dia 19", "30/09" ou "19 de outubro" — "a partir
+    // de 16:30", "depois de 2 semanas" e "até 3 vezes" não são datas
+    // grupos, a partir de i: dia d/m (i, i+1) | dia d (i+2) | d/m (i+3, i+4) | d de mês (i+5, i+6)
+    const ESPEC = "(?:dia\\s+(?:(\\d{1,2})\\/(\\d{1,2})|(\\d{1,2})(?![:\\dh/])(?!\\s*h(?:s|oras)?\\b))|(\\d{1,2})\\/(\\d{1,2})(?![\\d/:])|(\\d{1,2})\\s+de\\s+" + MESES_RE + ")";
+    const lerEspec = (m: RegExpExecArray, i: number): string | null =>
+      m[i] ? diaOuData(m[i], m[i + 1]) : m[i + 2] ? diaOuData(m[i + 2]) : m[i + 3] ? diaOuData(m[i + 3], m[i + 4]) : m[i + 5] ? diaOuData(m[i + 5], undefined, m[i + 6]) : null;
+    const desde = new RegExp(`\\b(depois|apos|a partir)\\s+(?:do|de|da)?\\s*${ESPEC}`).exec(t);
+    const emDiante = new RegExp(`\\b(?:do\\s+)?${ESPEC}\\s+em\\s+diante\\b`).exec(t);
+    const ate = new RegExp(`\\b(ate|antes)\\s+(?:o\\s+|do\\s+|de\\s+)?${ESPEC}`).exec(t);
+    const entre = /\bentre\s+(?:os\s+dias\s+|o\s+dia\s+|dias?\s+)?(\d{1,2})(?:\/(\d{1,2}))?\s+e\s+(?:o\s+dia\s+|dia\s+)?(\d{1,2})(?:\/(\d{1,2}))?(?:\s+de\s+([a-z]+))?/.exec(t);
+    const desdeRelativo = /\b(depois|apos|a partir)\s+(?:de\s+|do\s+|da\s+)?(depois\s+de\s+amanha|amanha|hoje)\b/.exec(t);
+    if (desdeRelativo && !entre && !desde && !emDiante) {
+      const base = desdeRelativo[2] === "hoje" ? hoje : desdeRelativo[2] === "amanha" ? somaDias(hoje, 1) : somaDias(hoje, 2);
+      j.inicio = desdeRelativo[1] === "a partir" ? base : somaDias(base, 1);
+      j.fim = somaDias(j.inicio, JANELA_FAIXA_DIAS);
+      j.rotulo = `a partir de ${ddmm(j.inicio)}`; faixaAchada = true;
+    } else if (entre) {
+      const nomeMes = entre[5] && MESES.includes(entre[5]) ? entre[5] : undefined;
+      let a = diaOuData(entre[1], entre[2], nomeMes);
+      let b = diaOuData(entre[3], entre[4], nomeMes);
+      // "entre 19 e 23" no dia 21: é este mês, que ainda não acabou
+      if (a && b && !nomeMes && !entre[2] && Number(entre[3]) >= hd && Number(entre[1]) < hd) {
+        a = isoDe(hy, hm, Number(entre[1]));
+      }
+      if (a && b && a <= b) {
+        j.inicio = a; j.fim = b; j.rotulo = `de ${ddmm(a)} a ${ddmm(b)}`; faixaAchada = true;
+      }
+    } else if (desde || emDiante) {
+      const inclusivo = emDiante ? true : desde![1] === "a partir";
+      const base = desde ? lerEspec(desde, 2) : lerEspec(emDiante!, 1);
+      if (base) {
+        j.inicio = inclusivo ? base : somaDias(base, 1);
+        j.fim = somaDias(j.inicio, JANELA_FAIXA_DIAS);
+        j.rotulo = `a partir de ${ddmm(j.inicio)}`; faixaAchada = true;
+      }
+    } else if (ate) {
+      const base = lerEspec(ate, 2);
+      if (base) {
+        j.fim = ate[1] === "antes" ? somaDias(base, -1) : base;
+        j.inicio = hoje;
+        j.rotulo = `até ${ddmm(j.fim)}`; faixaAchada = true;
+      }
+    }
+  }
+
+  // ── datas explícitas ────────────────────────────────────────────────────
+  if (!faixaAchada) {
+    const datas = new Set<string>();
+    const dda = /\bdepois\s+de\s+amanha\b/.exec(t);
+    const amanha = /\bamanha\b/.exec(t);
+    const hj = /\bhoje\b/.exec(t);
+    if (dda && !ehNegado(t, dda.index, dda[0].length) && !ehAConsultaAtual(t, dda.index)) datas.add(somaDias(hoje, 2));
+    else if (amanha && !ehNegado(t, amanha.index, amanha[0].length) && !ehAConsultaAtual(t, amanha.index)) datas.add(somaDias(hoje, 1));
+    if (hj && !/\b(hoje\s+ainda\s+(e|nao|esta)|ate\s+hoje)\b/.test(t) && !ehNegado(t, hj.index, hj[0].length) && !ehAConsultaAtual(t, hj.index)) datas.add(hoje);
+    // "6 ou 7 de outubro", "16 de outubro"
+    for (const m of t.matchAll(new RegExp(`\\b(\\d{1,2}(?:\\s*(?:,|ou|e)\\s*\\d{1,2})*)\\s+de\\s+${MESES_RE}\\b`, "g"))) {
+      const mp = mesPedido(m[2], hoje);
+      if (!mp || ehNegado(t, m.index!, m[0].length) || ehAConsultaAtual(t, m.index!)) continue;
+      for (const n of m[1].split(/\s*(?:,|ou|e)\s*/)) {
+        const d = Number(n);
+        if (dataValida(mp.y, mp.m, d)) datas.add(isoDe(mp.y, mp.m, d));
+      }
+    }
+    // "dia 8/9", "16/09", "16/09/26" — não "8:20" nem CPF
+    for (const m of tSemSemanaDoDia.matchAll(/(?<![\d/])(\d{1,2})\/(\d{1,2})(?:\/(\d{2}|\d{4}))?(?![\d/:])/g)) {
+      if (ehNegado(t, m.index!, m[0].length) || ehAConsultaAtual(t, m.index!)) continue;
+      const iso = dataDDMM(Number(m[1]), Number(m[2]), m[3], hoje);
+      if (iso) datas.add(iso);
+    }
+    // "dia 29", "dia 06 ou 07" — sem hora colada ("dia 14:00")
+    for (const m of tSemSemanaDoDia.matchAll(new RegExp(`\\bdias?\\s+(\\d{1,2}(?:\\s*(?:,|ou|e)\\s*\\d{1,2})*)(?![:\\dh/])(?!\\s+de\\s+${MESES_RE})`, "g"))) {
+      if (ehPassado(t, m.index!) || ehNegado(t, m.index!, m[0].length) || ehAConsultaAtual(t, m.index!)) continue;
+      for (const n of m[1].split(/\s*(?:,|ou|e)\s*/)) {
+        const iso = proximoDiaDoMes(Number(n), hoje);
+        if (iso) datas.add(iso);
+      }
+    }
+    for (const d of [...datas]) if (d < hoje) datas.delete(d); // "fiz a cirurgia dia 18/09" não é destino
+    if (datas.size > 0) {
+      j.datas = [...datas].sort();
+      const dd = j.datas.map(ddmm);
+      j.rotulo = `em ${dd.length <= 1 ? dd.join("") : `${dd.slice(0, -1).join(", ")} ou ${dd[dd.length - 1]}`}`;
+    }
+  }
+
+  // ── semana ──────────────────────────────────────────────────────────────
+  if (!faixaAchada && !j.datas) {
+    const dow = diaDaSemanaISO(hoje);
+    const segundaDesta = somaDias(hoje, dow === 0 ? -6 : 1 - dow);
+    const semanaDe = (segunda: string, rotulo: string) => { j.inicio = segunda; j.fim = somaDias(segunda, 6); j.rotulo = rotulo; };
+    const esta = /\b(esta|essa|nesta|nessa|desta|dessa)\s+semana\b|\bainda\s+(?:para\s+|pra\s+)?(?:esta|essa|desta|dessa)?\s*semana\b/.exec(t);
+    const proxima = /\b(semana\s+que\s+vem|semana\s+q\s+vem|proxima\s+semana|semana\s+seguinte|outra\s+semana|semana\s+que\s+entra)\b/.exec(t);
+    const daqui = /\bdaqui\s+(?:a\s+)?(\d{1,2}|uma|duas|tres)\s+semanas?\b/.exec(t);
+    if (semanaDoDia) {
+      const alvo = semanaDoDia[2] ? dataDDMM(Number(semanaDoDia[1]), Number(semanaDoDia[2]), undefined, hoje) : proximoDiaDoMes(Number(semanaDoDia[1]), hoje);
+      if (alvo) {
+        const w = diaDaSemanaISO(alvo);
+        semanaDe(somaDias(alvo, w === 0 ? -6 : 1 - w), `na semana do dia ${Number(semanaDoDia[1])}`);
+      }
+    } else if (daqui) {
+      const n = { uma: 1, duas: 2, tres: 3 }[daqui[1]] ?? Number(daqui[1]);
+      if (n >= 1 && n <= 12) semanaDe(somaDias(segundaDesta, 7 * n), `daqui a ${n} semana${n > 1 ? "s" : ""}`);
+    } else if (proxima && !ehPassado(t, proxima.index) && !ehNegado(t, proxima.index, proxima[0].length)) {
+      semanaDe(somaDias(segundaDesta, 7), "na semana que vem");
+    } else if (esta && !ehPassado(t, esta.index) && !ehNegado(t, esta.index, esta[0].length)) {
+      j.inicio = hoje; j.fim = somaDias(segundaDesta, 6); j.rotulo = "esta semana";
+    }
+  }
+
+  // ── mês ─────────────────────────────────────────────────────────────────
+  if (!faixaAchada && !j.datas && !j.inicio) {
+    const mesQueVem = /\b(mes\s+que\s+vem|proximo\s+mes|mes\s+seguinte|mes\s+q\s+vem)\b/.exec(t);
+    const esteMes = /\b(este|esse|neste|nesse)\s+mes\b/.exec(t);
+    const fimDoMes = /\b(fim|final)\s+do\s+mes\b/.exec(t);
+    const comNome = new RegExp(`\\b(?:(primeira|segunda)\\s+quinzena\\s+de\\s+|(inicio|comeco)\\s+de\\s+|(meados|metade|meio)\\s+de\\s+|(fim|final)\\s+de\\s+)?${MESES_RE}\\b`, "g");
+    let mes: { y: number; m: number } | null = null;
+    let parte: "toda" | "q1" | "q2" | "inicio" | "meio" | "fim" = "toda";
+    let nome = "";
+    if (mesQueVem && !ehNegado(t, mesQueVem.index, mesQueVem[0].length)) {
+      mes = { y: hm === 12 ? hy + 1 : hy, m: hm === 12 ? 1 : hm + 1 }; nome = MESES[mes.m - 1];
+    } else if (esteMes) {
+      mes = { y: hy, m: hm }; nome = MESES[hm - 1];
+    } else if (fimDoMes) {
+      mes = { y: hy, m: hm }; nome = MESES[hm - 1]; parte = "fim";
+    } else {
+      for (const m of t.matchAll(comNome)) {
+        // "16 de outubro" já virou data; "em agosto" (passado) não é janela
+        if (/\d\s+de\s*$/.test(t.slice(Math.max(0, m.index! - 8), m.index!)) || ehPassado(t, m.index!) || ehNegado(t, m.index!, m[0].length)) continue;
+        // "Marco Aurélio" não é março: sem cedilha, só com preposição na frente
+        if (m[5] === "marco" && !/mar[çc]o/.test(bruto.toLowerCase().normalize("NFC")) && !/\b(em|para|pra|de|no|ate|durante)\s+$/.test(t.slice(Math.max(0, m.index! - 10), m.index!))) continue;
+        if (m[5] === "marco" && !/ç/.test(bruto) && !/\b(em|para|pra|de|no|ate|durante)\s+$/.test(t.slice(Math.max(0, m.index! - 10), m.index!))) continue;
+        const mp = mesPedido(m[5], hoje);
+        if (!mp) continue;
+        mes = mp; nome = m[5];
+        parte = m[1] === "primeira" ? "q1" : m[1] === "segunda" ? "q2" : m[2] ? "inicio" : m[3] ? "meio" : m[4] ? "fim" : "toda";
+        break;
+      }
+    }
+    if (mes) {
+      const ultimo = ultimoDiaDoMes(mes.y, mes.m);
+      const faixas = { toda: [1, ultimo], q1: [1, 15], q2: [16, ultimo], inicio: [1, 10], meio: [11, 20], fim: [21, ultimo] } as const;
+      const [a, b] = faixas[parte];
+      const nomeBonito = nome === "marco" ? "março" : nome;
+      let inicio = isoDe(mes.y, mes.m, a);
+      if (inicio < hoje) inicio = hoje;
+      const fim = isoDe(mes.y, mes.m, b);
+      if (fim >= hoje) {
+        j.inicio = inicio; j.fim = fim;
+        j.rotulo = parte === "q1" ? `na primeira quinzena de ${nomeBonito}` : parte === "q2" ? `na segunda quinzena de ${nomeBonito}`
+          : parte === "inicio" ? `no início de ${nomeBonito}` : parte === "meio" ? `em meados de ${nomeBonito}` : parte === "fim" ? `no fim de ${nomeBonito}` : `em ${nomeBonito}`;
+      }
+    }
+  }
+
+  if (!j.inicio && !j.fim && !j.datas && !j.diasDaSemana) return null;
+  return j;
+}
+
+// Aplica a janela a uma lista de datas ISO (na ordem em que vieram). `semPeriodo`
+// solta o intervalo/datas e `semDias` solta os dias da semana — é a escada que a
+// resposta honesta usa: "esta semana não tem; nas próximas, às quintas e sextas:".
+export function filtrarDatasPelaJanela(
+  datasISO: string[],
+  janela: JanelaDeDatas | null | undefined,
+  opts?: { semPeriodo?: boolean; semDias?: boolean },
+): string[] {
+  const lista = Array.isArray(datasISO) ? datasISO.filter((d) => /^\d{4}-\d{2}-\d{2}/.test(String(d))) : [];
+  if (!janela || janela.qualquerData) return lista;
+  let r = lista;
+  if (!opts?.semPeriodo) {
+    if (janela.datas && janela.datas.length > 0) {
+      const set = new Set(janela.datas);
+      r = r.filter((d) => set.has(d.slice(0, 10)));
+    } else {
+      if (janela.inicio) r = r.filter((d) => d.slice(0, 10) >= janela.inicio!);
+      if (janela.fim) r = r.filter((d) => d.slice(0, 10) <= janela.fim!);
+    }
+  }
+  if (!opts?.semDias && janela.diasDaSemana && janela.diasDaSemana.length > 0) {
+    const set = new Set(janela.diasDaSemana);
+    r = r.filter((d) => set.has(diaDaSemanaISO(d.slice(0, 10))));
+  }
+  return r;
+}
+
+// O texto da lista quando houve janela. Nível 1: achou dentro dela. Nível 2: nada
+// no período, mas há vaga nos dias pedidos (ou sem dias). Nível 3: nem nos dias
+// pedidos. `agendaAte`: a agenda do médico acaba ANTES da janela começar — ela
+// ainda não foi aberta, e o texto diz até onde vai em vez de "não tem".
+// Nenhum destes textos promete gente (PROMESSA_DE_HUMANO_RE) de propósito.
+export function textoHorariosNaJanela(args: {
+  nivel: 1 | 2 | 3;
+  medico: string;
+  janela: JanelaDeDatas;
+  periodo?: string;
+  corpo: string;
+  agendaAte?: string;
+}): string {
+  const medico = String(args.medico || "o médico").trim() || "o médico";
+  const per = args.periodo === "manha" ? " (manhã)" : args.periodo === "tarde" ? " (tarde)" : "";
+  const rot = args.janela.rotulo || "";
+  const dias = args.janela.rotuloDias || "";
+  const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+  const rodape = "\n\nAlgum desses serve? Se preferir outra data ou período, é só me dizer.";
+  if (args.nivel === 1) {
+    return `Horários disponíveis com ${medico}${rot ? ` ${rot}` : ""}${dias ? ` ${dias}` : ""}${per}:\n\n${args.corpo}\n\nQual data e horário prefere?`;
+  }
+  if (args.agendaAte && rot) {
+    return `A agenda de ${medico} ainda não está aberta ${rot} — por enquanto vai até ${formatDateLabel(args.agendaAte)}. Os últimos horários abertos:\n\n${args.corpo}\n\nQuer marcar um deles? Se preferir esperar, é só me chamar mais perto da data.`;
+  }
+  if (args.nivel === 2 && rot) {
+    return `${cap(rot)} não encontrei horário livre com ${medico}${dias ? ` ${dias}` : ""}. Os primeiros que encontrei${dias ? ` ${dias}` : ""}${per}:\n\n${args.corpo}${rodape}`;
+  }
+  if (rot && dias) {
+    return `${cap(rot)} não encontrei horário livre com ${medico}, e nas próximas semanas não há vaga ${dias}. Os primeiros horários${per}:\n\n${args.corpo}${rodape}`;
+  }
+  if (dias) {
+    return `Nas próximas semanas não há vaga com ${medico} ${dias}${per}. Os primeiros horários${per}:\n\n${args.corpo}${rodape}`;
+  }
+  return `${cap(rot) || "Nesse período"} não encontrei horário livre com ${medico}. Os primeiros que encontrei${per}:\n\n${args.corpo}${rodape}`;
 }
