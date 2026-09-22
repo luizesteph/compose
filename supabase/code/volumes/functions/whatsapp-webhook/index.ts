@@ -11,6 +11,8 @@ import {
   TEXTO_SEM_CONSULTA_FUTURA,
   TEXTO_SEM_CONSULTA_PARA_CANCELAR,
   textoCpfNaoEncontrado,
+  pedeHorarioMaisCedo,
+  textoMesmaLista,
   formatDateLabel,
   buildColdOpenGreeting,
   buildLateHandoffMessage,
@@ -85,6 +87,8 @@ import {
   corrigirLinkDoMapa,
   avisoDeEncerramento,
   textoDaAcaoParaOPaciente,
+  marcacaoRecenteDaConversa,
+  repeteMarcacaoRecente,
 } from "./guards.ts";
 import {
   readPatientInsurance,
@@ -3115,6 +3119,123 @@ function selectAttendant(
   }
   return { user: available[0], reason: "first_online_fallback" };
 }
+
+// O QUE O RESTO DO SISTEMA PRECISA SABER DEPOIS DE UM POST /attendances (22/09)
+// ─────────────────────────────────────────────────────────────────────────────
+// Quatro coisas dependem de uma marcação recém-feita: o estado da conversa
+// (booking_created), o cache local de atendimentos (sync_jobs), a trava da vaga
+// (slot_locks) e a CONFERÊNCIA assíncrona de que a consulta existe mesmo no Amigo
+// (pending_booking_verifications, lida pelo verify-booking, pelo convite da lista
+// de espera e pela baixa da fila). Só o caminho do `agendar` fazia isso. O
+// cadastro de paciente novo que marca em seguida (`cadastrar`) devolvia "success"
+// e pronto: 0 das 30 marcações por cadastro desde 04/09 tinham auditoria ou
+// conferência, e o relatório diário as subcontava. Um lugar só, chamado pelos dois.
+// Nada aqui derruba a marcação: o POST já foi, cada passo falha em silêncio.
+async function registrarPosMarcacao(p: {
+  supabaseClient: any;
+  clinicTokenId?: string | null;
+  senderPhone?: string;
+  conversationId?: string | null;
+  trigger: string;
+  patientId: string;
+  doctorId: string;
+  doctorName: string;
+  isoDate: string;
+  isoTime: string;
+  slotDate: string;
+  slotTime: string;
+  companyId: string;
+  amigoToken: string;
+  avanceaiConfig?: { baseUrl: string; apiId: string; bearerToken: string } | null;
+  channelId?: string | null;
+  placeId?: string | null;
+  eventId?: string | null;
+}): Promise<void> {
+  const { supabaseClient, clinicTokenId, senderPhone } = p;
+  // State transition: booking_created (after successful POST attendances)
+  if (supabaseClient && clinicTokenId && senderPhone) {
+    await transitionConversationState(supabaseClient, {
+      clinicTokenId,
+      conversationId: p.conversationId || null,
+      phone: senderPhone,
+      toState: "booking_created",
+      trigger: p.trigger,
+      contextPatch: {
+        doctor_id: p.doctorId,
+        doctor_name: p.doctorName,
+        date: p.isoDate,
+        time: p.isoTime,
+        patient_id: String(p.patientId),
+        attendance_pending_verification: true,
+      },
+      expectedInputs: [],
+      messageId: null,
+      resetContext: true,
+    });
+    // Enqueue cache refresh for this patient so local_attendances picks
+    // up the new booking immediately, without waiting for the cron sync.
+    try {
+      await supabaseClient.from("sync_jobs").insert({
+        clinic_token_id: clinicTokenId,
+        job_type: "refresh_attendances_for_patient",
+        payload: {
+          amigo_patient_id: String(p.patientId),
+          phone: senderPhone,
+          reason: "post_booking",
+        },
+      });
+    } catch (_e) { /* non-blocking */ }
+  }
+  // Clean up slot lock after successful booking
+  if (supabaseClient && clinicTokenId) {
+    try {
+      await supabaseClient
+        .from("slot_locks")
+        .delete()
+        .eq("clinic_token_id", clinicTokenId)
+        .eq("doctor_id", p.doctorId)
+        .eq("slot_date", p.slotDate)
+        .eq("slot_time", p.slotTime + ":00");
+    } catch (e) {
+      /* non-blocking */
+    }
+  }
+
+  // === ASYNC POST-BOOKING VERIFICATION — insert for background cron check ===
+  try {
+    const adminUrl = Deno.env.get("SUPABASE_URL")!;
+    const adminKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    const adminClient = createClient(adminUrl, adminKey);
+    await adminClient.from("pending_booking_verifications").insert({
+      phone: senderPhone || "",
+      patient_id: String(p.patientId),
+      doctor_id: String(p.doctorId),
+      doctor_name: p.doctorName || null,
+      // BUG-1 FIX: store canonical ISO/HH:mm so verify-booking comparison is unambiguous
+      target_date: p.isoDate,
+      target_time: p.isoTime,
+      company_id: p.companyId,
+      amigo_token: p.amigoToken,
+      avanceai_base_url: p.avanceaiConfig?.baseUrl || null,
+      avanceai_api_id: p.avanceaiConfig?.apiId || null,
+      avanceai_bearer_token: p.avanceaiConfig?.bearerToken || null,
+      channel_id: p.channelId || null,
+      clinic_token_id: clinicTokenId || null,
+      user_id: supabaseClient ? (await supabaseClient.auth.getUser())?.data?.user?.id : null,
+      place_id: p.placeId || null,
+      event_id: p.eventId || null,
+      // BUG-1 FIX: delay first verification by 15s so the Amigo API has time to propagate
+      // the freshly-created attendance to its read replicas before we go looking for it.
+      next_attempt_at: new Date(Date.now() + 15 * 1000).toISOString(),
+    });
+    console.log(
+      `[Webhook] Post-booking verification queued for ${senderPhone} (${p.isoDate} ${p.isoTime} dr:${p.doctorId}, via ${p.trigger})`,
+    );
+  } catch (e) {
+    console.log(`[Webhook] Failed to queue post-booking verification (non-blocking): ${(e as Error).message}`);
+  }
+}
+
 async function executeAction(
   intent: string,
   entities: {
@@ -4301,6 +4422,10 @@ async function executeAction(
                 const docSlots: Array<{ date: string; label: string; times: string[] }> = [];
                 let totalSlots = 0;
                 const weekDays = ["domingo", "segunda", "terça", "quarta", "quinta", "sexta", "sábado"];
+                // Horário de hoje que já passou não é vaga. Os outros dois caminhos
+                // (um médico, multi-data) já cortavam; este não — às 22h58 de 21/09
+                // a busca por "joelho" ofereceu "21/09 (segunda): 17:20".
+                const _agMulti = agoraSP();
                 for (const dateStr of availDates as string[]) {
                   if (totalSlots >= MAX_SLOTS_PER_DOCTOR) break;
                   // Convert to ISO
@@ -4309,8 +4434,8 @@ async function executeAction(
                     const [d, m, y] = dateStr.split("/");
                     isoDate = `${y}-${m}-${d}`;
                   }
-                  const slots = slotsMap.get(isoDate);
-                  if (!slots || slots.length === 0) continue;
+                  const slots = (slotsMap.get(isoDate) || []).filter((t) => !slotJaPassou(isoDate, t, _agMulti));
+                  if (slots.length === 0) continue;
                   const remaining = MAX_SLOTS_PER_DOCTOR - totalSlots;
                   const taken = slots.slice(0, remaining);
                   totalSlots += taken.length;
@@ -6087,88 +6212,28 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           );
         }
         if (createResult.status >= 200 && createResult.status < 300) {
-          // State transition: booking_created (after successful POST attendances)
-          if (supabaseClient && clinicTokenId && senderPhone) {
-            await transitionConversationState(supabaseClient, {
-              clinicTokenId,
-              conversationId: conversationIdParam || null,
-              phone: senderPhone,
-              toState: "booking_created",
-              trigger: "agendar:attendance_created",
-              contextPatch: {
-                doctor_id: doctorId,
-                doctor_name: doctorName,
-                date: isoDate,
-                time: isoTime,
-                patient_id: String(patId),
-                attendance_pending_verification: true,
-              },
-              expectedInputs: [],
-              messageId: null,
-              resetContext: true,
-            });
-            // Enqueue cache refresh for this patient so local_attendances picks
-            // up the new booking immediately, without waiting for the cron sync.
-            try {
-              await supabaseClient.from("sync_jobs").insert({
-                clinic_token_id: clinicTokenId,
-                job_type: "refresh_attendances_for_patient",
-                payload: {
-                  amigo_patient_id: String(patId),
-                  phone: senderPhone,
-                  reason: "post_booking",
-                },
-              });
-            } catch (_e) { /* non-blocking */ }
-          }
-          // Clean up slot lock after successful booking
-          if (supabaseClient && clinicTokenId) {
-            try {
-              await supabaseClient
-                .from("slot_locks")
-                .delete()
-                .eq("clinic_token_id", clinicTokenId)
-                .eq("doctor_id", doctorId)
-                .eq("slot_date", entities.date)
-                .eq("slot_time", entities.time + ":00");
-            } catch (e) {
-              /* non-blocking */
-            }
-          }
-
-          // === ASYNC POST-BOOKING VERIFICATION — insert for background cron check ===
-          try {
-            const adminUrl = Deno.env.get("SUPABASE_URL")!;
-            const adminKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-            const adminClient = createClient(adminUrl, adminKey);
-            await adminClient.from("pending_booking_verifications").insert({
-              phone: senderPhone || "",
-              patient_id: String(patId),
-              doctor_id: String(doctorId),
-              doctor_name: doctorName || null,
-              // BUG-1 FIX: store canonical ISO/HH:mm so verify-booking comparison is unambiguous
-              target_date: isoDate,
-              target_time: isoTime,
-              company_id: companyId,
-              amigo_token: amigoToken,
-              avanceai_base_url: avanceaiConfig?.baseUrl || null,
-              avanceai_api_id: avanceaiConfig?.apiId || null,
-              avanceai_bearer_token: avanceaiConfig?.bearerToken || null,
-              channel_id: channelId || null,
-              clinic_token_id: clinicTokenId || null,
-              user_id: supabaseClient ? (await supabaseClient.auth.getUser())?.data?.user?.id : null,
-              place_id: placeId || null,
-              event_id: eventIdParaPost || null,
-              // BUG-1 FIX: delay first verification by 15s so the Amigo API has time to propagate
-              // the freshly-created attendance to its read replicas before we go looking for it.
-              next_attempt_at: new Date(Date.now() + 15 * 1000).toISOString(),
-            });
-            console.log(
-              `[Webhook] Post-booking verification queued for ${senderPhone} (${entities.date} ${entities.time} dr:${doctorId})`,
-            );
-          } catch (e) {
-            console.log(`[Webhook] Failed to queue post-booking verification (non-blocking): ${(e as Error).message}`);
-          }
+          // Estado da conversa, cache, trava da vaga e conferência assíncrona — o
+          // mesmo registro que o cadastro-que-agenda passou a fazer em 22/09.
+          await registrarPosMarcacao({
+            supabaseClient,
+            clinicTokenId,
+            senderPhone,
+            conversationId: conversationIdParam || null,
+            trigger: "agendar:attendance_created",
+            patientId: String(patId),
+            doctorId: String(doctorId),
+            doctorName,
+            isoDate,
+            isoTime,
+            slotDate: entities.date,
+            slotTime: entities.time,
+            companyId,
+            amigoToken,
+            avanceaiConfig,
+            channelId,
+            placeId,
+            eventId: eventIdParaPost,
+          });
 
           return {
             status: "success",
@@ -7659,7 +7724,9 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                 const plcs = normalizeApiResponse(plRes) as Array<Record<string, unknown>>;
                 if (Array.isArray(evts) && evts.length > 0 && Array.isArray(plcs) && plcs.length > 0) {
                   // cadastro recem-feito = paciente NOVO -> primeira consulta
-                  const autoEventId = String(pickEventForBooking(evts, { newPatient: true }).id);
+                  const autoEvent = pickEventForBooking(evts, { newPatient: true });
+                  const autoEventId = String(autoEvent.id);
+                  const autoEventName = String((autoEvent as any).name || (autoEvent as any).nome || "");
                   const autoPlaceId = String(plcs[0].id);
                   // BUG-1 FIX: cadastrar auto-schedule path also needs canonical date/time.
                   // Without this, entities.date may carry dd/mm/yyyy from the LLM and the
@@ -7901,6 +7968,31 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                   const attResult = await tryFetch(`attendances?company_id=${companyId}`, amigoToken, "POST", attBody);
                   if (attResult.status >= 200 && attResult.status < 300) {
                     console.log("[Webhook] cadastrar - Auto-schedule SUCCESS");
+                    // A MARCAÇÃO PELO CADASTRO É MARCAÇÃO (22/09): estado, cache, trava
+                    // e conferência assíncrona, como no `agendar` — e a auditoria em
+                    // ai_entities (booked_*), que é o que separa "marcou" de "só
+                    // cadastrou" no relatório, no verify-booking e na guarda de
+                    // confirmação falsa (caso Ana Carolina, 21/09).
+                    await registrarPosMarcacao({
+                      supabaseClient,
+                      clinicTokenId,
+                      senderPhone,
+                      conversationId: conversationIdParam || null,
+                      trigger: "cadastrar:attendance_created",
+                      patientId: String(newPatientId),
+                      doctorId: String(autoDocId),
+                      doctorName: autoDocName,
+                      isoDate: autoIsoDate,
+                      isoTime: autoIsoTime,
+                      slotDate: entities.date,
+                      slotTime: entities.time,
+                      companyId,
+                      amigoToken,
+                      avanceaiConfig,
+                      channelId,
+                      placeId: autoPlaceId,
+                      eventId: autoEventId,
+                    });
                     return {
                       status: "success",
                       response: JSON.stringify({
@@ -7913,7 +8005,17 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                         _time: entities.time,
                       }),
                       patientName: entities.patient_full_name,
-                    };
+                      entities: {
+                        ...entities,
+                        date: autoIsoDate,
+                        time: autoIsoTime,
+                        doctor_name: autoDocName,
+                        booked_via: "cadastrar",
+                        booked_event_id: autoEventId,
+                        booked_event_name: autoEventName,
+                        booked_insurance_id: insuranceId ? String(insuranceId) : "particular",
+                      },
+                    } as any;
                   } else {
                     console.log(
                       "[Webhook] cadastrar - Auto-schedule FAILED:",
@@ -9714,6 +9816,10 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         const fisioScript =
           _intFisio === "pedido_medico"
             ? "Pedido, guia ou renovação de sessões quem emite é o médico. 🙏 Vou te passar para nossa equipe verificar isso com o doutor."
+            : _intFisio === "nota_fiscal"
+              // Nota fiscal e recibo (22/09): é a equipe que emite — sem tabela de
+              // preço e sem "quem emite é o médico".
+              ? "Nota fiscal e recibo quem emite é a nossa equipe. 🙏 Já passei seu pedido para elas te mandarem por aqui."
             : _intFisio === "falar_com_fisio"
               ? "Vou te passar para nossa equipe, que fala direto com a fisioterapeuta e te retorna por aqui. 🙏"
             : _intFisio === "sessao_em_curso"
@@ -15771,7 +15877,10 @@ Deno.serve(async (req) => {
               const _docM = replyText.match(/Horários disponíveis com ([^\n(:]+)/i);
               const _docN = (_docM?.[1] || "o médico").trim();
               console.log(`[RepeatOffer] mesma lista de horários em 30min — respondendo "primeiros horários" em vez de repetir`);
-              replyText = `Infelizmente esses que te passei são os primeiros horários disponíveis do(a) ${_docN} — não tenho nada antes disso. 🙏 Algum deles te atende?`;
+              // A frase dos "primeiros horários" só para quem pediu algo mais cedo
+              // (22/09): a Elaine pediu outubro e ouviu que não havia nada ANTES.
+              // Quem perguntou outra coisa recebe um texto que pede a data (helpers.ts).
+              replyText = textoMesmaLista(_docN, pedeHorarioMaisCedo(finalMessage || ""));
               verifiedScheduleFlag = null;
             }
           }
@@ -16084,7 +16193,24 @@ Deno.serve(async (req) => {
               actionResult.status === "success") ||
             _consultarHasRealAppt ||
             _reservaProvisoria;
-          if (claimsBooking && !isLegitBookingSuccess) {
+          // REAFIRMAÇÃO DE MARCAÇÃO REAL (22/09, caso Ana Carolina): a mensagem de
+          // agora é um "Obrigada" (unknown_intent), mas a conversa marcou de verdade
+          // há segundos e a resposta só repete a MESMA data e hora. Barrar isso
+          // mandava "Quase concluí seu agendamento! Pode me repetir?" em cima de uma
+          // consulta já marcada (4 dos 7 bloqueios desde 04/09). A consulta ao banco
+          // só roda quando a guarda ia bloquear — e a conferência exige data e hora
+          // iguais às da marcação (guards.ts: repeteMarcacaoRecente).
+          let _reafirmaMarcacaoReal = false;
+          if (claimsBooking && !isLegitBookingSuccess && conversationId) {
+            const _marcacaoRecente = await marcacaoRecenteDaConversa(supabase, conversationId);
+            _reafirmaMarcacaoReal = !!_marcacaoRecente && repeteMarcacaoRecente(replyText, _marcacaoRecente);
+            if (_reafirmaMarcacaoReal) {
+              console.log(
+                `[FalseConfirmGuard] ✅ reafirma marcação real de ${_marcacaoRecente!.date} ${_marcacaoRecente!.time} (intent=${classification.intent}) — deixando passar`,
+              );
+            }
+          }
+          if (claimsBooking && !isLegitBookingSuccess && !_reafirmaMarcacaoReal) {
             console.log(
               `[FalseConfirmGuard] ⛔ Reply claims booking but action did not confirm it. intent=${classification.intent} status=${actionResult.status} reply="${replyText.slice(0, 120)}"`,
             );

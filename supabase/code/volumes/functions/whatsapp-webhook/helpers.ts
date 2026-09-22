@@ -12,7 +12,10 @@
 // com dr. Luiz Gustavo", "Encaixe"), e uma paciente teve que responder "não é
 // urgente". Nome próprio em vez de índice: a lista cresce, e um `i === 8`
 // quebraria em silêncio na próxima inserção.
-export const URGENCIA_AGENDA_RE = /\b(encaix(e|ar|amento)|hoje\s+(mesmo|ainda)|agora\s+mesmo)\b/i;
+// "hoje ainda" só é pedido de encaixe quando é PEDIDO ("dá para hoje ainda?"):
+// "Hoje ainda é dia 21/09" e "hoje ainda não recebi" (21/09) casavam e viravam
+// "Recebi seu pedido de encaixe!" — por isso a exceção depois do "ainda".
+export const URGENCIA_AGENDA_RE = /\b(encaix(e|ar|amento)|hoje\s+ainda(?!\s+(?:[ée]|eh|est[áa]|era|foi|n[ãa]o|estou)(?![\p{L}]))|hoje\s+mesmo|agora\s+mesmo)\b/iu;
 
 export const URGENCY_PATTERNS: RegExp[] = [
   /\b(emerg[eê]nc[íi]a|urg[eê]ncia|urgente)\b/i,
@@ -313,13 +316,15 @@ export function pickEventForBooking(
 // dor" segue sendo urgência, porque quem dispara ali é o padrão de dor.
 const URGENCIA_NEGADA_RE =
   /\b(n[aã]o\s+(é|e|eh)?\s*(nada\s+|t[aã]o\s+)?(urgente|urg[eê]ncia|emerg[eê]ncia)|sem\s+(urg[eê]ncia|pressa)|nada\s+urgente)\b/i;
-// "não consigo" falando de HORÁRIO/DIA é restrição de agenda, não quadro clínico.
-// (As formas clínicas continuam cobertas: "não consigo andar/levantar/mexer" e
-// "não consigo chegar/ir/sair" têm padrões próprios na lista.)
+// "não consigo" SEM verbo clínico não é quadro clínico — é agenda, telefone,
+// site, o que for ("Não consigo nem quarta nem quinta", 21/09, mandou a Maira
+// procurar um pronto-socorro). Até 22/09 a exceção ainda exigia uma palavra de
+// agenda na frase (horário, dia, semana...) — e "quarta"/"quinta" não estavam
+// nela. Em 45 dias, o único disparo de "não consigo" solto foi esse; as formas
+// clínicas ("não consigo andar/pisar/mexer/dormir/chegar") têm o verbo e seguem
+// urgência, e "não aguento" é dor sempre.
 const NAO_CONSIGO_DE_AGENDA_RE =
-  /\bn[aã]o\s+consigo\b(?![\s\S]{0,20}\b(andar|caminhar|levantar|mexer|dobrar|chegar|ir|sair|dormir|respirar)\b)/i;
-const AGENDA_CONTEXTO_RE =
-  /\b(hor[aá]rio|hora|dia|data|semana|manh[aã]|tarde|noite|agenda|remarcar|reagendar|mudar|trocar|outro)\b/i;
+  /\bn[aã]o\s+consigo\b(?![\s\S]{0,24}\b(andar|caminhar|levantar|mexer|mover|dobrar|chegar|ir|sair|dormir|respirar|pisar|apoiar|sentar|deitar|esticar|firmar|ficar\s+em\s+p[ée]|colocar\s+o\s+p[ée])(?![\p{L}]))/iu;
 
 // Um único lugar decide se o padrão i realmente dispara — detectUrgency e
 // classificarUrgencia PRECISAM concordar, senão a mensagem diria uma coisa e o
@@ -328,8 +333,8 @@ function padraoDeUrgenciaDispara(p: RegExp, i: number, t: string): boolean {
   if (!p.test(t)) return false;
   // i === 0 é o padrão da palavra "urgente/urgência/emergência"
   if (i === 0 && URGENCIA_NEGADA_RE.test(t)) return false;
-  // o padrão "não consigo/aguento" só vale se NÃO for sobre agenda
-  if (p.source.includes("consigo|aguento") && NAO_CONSIGO_DE_AGENDA_RE.test(t) && AGENDA_CONTEXTO_RE.test(t)) {
+  // o padrão "não consigo/aguento" só vale com verbo clínico depois do "consigo"
+  if (p.source.includes("consigo|aguento") && NAO_CONSIGO_DE_AGENDA_RE.test(t)) {
     // "não aguento" continua urgente mesmo falando de horário — é dor, não agenda
     if (!/\baguent/i.test(t)) return false;
   }
@@ -363,7 +368,7 @@ export function campoPedidoNoCadastro(texto: unknown): "nome" | "cpf" | "nascime
 //
 // Os dois ultimos queriam GUIA do ortopedista, para fazer fisio em outro lugar.
 // Mandar tabela de preco para quem pede receita e' vender o que ninguem pediu.
-export type IntencaoFisio = "agendar" | "pedido_medico" | "falar_com_fisio" | "sessao_em_curso";
+export type IntencaoFisio = "agendar" | "pedido_medico" | "falar_com_fisio" | "sessao_em_curso" | "nota_fiscal";
 
 const FISIO_PEDIDO_MEDICO_RE =
   /\b(pedido\s+(m[ée]dic[oa]|do\s+m[ée]dico)|guia|solicita[çc][ãa]o\s+(m[ée]dica|do\s+m[ée]dico)|receita|encaminhamento|renova(r|[çc][ãa]o)|relat[óo]rio|laudo)\b/i;
@@ -387,14 +392,45 @@ const FISIO_SESSAO_MINHA_RE =
 const FISIO_COMPARECIMENTO_RE =
   /\b(posso\s+ir|vou\s+(me\s+)?atrasar|vou\s+chegar|consigo\s+chegar|vou\s+faltar|n[ãa]o\s+vou\s+poder\s+ir|remarcar\s+(a|minha)\s+sess[ãa]o|cancelar\s+(a|minha)\s+sess[ãa]o|que\s+horas?\s+[ée]\s+(a\s+)?(minha|a)\s+sess[ãa]o)\b/i;
 
+// A TABELA DE PREÇO SÓ PARA QUEM QUER COMEÇAR (22/09). Em 50 dias (72 mensagens
+// de fisioterapia), 58 receberam a tabela e cerca de 30 não queriam comprar nada:
+// a Fabi desmarcando a sessão dela ("Precisei desmarcar a sessão de fisioterapia
+// de hoje às 12h"), o João Flávio pedindo ao médico um novo pedido de 10 sessões,
+// "Pode confirmar os dias das seções", "Não estou achando o pedido das minhas
+// fisioterapia", nota fiscal. Os padrões abaixo são as formas REAIS dessas
+// mensagens; o padrão de quem quer começar continua sendo o padrão.
+const FISIO_NOTA_FISCAL_RE = /\b(nota\s+fiscal|nfs?-?e?|recibo)\b/i;
+// "pedido de dez sessões", "pedido para fisioterapia", "o pedido das minhas fisio",
+// "novo pedido", "pedido atualizado", "me envie um pedido", "fazer essa solicitação"
+const FISIO_SESSAO_NOME = "(?:sess(?:[ãa]o|[õo]es)|se[çc](?:[ãa]o|[õo]es)|secao|secoes|fisio\\w*)";
+const FISIO_PEDIDO_AMPLO_RE = new RegExp(
+  "\\b(?:pedido\\s+(?:de|para|pra|das?|dos?)\\s+(?:\\d+\\s+|dez\\s+|vinte\\s+|mais\\s+|as?\\s+|os?\\s+|minhas?\\s+|meus?\\s+|novas?\\s+)?" + FISIO_SESSAO_NOME +
+    "|pedido\\s+(?:atualizado|novo)|nov[oa]\\s+pedido" +
+    "|(?:fazer|fizesse|fa[çc]a|emitir|pedir|solicitar|enviar|envie|mandar|mande|trocar|renovar)[,\\s]+(?:um\\s+|o\\s+|a\\s+|ess[ea]\\s+|uma\\s+|nov[oa]\\s+)?(?:solicita[çc][ãa]o|pedido))(?![\\p{L}])",
+  "iu",
+);
+// quem JÁ faz fisio aqui: desmarcar/remarcar/alterar a sessão, confirmar os dias,
+// "agendei uma sessão", "meus horários", "terminei as sessões", "já fiz"
+const FISIO_SESSAO_EM_CURSO_RE = new RegExp(
+  "\\b(?:(?:desmarc|remarc|cancel|alter|mud|troc)\\w*\\s+(?:a|as|o|os|minha|minhas|essa|essas|uma)?\\s*" + FISIO_SESSAO_NOME +
+    "|confirm\\w*(?!\\s+se\\b)[\\s\\S]{0,60}\\b" + FISIO_SESSAO_NOME +
+    "|" + FISIO_SESSAO_NOME + "[\\s\\S]{0,60}\\bconfirmad\\w*" +
+    "|(?:marquei|agendei|tenho)\\s+(?:a\\s+|uma\\s+|as\\s+|minha\\s+|minhas\\s+)?" + FISIO_SESSAO_NOME +
+    "|meus\\s+hor[áa]rios|minhas\\s+sess[õo]es" +
+    "|(?:terminei|encerr\\w+|conclu[ií]\\w*|acabei|finaliz\\w+|j[áa]\\s+fiz)\\b[\\s\\S]{0,30}\\b(?:" + FISIO_SESSAO_NOME + "|ciclo))(?![\\p{L}])",
+  "iu",
+);
+
 export function classificarPedidoDeFisioterapia(texto: unknown): IntencaoFisio {
   const t = String(texto ?? "");
   if (!t) return "agendar";
-  // vem ANTES do pedido medico: "remarcar minha sessão" nao e pedido de guia.
-  if (FISIO_COMPARECIMENTO_RE.test(t) || FISIO_SESSAO_MINHA_RE.test(t)) return "sessao_em_curso";
-  if (FISIO_PEDIDO_MEDICO_RE.test(t) || FISIO_MAIS_SESSOES_RE.test(t) || FISIO_PEDIR_AO_MEDICO_RE.test(t)) {
+  if (FISIO_NOTA_FISCAL_RE.test(t)) return "nota_fiscal";
+  // O pedido vem antes da sessão em curso: "já concluí as 10 sessões, me envie um
+  // novo pedido" é pedido. "remarcar minha sessão" não casa nenhum padrão de pedido.
+  if (FISIO_PEDIDO_MEDICO_RE.test(t) || FISIO_MAIS_SESSOES_RE.test(t) || FISIO_PEDIR_AO_MEDICO_RE.test(t) || FISIO_PEDIDO_AMPLO_RE.test(t)) {
     return "pedido_medico";
   }
+  if (FISIO_COMPARECIMENTO_RE.test(t) || FISIO_SESSAO_MINHA_RE.test(t) || FISIO_SESSAO_EM_CURSO_RE.test(t)) return "sessao_em_curso";
   if (FISIO_FALAR_RE.test(t)) return "falar_com_fisio";
   return "agendar";
 }
@@ -808,6 +844,34 @@ export function textoCpfNaoEncontrado(cpf?: unknown): string {
   const d = String(cpf || "").replace(/\D/g, "");
   const fmt = d.length === 11 ? `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9)}` : "";
   return `Não encontrei cadastro com ${fmt ? `o CPF ${fmt}` : "esse CPF"}. Pode conferir os números e me mandar de novo? Se preferir, me diga o nome completo que eu passo para a equipe.`;
+}
+
+// "NÃO TENHO NADA ANTES DISSO" SÓ PARA QUEM PEDIU ANTES (22/09)
+// ─────────────────────────────────────────────────────────────────────────────
+// Quando o fluxo gera a MESMA lista de horários de 30 min atrás, o webhook troca
+// a repetição por "esses são os primeiros horários — não tenho nada antes disso"
+// (caso Déa, 06/07). Só que de 04 a 21/09 isso saiu 8 vezes e em 5 o paciente
+// tinha perguntado outra coisa: "Qual o valor da consulta?", "Ele é de ombro?",
+// "Seria especialidade coluna?", "prefiro para outubro, quais datas ele tem" — a
+// Elaine (21/09) pediu o mês SEGUINTE e ouviu que não havia nada ANTES. A frase
+// antiga fica para quem pediu algo mais cedo; para o resto, um texto que não
+// afirma nada e pede a data. Entender "outubro" e "quinta ou sexta" é o item 6,
+// fora deste conserto.
+const PEDE_MAIS_CEDO_RE =
+  /\b(antes|mais\s+(cedo|pr[oó]xim[oa]s?|perto|r[aá]pido)|nada\s+(mais\s+)?cedo|primeir[oa]s?\s+(hor[aá]rio|data|vaga)|(essa|esta|nessa|nesta)\s+semana|hoje|amanh[aã]|urgente|s[oó]\s+(no\s+)?(fim|final)\s+do\s+m[eê]s|(t[aã]o|muito)\s+longe|demora)(?![\p{L}])/iu;
+
+export function pedeHorarioMaisCedo(texto: unknown): boolean {
+  const t = typeof texto === "string" ? texto : "";
+  if (!t.trim()) return false;
+  return PEDE_MAIS_CEDO_RE.test(t);
+}
+
+export function textoMesmaLista(nomeDoMedico: string, pediuMaisCedo: boolean): string {
+  const medico = String(nomeDoMedico || "o médico").trim() || "o médico";
+  if (pediuMaisCedo) {
+    return `Infelizmente esses que te passei são os primeiros horários disponíveis do(a) ${medico} — não tenho nada antes disso. 🙏 Algum deles te atende?`;
+  }
+  return `Esses são os horários que encontrei com ${medico} para os próximos dias. Se você quer outra data ou outro período, me diga qual (por exemplo, "05/10" ou "semana que vem à tarde") que eu confiro a agenda. 🙏`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

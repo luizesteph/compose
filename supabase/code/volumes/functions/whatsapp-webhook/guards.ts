@@ -475,6 +475,84 @@ export function textoDaAcaoParaOPaciente(
   return "";
 }
 
+// REAFIRMAR UMA MARCAÇÃO QUE ACABOU DE ACONTECER NÃO É CONFIRMAÇÃO FALSA (22/09)
+// ─────────────────────────────────────────────────────────────────────────────
+// Caso Ana Carolina (21/09, 16:45): a Julia marcou 22/09 às 10h40, a paciente
+// respondeu "Obrigada", o modelo repetiu "Agendamento confirmado ... 22/09, às
+// 10h40" e o FalseConfirmGuard — que só olha o status da AÇÃO desta mensagem
+// (unknown_intent) — trocou a frase por "Quase concluí seu agendamento! Pode me
+// repetir?". Foram 15 minutos de voltas em cima de uma consulta já marcada. Desde
+// 04/09, 4 dos 7 bloqueios da guarda eram isto: "Pode", o nome completo, um
+// "obrigada" — todos segundos depois de uma marcação real.
+//
+// A regra é estreita de propósito: a resposta só passa se TODA hora e TODA data
+// que ela cita forem as da marcação real (ou se não citar nenhuma). O caso da
+// Elyanna (09/09) — marcou 11:00, pediu 10:20, o modelo "confirmou" 10:20 sem
+// remarcar — continua bloqueado. Sem marcação, ou sem data/hora legível nela,
+// bloqueia como antes (fail-closed).
+function dataDaMarcacao(bruta: unknown): { ano: number | null; mes: number; dia: number } | null {
+  const s = String(bruta || "").trim();
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return { ano: Number(m[1]), mes: Number(m[2]), dia: Number(m[3]) };
+  m = s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{4}))?/);
+  if (m) return { ano: m[3] ? Number(m[3]) : null, mes: Number(m[2]), dia: Number(m[1]) };
+  return null;
+}
+
+export function repeteMarcacaoRecente(
+  resposta: unknown,
+  marcacao: { date?: unknown; time?: unknown } | null | undefined,
+): boolean {
+  const texto = String(resposta || "").trim();
+  if (!texto || !marcacao) return false;
+  const data = dataDaMarcacao(marcacao.date);
+  const hora = extrairHoras(String(marcacao.time || ""))[0];
+  if (!data || !hora) return false;
+  for (const h of extrairHoras(texto)) if (h !== hora) return false;
+  for (const m of texto.matchAll(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/g)) {
+    if (Number(m[1]) !== data.dia || Number(m[2]) !== data.mes) return false;
+    if (m[3] && m[3].length === 4 && data.ano !== null && Number(m[3]) !== data.ano) return false;
+  }
+  return true;
+}
+
+// A marcação real mais recente da conversa (últimos 30 min), com data e hora para
+// conferir. Só conta o que de fato foi ao Amigo: marcação com auditoria
+// (`booked_event_id`, gravada pelo agendar e — desde 22/09 — pelo cadastro que
+// agenda) ou remarcação bem-sucedida. "agendar/success" sem auditoria é o link do
+// site ("Agendar consulta" → link), não marcação. Sem data/hora legível, null:
+// não dá para conferir, então a guarda bloqueia.
+export async function marcacaoRecenteDaConversa(
+  supabase: any,
+  conversationId: string | null | undefined,
+): Promise<{ date: string; time: string } | null> {
+  if (!supabase || !conversationId) return null;
+  try {
+    const desde = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const { data } = await supabase
+      .from("webhook_messages")
+      .select("ai_intent, action_status, ai_entities, created_at")
+      .eq("conversation_id", conversationId)
+      .eq("direction", "incoming")
+      .eq("action_status", "success")
+      .in("ai_intent", ["agendar", "cadastrar", "reagendar"])
+      .gte("created_at", desde)
+      .order("created_at", { ascending: false })
+      .limit(10);
+    for (const linha of (data || []) as Array<Record<string, unknown>>) {
+      const e = (linha.ai_entities && typeof linha.ai_entities === "object" ? linha.ai_entities : {}) as Record<string, unknown>;
+      const marcou = Boolean(e.booked_event_id) || String(linha.ai_intent || "") === "reagendar";
+      if (!marcou) continue;
+      const date = String(e.date || "").trim();
+      const time = String(e.time || "").trim();
+      return date && time ? { date, time } : null;
+    }
+  } catch (e) {
+    console.warn(`[marcacaoRecenteDaConversa] error: ${(e as Error).message}`);
+  }
+  return null;
+}
+
 export function validateBookingDate(
   startDate: string, // canonical "YYYY-MM-DD HH:mm"
   opts?: { businessOpenHour?: number; businessCloseHour?: number },
