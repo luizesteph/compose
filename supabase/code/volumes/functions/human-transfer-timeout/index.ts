@@ -32,6 +32,8 @@ import {
   decideNovaIdaAFila,
   desdeJanelaCasoLongo,
   FILTRO_GATILHOS_SEM_MOVIMENTO,
+  decidirResgate,
+  MARCA_RESGATADA,
 } from "../_shared/atendimento.ts";
 import { classificarUrgencia } from "../whatsapp-webhook/helpers.ts";
 
@@ -960,6 +962,171 @@ async function varrerFichasParadas(
   return out;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// FASE 5 — RESGATE DA MENSAGEM PARADA (23/09, pedido do dono)
+// ─────────────────────────────────────────────────────────────────────────────
+// 23/09 12h14, Fernanda: "Consigo algum ortopedista de pé para ver minha
+// ressonância hoje". O ticket era da Glaucia, no almoço. A guarda calou a Julia,
+// a Fase 2 devolveu o ticket para a fila às 12h26 — e ninguém respondeu mais.
+// O Felipe (16h38) foi igual. A guarda com prazo (08/09) só soltava a PRÓXIMA
+// mensagem do paciente; a que já estava esperando nunca era reprocessada.
+// Medido de 08 a 23/09: 221 conversas com paciente esperando mais de 30 min com
+// a dona do ticket calada, 94 mensagens nunca respondidas.
+//
+// Esta fase acha essas mensagens e reenvia ao webhook com a marca `__resgate`:
+// a Julia responde a mensagem parada, pedindo desculpa pela demora. A regra de
+// QUAIS mensagens é a decidirResgate (_shared/atendimento.ts): todas as
+// mensagens depois da última fala foram puladas por causa da dona do ticket, a
+// primeira é de hoje e passou do prazo da guarda, juntas exigem resposta, o
+// ticket não é de admin. Das 7h às 20h (SP), no máximo 2 por rodada.
+//
+// Roda logo depois da Fase 4 — barata e com teto — e antes das fases caras.
+// Marca "| resgatada" ANTES de disparar: se o disparo falhar, não repete (melhor
+// perder um resgate do que responder duas vezes). O webhook roda em outro
+// worker; o `EdgeRuntime.waitUntil` só garante que a requisição sai.
+//
+// DESFAZER — o mesmo botão da guarda, um comando, sem deploy:
+//     update clinic_tokens set human_guard_timeout_min = 0;
+// (desliga também o prazo da guarda: volta a bloquear enquanto houver dona).
+const TETO_RESGATES_POR_RODADA = 2;
+const RESGATE_HORA_INICIO = 7;
+const RESGATE_HORA_FIM = 20;
+
+async function carregarAdmins(creds: { baseUrl: string; apiId: string; bearerToken: string }): Promise<Set<number>> {
+  const admins = new Set<number>();
+  try {
+    const r = await fetch(`${creds.baseUrl}/v2/api/external/${creds.apiId}/listUsers?pageNumber=1`, {
+      headers: { Authorization: `Bearer ${creds.bearerToken}`, "Content-Type": "application/json" },
+    });
+    if (r.ok) {
+      const d = await r.json();
+      for (const u of (d?.data || [])) {
+        if (u && u.id != null && String(u.profile || "").toLowerCase() === "admin") admins.add(Number(u.id));
+      }
+    }
+  } catch { /* sem a lista, admin não é reconhecido */ }
+  return admins;
+}
+
+async function resgatarMensagensParadas(
+  supabase: any,
+  cl: { id: string; human_guard_timeout_min?: number | null },
+  creds: { baseUrl: string; apiId: string; bearerToken: string; channelId?: string | null },
+): Promise<{ avaliadas: number; resgatadas: number; pulos: Record<string, number> }> {
+  const out = { avaliadas: 0, resgatadas: 0, pulos: {} as Record<string, number> };
+  const pulou = (m: string) => { out.pulos[m] = (out.pulos[m] || 0) + 1; };
+
+  const prazo = Number(cl.human_guard_timeout_min ?? 0) || 0;
+  if (prazo <= 0) { pulou("desligado"); return out; }
+  const horaSP = Number(
+    new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", hour12: false }).format(new Date()),
+  );
+  if (horaSP < RESGATE_HORA_INICIO || horaSP >= RESGATE_HORA_FIM) { pulou("fora_do_horario"); return out; }
+
+  const agora = Date.now();
+  const desde = new Date(agora - 13 * 60 * 60 * 1000).toISOString();
+  const ate = new Date(agora - prazo * 60 * 1000).toISOString();
+  const { data: puladas } = await supabase
+    .from("webhook_messages")
+    .select("conversation_id, action_error, message_text")
+    .eq("clinic_token_id", cl.id)
+    .eq("direction", "incoming")
+    .eq("action_status", "skipped")
+    .gte("created_at", desde)
+    .lte("created_at", ate)
+    .order("created_at", { ascending: true })
+    .limit(300);
+
+  // candidatas: pulada por causa da dona do ticket, ainda não resgatada nem resolvida
+  const conversas: string[] = [];
+  for (const p of (puladas || []) as any[]) {
+    const erro = String(p.action_error || "");
+    if (!/^(?:Humano ativo: (?:raw_payload\(status=open|recent_manual_reply)|Última mensagem foi de atendente humano)/.test(erro)) continue;
+    if (erro.includes(MARCA_RESGATADA) || erro.includes("| resolvida")) continue;
+    if (p.conversation_id && !conversas.includes(p.conversation_id)) conversas.push(p.conversation_id);
+  }
+  if (!conversas.length) return out;
+
+  const { data: wh } = await supabase
+    .from("user_webhooks")
+    .select("webhook_key")
+    .eq("clinic_token_id", cl.id)
+    .eq("is_active", true)
+    .limit(1)
+    .maybeSingle();
+  if (!wh?.webhook_key) { pulou("sem_webhook"); return out; }
+
+  let admins: Set<number> | null = null;
+  for (const conversa of conversas) {
+    if (out.resgatadas >= TETO_RESGATES_POR_RODADA) { pulou("teto_da_rodada"); break; }
+    out.avaliadas++;
+    const { data: msgs } = await supabase
+      .from("webhook_messages")
+      .select("id, created_at, direction, ai_intent, action_status, action_error, message_text, sender_phone, raw_payload")
+      .eq("conversation_id", conversa)
+      .order("created_at", { ascending: false })
+      .limit(25);
+    const lista = (msgs || []) as any[];
+    const ultimaDoPaciente = lista.find((m) => m.direction === "incoming");
+    // áudio/arquivo: o webhook transcreveria de novo e duplicaria o cartão — fica para a equipe
+    if (/^\[(?:🎤|📎)/.test(String(ultimaDoPaciente?.message_text || ""))) { pulou("audio_ou_arquivo"); continue; }
+    const donoId = Number(ultimaDoPaciente?.raw_payload?.ticket?.userId || 0);
+    if (donoId && admins === null) admins = await carregarAdmins(creds);
+    const decisao = decidirResgate({
+      agoraMs: agora,
+      prazoMin: prazo,
+      donoEhAdmin: !!(donoId && admins?.has(donoId)),
+      donoNome: String(ultimaDoPaciente?.raw_payload?.ticket?.user?.name || ""),
+      mensagens: lista.map((m) => ({
+        id: m.id,
+        created_at: m.created_at,
+        direction: m.direction,
+        ai_intent: m.ai_intent,
+        action_status: m.action_status,
+        action_error: m.action_error,
+        message_text: m.message_text,
+        temMidia: !!(m.raw_payload?.mediaUrl || m.raw_payload?.mediaType),
+      })),
+    });
+    if (!decisao.resgatar) { pulou(decisao.motivo); continue; }
+
+    // marca ANTES de disparar — a rodada seguinte não repete
+    for (const m of lista.filter((x) => decisao.ids.includes(x.id))) {
+      await supabase
+        .from("webhook_messages")
+        .update({ action_error: `${String(m.action_error || "")} ${MARCA_RESGATADA}`.slice(0, 480) })
+        .eq("id", m.id);
+    }
+    const base = lista.find((m) => m.id === decisao.ids[decisao.ids.length - 1])?.raw_payload || ultimaDoPaciente?.raw_payload;
+    if (!base || typeof base !== "object") { pulou("sem_payload"); continue; }
+    // sem o `ticket` da hora da mensagem: dono e status dele estão velhos (o telefone
+    // vem de msg.chatid/from, não do ticket), e o webhook gravaria isso no espelho
+    const { ticket: _ticketDaHoraDaMensagem, ...semTicket } = base as Record<string, unknown>;
+    const corpo = { ...semTicket, __resgate: { ids: decisao.ids, desde: decisao.desde, texto: decisao.texto } };
+    const params = new URLSearchParams({ key: String(wh.webhook_key) });
+    if (creds.channelId) params.set("channelId", String(creds.channelId));
+    params.set("chBaseUrl", creds.baseUrl);
+    params.set("chApiId", creds.apiId);
+    params.set("chBearerToken", creds.bearerToken);
+    const urlWebhook = `${Deno.env.get("SUPABASE_URL")}/functions/v1/whatsapp-webhook?${params.toString()}`;
+    const envio = fetch(urlWebhook, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-cron-secret": Deno.env.get("CRON_SECRET") || "" },
+      body: JSON.stringify(corpo),
+      signal: AbortSignal.timeout(90_000),
+    })
+      .then((r) => console.log(`[resgate] webhook respondeu ${r.status}`))
+      .catch((e) => console.error(`[resgate] webhook falhou: ${(e as Error).message}`));
+    try { (globalThis as any).EdgeRuntime?.waitUntil?.(envio); } catch { /* sem waitUntil a promessa segue */ }
+    out.resgatadas++;
+    const esperaMin = Math.round((agora - Date.parse(decisao.desde)) / 60000);
+    console.log(
+      `[resgate] ...${String(ultimaDoPaciente?.sender_phone || "").slice(-4)} esperando há ${esperaMin}min (${decisao.ids.length} msg) — a Julia vai responder`,
+    );
+  }
+  return out;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
@@ -1039,6 +1206,29 @@ Deno.serve(async (req) => {
       }
     } catch (e) {
       console.error(`[ficha] fatal: ${(e as Error).message}`);
+    }
+
+    // ── FASE 5: resgate da mensagem parada — logo depois da Fase 4 ─────────────
+    // Barata quando não há caso (1 select) e com teto de 2 por rodada. Antes das
+    // Fases 1-3, que são as caras e aguentam ser cortadas no meio.
+    try {
+      const { data: clinicasF5 } = await supabase
+        .from("clinic_tokens")
+        .select("id, ai_enabled, avanceai_base_url, avanceai_api_id, avanceai_bearer_token, avanceai_active_channel, human_guard_timeout_min");
+      for (const cl of (clinicasF5 || [])) {
+        if (cl.ai_enabled === false) continue;
+        const creds = canalVivo(cl);
+        if (!creds) continue;
+        const r5 = await resgatarMensagensParadas(supabase, cl, creds);
+        (summary as any).resgate_avaliadas = ((summary as any).resgate_avaliadas || 0) + r5.avaliadas;
+        (summary as any).resgatadas = ((summary as any).resgatadas || 0) + r5.resgatadas;
+        const p5 = Object.entries(r5.pulos).map(([k, v]) => `${k}=${v}`).join(",") || "nenhum";
+        if (r5.avaliadas || r5.resgatadas) {
+          console.log(`[resgate] clinica=${cl.id} avaliadas=${r5.avaliadas} resgatadas=${r5.resgatadas} pulos: ${p5}`);
+        }
+      }
+    } catch (e) {
+      console.error(`[resgate] fatal: ${(e as Error).message}`);
     }
 
 

@@ -1481,3 +1481,329 @@ export function textoHorariosNaJanela(args: {
   }
   return `${cap(rot) || "Nesse período"} não encontrei horário livre com ${medico}. Os primeiros que encontrei${per}:\n\n${args.corpo}${rodape}`;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CANCELAR SÓ COM PEDIDO (23/09, caso Adriana)
+// ─────────────────────────────────────────────────────────────────────────────
+// 23/09 10h01: "Meu filho passou muito mal e não foi na escola / Preciso cuidar
+// dele" foi classificado como cancelar, e a consulta daquele dia com o Dr.
+// Cristian foi cancelada NA HORA — a palavra "cancelar" não aparece em lugar
+// nenhum. O resto da mensagem chegou no lote seguinte: "Por isso, por favor,
+// preciso remarcar a consulta". A remarcação já não achou consulta, a paciente
+// perdeu a vaga e esperou das 10h03 às 13h07 pela equipe, que só tinha o dia
+// seguinte.
+//
+// Com CPF e uma consulta futura só, o cancelar fazia o PUT sem perguntar nada.
+// Agora o PUT exige pedido: verbo de cancelar/desmarcar na mensagem (ou nas
+// anteriores do paciente, quando a atual é o CPF que a Julia pediu), ou o "sim"
+// à pergunta da própria Julia. Aviso de ausência ("não vou conseguir ir") vira
+// pergunta — cancelar OU remarcar —, que é também a chance de não perder o
+// paciente. Calibrado nas 65 mensagens classificadas como cancelar de 09/08 a
+// 23/09.
+export type PedidoDeCancelar = "cancelar" | "remarcar" | "ausencia" | null;
+
+const _CANCELAR_RE = /\b(?:cancel\w*|desmarc\w*|desist\w*)\b/g;
+const _REMARCAR_RE =
+  /\b(?:remarcar|remarque|remarcacao|reagendar|reagende|reagendamento|trocar\s+(?:o\s+|a\s+)?(?:dia|data|horario)|mudar\s+(?:o\s+|a\s+)?(?:dia|data|horario)|passar\s+(?:para|pra)\s+outr[oa]|(?:marca|marcar|agenda|agendar)\s+outr[oa]|outr[oa]\s+(?:dia|data|horario|semana)|adiar)\b/g;
+const _AUSENCIA_RE =
+  /\bnao\s*(?:vou|irei|poderei|conseguirei|consigo|posso|podemos|vamos|vai|ira|podera|conseguira|consegue)\s+(?:mais\s+)?(?:conseguir\s+|poder\s+)?(?:ir|comparecer|chegar|estar|vir|levar)\b|\bnao\s+irei\b|\bimprevisto\b/;
+
+// "não precisa cancelar", "não quero remarcar": a palavra está lá, o pedido não.
+function _pedidoNegado(t: string, idx: number): boolean {
+  const antes = t.slice(Math.max(0, idx - 30), idx);
+  return /\bnao\s+(?:\w+\s+){0,2}$/.test(antes) || /\bsem\s+$/.test(antes);
+}
+
+function _temPedido(re: RegExp, t: string): boolean {
+  for (const m of t.matchAll(re)) if (!_pedidoNegado(t, m.index ?? 0)) return true;
+  return false;
+}
+
+/** O que a mensagem pede sobre a consulta que já existe. */
+export function lerPedidoDeCancelar(texto: unknown): PedidoDeCancelar {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  if (!t.trim()) return null;
+  if (_temPedido(_REMARCAR_RE, t)) return "remarcar";
+  if (_temPedido(_CANCELAR_RE, t)) return "cancelar";
+  if (_AUSENCIA_RE.test(t)) return "ausencia";
+  return null;
+}
+
+// A pergunta que a Julia faz antes de cancelar. O "sim" do paciente só vale como
+// pedido quando a última mensagem dela for esta pergunta — por isso a marca fixa.
+export const PERGUNTA_CANCELAR_MARCA = "Quer que eu *cancele*";
+const _SIM_AO_CANCELAR_RE =
+  /^\s*(?:sim|s|pode|pode sim|isso|isso mesmo|confirmo|quero|ok|pode ser|por favor|correto|certo|exato)\b/;
+
+/**
+ * O cancelar pode fazer o PUT agora, sem perguntar?
+ *
+ * Sim quando: a mensagem pede cancelar; ou é o "sim" à pergunta da Julia; ou é
+ * continuação (CPF, número da lista) de um pedido explícito do paciente. O
+ * pedido mais recente vence: quem pediu para cancelar e depois disse "prefiro
+ * remarcar" não perde a consulta quando manda o CPF.
+ */
+export function podeCancelarSemPerguntar(a: {
+  atual: unknown;
+  anterioresDoPaciente?: unknown[] | null;
+  ultimaDaJulia?: unknown;
+}): boolean {
+  const agora = lerPedidoDeCancelar(a.atual);
+  if (agora === "cancelar") return true;
+  if (agora === "remarcar") return false;
+  if (String(a.ultimaDaJulia ?? "").includes(PERGUNTA_CANCELAR_MARCA)) {
+    const t = stripAccents(String(a.atual ?? "").toLowerCase()).trim();
+    return !/^n(?:ao|a)\b/.test(t) && _SIM_AO_CANCELAR_RE.test(t);
+  }
+  const anteriores = (a.anterioresDoPaciente || []).map((x) => String(x ?? "")).slice(-6).reverse();
+  for (const t of anteriores) {
+    const p = lerPedidoDeCancelar(t);
+    if (p === "cancelar") return true;
+    if (p === "remarcar") return false;
+  }
+  return false;
+}
+
+/** "de hoje, às 10:00" / "de amanhã (24/09), às 15:20" / "de 25/09 (sexta)". */
+export function quandoDaConsulta(dataISO: unknown, hora: unknown, hojeISO: string): string {
+  const d = String(dataISO ?? "").slice(0, 10);
+  const h = String(hora ?? "").slice(0, 5);
+  let q = "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(d)) {
+    if (d === hojeISO) q = "de hoje";
+    else if (d === addDaysToISO(hojeISO, 1)) q = `de amanhã (${d.slice(8, 10)}/${d.slice(5, 7)})`;
+    else q = `de ${formatDateLabel(d)}`;
+  }
+  const hh = /^\d{2}:\d{2}$/.test(h) ? `às ${h}` : "";
+  return [q, hh].filter(Boolean).join(", ");
+}
+
+/** A pergunta antes de cancelar: diz QUAL consulta e oferece remarcar. Sai literal. */
+export function textoPerguntaCancelar(a: { dataISO: unknown; hora: unknown; medico: unknown; hojeISO: string }): string {
+  const quando = quandoDaConsulta(a.dataISO, a.hora, a.hojeISO);
+  const medico = String(a.medico ?? "").trim();
+  return (
+    `${PERGUNTA_CANCELAR_MARCA} sua consulta${quando ? ` ${quando}` : ""}${medico ? ` com ${medico}` : ""}? ` +
+    "Se preferir *remarcar* para outro dia, é só me dizer que eu vejo os horários. 🙏"
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PEDIDO DE NOVA MARCAÇÃO LOGO DEPOIS DE MARCAR/CANCELAR (23/09, Adriana 10h02)
+// ─────────────────────────────────────────────────────────────────────────────
+// A trava pós-marcação (index.ts, "POST-BOOKING GUARD") existe para um "ok" ou
+// "obrigada" não reabrir uma marcação que acabou de acontecer. Mas ela só
+// reconhecia data com barra ("30/09") ou frases como "semana que vem": "É
+// possível agendar para amanhã?", logo depois do cancelamento, virou "unknown",
+// e a Julia respondeu duas vezes que ia "verificar e já te informo" — sem
+// verificar nada. Agora a data em palavras é lida pelo mesmo leitor da janela de
+// datas (item 6): amanhã, hoje, sexta, outubro, "depois do dia 5". Depois de
+// CANCELAR, o pedido de marcar de novo vale mesmo sem data — o contexto antigo já
+// foi apagado de propósito. Despedida ("até amanhã") não é pedido.
+export function pedidoDeNovaMarcacao(texto: unknown, hojeISO: string, depoisDeCancelar: boolean): boolean {
+  const bruto = String(texto ?? "").trim();
+  if (!bruto || isClosingThanks(bruto)) return false;
+  const t = stripAccents(bruto.toLowerCase()).replace(
+    /\bate\s+(?:amanha|logo|mais|breve|la|segunda|terca|quarta|quinta|sexta|sabado|domingo)\b/g,
+    " ",
+  );
+  const j = janelaDeDatas(t, hojeISO);
+  if (j && (j.inicio || j.fim || (j.datas && j.datas.length > 0) || (j.diasDaSemana && j.diasDaSemana.length > 0))) return true;
+  if (
+    depoisDeCancelar &&
+    /\b(?:agendar|marcar|remarcar|reagendar|nova consulta|outra consulta|outro horario|outra data)\b/.test(t)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MANHÃ/TARDE NA BUSCA COM VÁRIOS MÉDICOS (23/09, casos Deia e Mari)
+// ─────────────────────────────────────────────────────────────────────────────
+// No caminho de um médico só, o período filtrava os horários. No de vários
+// médicos, não: a lista enchia com as primeiras datas (todas à tarde) e o
+// modelo respondia, honesto, "não encontrei atendimento de manhã" — havia 07/10
+// às 08h40, que a Glaucia achou em seguida.
+export function filtrarPeloPeriodo(slots: string[], periodo?: string | null): string[] {
+  if (periodo === "manha") return slots.filter((t) => String(t).slice(0, 5) < "12:00");
+  if (periodo === "tarde") return slots.filter((t) => String(t).slice(0, 5) >= "12:00");
+  return slots;
+}
+
+/** Nenhum médico tem vaga no período pedido: diz isso e mostra o que há. Sai literal. */
+export function textoSemHorarioNoPeriodo(a: { periodo: string; quem: string; rotulo?: string; corpo: string }): string {
+  const per = a.periodo === "manha" ? "de manhã" : "à tarde";
+  const rot = String(a.rotulo || "").trim();
+  return (
+    `Não encontrei horário ${per} com ${a.quem}${rot ? ` ${rot}` : ""}. Os horários que encontrei:\n\n${a.corpo}\n\n` +
+    "Algum desses serve? Se preferir outra data ou período, é só me dizer."
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// O TETO DO AMIGO COM O TEXTO CERTO (23/09, caso Karina)
+// ─────────────────────────────────────────────────────────────────────────────
+// O `POST /attendances` do robô às vezes devolve "Limite de atendimentos
+// atingido". A Julia explicava com a consulta MAIS ANTIGA do paciente — a
+// Karina ouviu "você já tem uma consulta marcada para 31/08", e respondeu "31/08
+// já passou". A que pesava era a de 15/09.
+//
+// O que se sabe do teto (medido em 23/09, 13 pacientes bloqueados e 38 marcações
+// aceitas desde 27/08): NÃO é "uma por mês" — a Julia marcou a segunda consulta
+// do mês para Carolina, Ju Michelan, GHD e Rodrigo. Em 11 dos 13 bloqueios havia
+// consulta até 16 dias antes da data pedida (o tipo CONSULTA do Amigo tem
+// `comeback_days: 16`, o prazo de retorno), e em 4 dos 13 era a própria marcação
+// repetida (o site marcou e a Julia tentou de novo; Maria Inês, Renan, Giulia,
+// Ana Carolina). A equipe marca esses casos pela tela do Amigo, em geral como
+// outro tipo de atendimento e sem convênio. O Amigo não documenta a regra.
+//
+// Então o texto diz o que dá para afirmar:
+//   mesmo dia  → a consulta já existe; confirma e NÃO transfere
+//   futura     → cita a futura e oferece trocar (a equipe remarca)
+//   recente    → cita a última consulta (até 30 dias antes) e passa para a equipe
+//   nenhuma    → texto neutro e passa para a equipe
+export type AtendimentoDoAmigo = {
+  start_date?: unknown;
+  date?: unknown;
+  status?: unknown;
+  canceled?: unknown;
+  user?: unknown;
+  doctor_name?: unknown;
+  user_name?: unknown;
+};
+
+export function textoDoLimiteDeAtendimentos(a: {
+  atendimentos: AtendimentoDoAmigo[] | null | undefined;
+  dataPedida: string;
+  hoje: string;
+}): { tipo: "mesmo_dia" | "futura" | "recente" | "nenhuma"; transferir: boolean; texto: string } {
+  const vivos = (Array.isArray(a.atendimentos) ? a.atendimentos : [])
+    .map((x) => {
+      const st = String(x?.status ?? "").toLowerCase();
+      const cancelada = x?.canceled === true || x?.canceled === "true" || /^cancel/.test(st);
+      const bruto = String(x?.start_date ?? x?.date ?? "");
+      const dia = bruto.slice(0, 10);
+      const hora = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(bruto) ? bruto.slice(11, 16) : "";
+      const u = x?.user && typeof x.user === "object" ? (x.user as Record<string, unknown>).name : "";
+      const medico = String(u || x?.doctor_name || x?.user_name || "").trim();
+      return { cancelada, dia, hora, medico };
+    })
+    .filter((v) => !v.cancelada && /^\d{4}-\d{2}-\d{2}$/.test(v.dia))
+    .sort((x, y) => `${x.dia} ${x.hora}`.localeCompare(`${y.dia} ${y.hora}`));
+
+  type V = (typeof vivos)[number];
+  const quando = (v: V) => `*${formatDateLabel(v.dia)}*${v.hora ? ` às *${v.hora}*` : ""}`;
+  const com = (v: V) => (v.medico ? ` com ${v.medico}` : "");
+
+  const mesmoDia = vivos.find((v) => v.dia === a.dataPedida);
+  if (mesmoDia) {
+    return {
+      tipo: "mesmo_dia",
+      transferir: false,
+      texto:
+        `Você já tem consulta marcada para ${quando(mesmoDia)}${com(mesmoDia)}. ✅ ` +
+        "Não precisa marcar de novo — se quiser trocar o horário, é só me dizer.",
+    };
+  }
+  const futura = vivos.find((v) => v.dia >= a.hoje);
+  if (futura) {
+    return {
+      tipo: "futura",
+      transferir: true,
+      texto:
+        `Não consegui marcar esse horário: você já tem uma consulta marcada para ${quando(futura)}${com(futura)}, ` +
+        "e o sistema da clínica não aceitou uma segunda. Já chamei uma atendente — se você quiser *trocar* a consulta " +
+        "que já existe por esse novo horário, ela resolve rapidinho. 🙏",
+    };
+  }
+  const limiteRecente = addDaysToISO(a.dataPedida, -30);
+  const ultima = [...vivos].reverse().find((v) => v.dia < a.hoje && v.dia >= limiteRecente);
+  if (ultima) {
+    return {
+      tipo: "recente",
+      transferir: true,
+      texto:
+        `Não consegui marcar pelo sistema: você teve consulta em ${quando(ultima)}${com(ultima)}, e uma nova consulta ` +
+        "tão perto da anterior precisa ser marcada pela nossa equipe (às vezes entra como retorno). " +
+        "Já chamei uma atendente para te ajudar. 🙏",
+    };
+  }
+  return {
+    tipo: "nenhuma",
+    transferir: true,
+    texto:
+      "Não consegui concluir esse agendamento: o sistema da clínica não aceitou a marcação. " +
+      "Já chamei uma atendente para finalizar com você. 🙏",
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CONSULTA PARA OUTRA PESSOA (23/09, caso Karina)
+// ─────────────────────────────────────────────────────────────────────────────
+// 22/09 13h27: "teria um horário para atender minha filha de 12 anos?". No dia
+// seguinte, "Se ainda tiver na sexta às 15h" — e a Julia tentou marcar no CPF da
+// MÃE, que o cache achou pelo telefone. Só não virou consulta no nome errado
+// porque o Amigo recusou por outro motivo. É a mesma família do caso Andrea
+// (16/09): o telefone é de quem escreve, a consulta pode não ser.
+//
+// Quando a conversa diz que a consulta é de outra pessoa, o CPF que o PACIENTE
+// não digitou (veio do cache, do telefone ou de uma busca antiga) não vale: a
+// Julia segura o horário e pede nome completo e CPF de quem vai ser atendido.
+// A mensagem mais recente decide — "agora quero marcar para mim" desfaz.
+export type ConsultaDeOutraPessoa = { relacao: string; comArtigo: string; pronome: "dela" | "dele" };
+
+const _RELACOES_FEM: Record<string, string> = {
+  filha: "filha", mae: "mãe", esposa: "esposa", mulher: "esposa", irma: "irmã", sogra: "sogra", neta: "neta",
+  namorada: "namorada", companheira: "companheira", enteada: "enteada", sobrinha: "sobrinha", tia: "tia",
+  prima: "prima", cunhada: "cunhada", nora: "nora", crianca: "criança",
+};
+const _RELACOES_MASC: Record<string, string> = {
+  filho: "filho", pai: "pai", marido: "marido", esposo: "esposo", irmao: "irmão", sogro: "sogro", neto: "neto",
+  namorado: "namorado", companheiro: "companheiro", enteado: "enteado", sobrinho: "sobrinho", tio: "tio",
+  primo: "primo", cunhado: "cunhado", genro: "genro", bebe: "bebê",
+};
+const _REL = `(${[...Object.keys(_RELACOES_FEM), ...Object.keys(_RELACOES_MASC), "avo"].join("|")})`;
+const _PARA_OUTRA_RE = new RegExp(`\\b(?:para|pra|pro|p/)\\s+(?:o\\s+|a\\s+)?(?:meu|minha)\\s+${_REL}\\b`);
+const _ACAO_PARA_OUTRA_RE = new RegExp(
+  `\\b(?:atender|atendimento|consulta|horario|agendar|marcar|levar|trazer|consultar|examinar|avaliar)\\b[^.?!\\n]{0,40}?\\b(?:meu|minha)\\s+${_REL}\\b`,
+);
+const _OUTRA_PRECISA_RE = new RegExp(
+  `\\b(?:meu|minha)\\s+${_REL}\\b[^.?!\\n]{0,80}?\\b(?:precisa|precisaria|precisar|quer|queria|vai|tem que|teria|machucou|esta com|sente|sentindo|com dor|caiu|torceu|quebrou|passou|operou)\\b`,
+);
+const _SOU_RESPONSAVEL_RE = /\b(?:sou|aqui e)\s+(?:a|o)\s+(?:mae|pai|responsavel|avo)\s+d([oa])\s+[a-z]/;
+const _PARA_MIM_RE = /\b(?:para|pra)\s+mim\b|\beu\s+mesm[oa]\b|\bminha\s+(?:propria\s+)?consulta\b|\bsou\s+eu\b/;
+
+function _descreverRelacao(chave: string, original: string): ConsultaDeOutraPessoa {
+  if (chave === "avo") {
+    const fem = /\bav[óo]\b/.test(original) && original.includes("avó");
+    return fem
+      ? { relacao: "avó", comArtigo: "a sua avó", pronome: "dela" }
+      : { relacao: "avô", comArtigo: "o seu avô", pronome: "dele" };
+  }
+  if (_RELACOES_FEM[chave]) return { relacao: _RELACOES_FEM[chave], comArtigo: `a sua ${_RELACOES_FEM[chave]}`, pronome: "dela" };
+  const m = _RELACOES_MASC[chave] || chave;
+  return { relacao: m, comArtigo: `o seu ${m}`, pronome: "dele" };
+}
+
+/** A consulta é de outra pessoa? Lê as mensagens do paciente (ordem cronológica), da mais nova para a mais velha. */
+export function consultaParaOutraPessoa(textosDoPaciente: unknown[] | null | undefined): ConsultaDeOutraPessoa | null {
+  const lista = (textosDoPaciente || []).map((x) => String(x ?? "")).filter((x) => x.trim());
+  for (let i = lista.length - 1; i >= 0; i--) {
+    const original = lista[i].toLowerCase();
+    const t = stripAccents(original);
+    if (_PARA_MIM_RE.test(t)) return null;
+    const sou = _SOU_RESPONSAVEL_RE.exec(t);
+    if (sou) return sou[1] === "a" ? _descreverRelacao("filha", original) : _descreverRelacao("filho", original);
+    const m = _PARA_OUTRA_RE.exec(t) || _ACAO_PARA_OUTRA_RE.exec(t) || _OUTRA_PRECISA_RE.exec(t);
+    if (m) return _descreverRelacao(m[1], original);
+  }
+  return null;
+}
+
+/** O CPF apareceu digitado pelo paciente em alguma mensagem? (Senão veio do cache ou do telefone.) */
+export function cpfDigitadoNaConversa(cpf: unknown, textos: unknown[] | null | undefined): boolean {
+  const d = String(cpf ?? "").replace(/\D/g, "");
+  if (d.length !== 11) return false;
+  return (textos || []).some((t) => String(t ?? "").replace(/\D/g, "").includes(d));
+}

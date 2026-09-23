@@ -452,3 +452,144 @@ export function fraseForaDoExpediente(
   }
   return `Vou deixar seu caso com ${alvo} — o atendimento de hoje já encerrou, então ${nome ? "ela te responde" : "te respondem"} amanhã de manhã.`;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RESGATE DA MENSAGEM PARADA (23/09, pedido do dono)
+// ─────────────────────────────────────────────────────────────────────────────
+// 23/09 12h14, Fernanda: "Consigo algum ortopedista de pé para ver minha
+// ressonância hoje". O ticket era da Glaucia (no almoço, 12h–13h). A guarda de
+// humano calou a Julia, a Fase 2 devolveu o ticket para a fila às 12h26 (certo),
+// às 13h ele estava com a Lidiane e foi fechado sem resposta — e ninguém mais
+// falou com ela. O Felipe (16h38, "o adesivo eu coloco em que região?") foi
+// igual: devolvido às 16h50, nenhuma resposta.
+//
+// O buraco: a guarda com prazo (08/09) deixa a Julia voltar a responder a
+// PRÓXIMA mensagem depois de 30 min de silêncio da equipe — mas a mensagem que
+// já estava esperando nunca era reprocessada. Se o paciente não escreve de novo,
+// morre ali. Medido de 08 a 23/09: 221 conversas com paciente esperando mais de
+// 30 min com a dona do ticket calada; 94 mensagens nunca respondidas.
+//
+// Agora a Fase 5 do human-transfer-timeout resgata: passado o prazo da guarda
+// (clinic_tokens.human_guard_timeout_min, o mesmo botão — 0 desliga tudo), a
+// Julia responde a mensagem parada. Só quando:
+//   - as mensagens depois da última fala (de qualquer um) foram TODAS puladas
+//     pela guarda por causa da dona do ticket (ou juntadas no mesmo lote);
+//     pulada por transferência que a própria Julia fez fica com a fila e com o
+//     aviso de 15 min;
+//   - a primeira delas é de HOJE (São Paulo) — "hoje" no texto não pode virar
+//     o dia seguinte — e tem pelo menos o prazo da guarda;
+//   - juntas, exigem resposta ("obrigada" não é pergunta parada);
+//   - o ticket não é de admin (o dono, a conta CBT).
+export const MARCA_RESGATADA = "| resgatada";
+
+const _PULADA_PELA_DONA_RE =
+  /^(?:Humano ativo: (?:raw_payload\(status=open|recent_manual_reply)|Última mensagem foi de atendente humano)/;
+
+export type MensagemParaResgate = {
+  id: string;
+  created_at: string;
+  direction: string;
+  ai_intent?: string | null;
+  action_status?: string | null;
+  action_error?: string | null;
+  message_text?: string | null;
+  temMidia?: boolean;
+};
+
+export type DecisaoDeResgate =
+  | { resgatar: true; ids: string[]; texto: string; desde: string }
+  | { resgatar: false; motivo: string };
+
+// A SIMULAÇÃO QUE APERTOU A REGRA (23/09). Rodando a primeira versão sobre 08 a
+// 23/09 saíam ~25 resgates por dia útil, e boa parte era errada: "Obrigada e
+// igualmente!🌷", "Recebi a receita, muito obrigado", um nome solto respondendo
+// à pergunta da atendente ("Alberto ragazzi pauli gebrim"), "Vânia, quando o Dr.
+// Gustavo vai está atendendo?". Agora só resgata PERGUNTA OU PEDIDO NOVO, nunca
+// mensagem dirigida a uma atendente pelo nome, nunca caso longo (Vânia e
+// Lidiane ficam com os pacientes delas — regra de 15/09).
+const _NOME_DE_ATENDENTE_RE = /(?<![\p{L}])(?:v[aâ]nia|lidiane|lidi|gl[aá]ucia|laiz|la[ií]s|mardil+a|caroline|carol)(?![\p{L}])/iu;
+// Resposta automática do WhatsApp comercial do PRÓPRIO paciente ("Recebi sua
+// solicitação. O prazo para retorno é de até 48 horas úteis") — responder a ela é
+// robô conversando com robô.
+const _AUTORRESPOSTA_RE =
+  /recebi (?:a )?sua (?:solicita|mensagem)|resposta autom[aá]tica|mensagem autom[aá]tica|prazo para (?:retorno|resposta)|hor[aá]rio de (?:expediente|atendimento) [eé]|estou (?:ausente|de f[eé]rias)|fora do (?:escrit[oó]rio|expediente)|agradecemos (?:o seu|seu) contato/iu;
+// "Pode", "Podemos sim", "Não posso": resposta à pergunta da atendente, não pedido.
+const _VERBO_DE_AGENDA_RE = /(?<![\p{L}])(?:marcar|agendar|desmarcar|remarcar|reagendar|cancelar)(?![\p{L}])/iu;
+// Atendente falou com o paciente há menos de 2 h: a mensagem parada costuma ser a
+// resposta à proposta dela ("pode ser na quarta às 17?"). Se a Julia marcasse, a
+// equipe marcaria de novo. Fica com ela (e com o alerta da Fase 3).
+const CONVERSA_RECENTE_COM_ATENDENTE_MS = 2 * 60 * 60 * 1000;
+const IDADE_MAXIMA_DO_RESGATE_MS = 3 * 60 * 60 * 1000;
+const _SAUDACAO_RE =
+  /(?<![\p{L}])(?:ol[aá]|oi+e?|bom dia|boa tarde|boa noite|tudo bem|tudo bom|td bem|tudo certo|como vai)(?![\p{L}])[\s,!.?]*/giu;
+const _PEDIDO_RE =
+  /(?<![\p{L}])(?:consigo|conseguiria|conseguem|gostaria|queria|quero|preciso|precisaria|tem|teria|d[uú]vida|pode|poderia|podem|podemos|voc[eê]s|vcs|qual|quais|quando|como|onde|posso|daria|poss[ií]vel|marcar|agendar|remarcar|desmarcar|cancelar)(?![\p{L}])/iu;
+
+/** A mensagem parada é pergunta ou pedido novo (e não saudação, agradecimento ou resposta curta)? */
+export function pareceNovaPergunta(texto: unknown): boolean {
+  const semSaudacao = String(texto ?? "").replace(_SAUDACAO_RE, " ").trim();
+  if (!semSaudacao) return false;
+  if (semSaudacao.includes("?")) return true;
+  const palavras = semSaudacao.split(/[\s/]+/).filter((p) => /[\p{L}\p{N}]/u.test(p));
+  if (palavras.length <= 3 && !_VERBO_DE_AGENDA_RE.test(semSaudacao)) return false;
+  return _PEDIDO_RE.test(semSaudacao);
+}
+
+function _diaEmSaoPaulo(ms: number): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(ms));
+}
+
+export function decidirResgate(a: {
+  agoraMs: number;
+  prazoMin: number;
+  mensagens: MensagemParaResgate[];
+  donoEhAdmin?: boolean;
+  donoNome?: string | null;
+}): DecisaoDeResgate {
+  if (!(Number(a.prazoMin) > 0)) return { resgatar: false, motivo: "desligado" };
+  if (a.donoEhAdmin) return { resgatar: false, motivo: "dono_admin" };
+  if (atendenteDeCasoLongo(a.donoNome)) return { resgatar: false, motivo: "caso_longo" };
+  const ms = [...(a.mensagens || [])].sort((x, y) => Date.parse(x.created_at) - Date.parse(y.created_at));
+  let ultimaFala = -1;
+  ms.forEach((m, i) => {
+    if (m.direction === "outgoing") ultimaFala = i;
+  });
+  const presas = ms.slice(ultimaFala + 1).filter((m) => m.direction === "incoming");
+  if (!presas.length) return { resgatar: false, motivo: "sem_mensagem_parada" };
+  for (const p of presas) {
+    const st = String(p.action_status || "");
+    if (st !== "skipped" && st !== "batched") return { resgatar: false, motivo: "julia_ja_processou" };
+    const erro = String(p.action_error || "");
+    if (erro.includes(MARCA_RESGATADA)) return { resgatar: false, motivo: "ja_resgatada" };
+    if (st === "skipped" && !_PULADA_PELA_DONA_RE.test(erro)) return { resgatar: false, motivo: "outro_motivo" };
+  }
+  if (!presas.some((p) => p.action_status === "skipped")) return { resgatar: false, motivo: "outro_motivo" };
+  const primeira = presas[0];
+  const t0 = Date.parse(primeira.created_at);
+  if (_diaEmSaoPaulo(t0) !== _diaEmSaoPaulo(a.agoraMs)) return { resgatar: false, motivo: "outro_dia" };
+  if (a.agoraMs - t0 < Number(a.prazoMin) * 60000) return { resgatar: false, motivo: "dentro_do_prazo" };
+  // No normal o resgate sai ~30 min depois. Mais de 3 h só acontece logo depois de
+  // um deploy ou com o cron parado — aí seria rajada de resposta velha ("hoje" às 19h45).
+  if (a.agoraMs - t0 > IDADE_MAXIMA_DO_RESGATE_MS) return { resgatar: false, motivo: "velha_demais" };
+  const falouHaPouco = ms.some(
+    (m) =>
+      m.direction === "outgoing" &&
+      m.ai_intent === "manual_reply" &&
+      Date.parse(m.created_at) < t0 &&
+      t0 - Date.parse(m.created_at) < CONVERSA_RECENTE_COM_ATENDENTE_MS,
+  );
+  if (falouHaPouco) return { resgatar: false, motivo: "conversa_recente_com_a_atendente" };
+  const texto = presas.map((p) => String(p.message_text || "").trim()).filter(Boolean).join("\n");
+  if (!exigeRespostaDaAtendente(texto, presas.some((p) => !!p.temMidia))) {
+    return { resgatar: false, motivo: "nao_exige_resposta" };
+  }
+  if (_AUTORRESPOSTA_RE.test(texto)) return { resgatar: false, motivo: "autorresposta" };
+  if (_NOME_DE_ATENDENTE_RE.test(texto)) return { resgatar: false, motivo: "falou_com_a_atendente" };
+  if (!pareceNovaPergunta(texto)) return { resgatar: false, motivo: "nao_e_pergunta" };
+  return { resgatar: true, ids: presas.map((p) => p.id), texto, desde: primeira.created_at };
+}

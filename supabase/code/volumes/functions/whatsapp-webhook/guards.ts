@@ -798,3 +798,91 @@ export function avisoDeEncerramento(
   if (estado.maos && !r.includes("🙏")) r += " 🙏";
   return r;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VOCATIVO ERRADO (23/09)
+// ─────────────────────────────────────────────────────────────────────────────
+// "Julia, para realizar seu cadastro..." — o paciente era o Rodrigo: o modelo
+// pegou o nome da própria Julia (da apresentação dela) e chamou o paciente
+// assim, duas vezes (23/09 18h09 e 18h10). Na véspera, a mãe que avisou
+// "Bernardo está a caminho" ouviu "Tudo bem, Bernardo!" (22/09 15h26). A regra
+// do dono (11/08) é "se não tiver um nome, não use nenhum" — o prompt já diz
+// isso e o modelo às vezes desobedece; aqui é determinístico, na resposta final.
+//
+// Só tira VOCATIVO — o nome entre vírgula/exclamação no começo do parágrafo, ou
+// depois de "Tudo bem,"/"Claro," —, nunca menção: "Eu sou a Julia, assistente
+// virtual" e "o Dr. Hugo atende" ficam como estão. Nome de terceiro só conta
+// quando o paciente o escreveu no meio da frase e em terceira pessoa ("para a
+// Laura", "Bernardo está"); quem se apresenta ("aqui é o Bernardo") e o nome do
+// próprio WhatsApp continuam valendo.
+const _semAcento = (s: string) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+
+function _nomeComoRegex(nomeSemAcento: string): string {
+  const vogais: Record<string, string> = { a: "[aáàâã]", e: "[eéê]", i: "[ií]", o: "[oóôõ]", u: "[uúü]", c: "[cç]" };
+  return nomeSemAcento
+    .split("")
+    .map((ch) => vogais[ch] || ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("");
+}
+
+const _NAO_SAO_NOMES = new Set([
+  "dr", "dra", "doutor", "doutora", "cbt", "ortopedia", "julia", "segunda", "terca", "quarta", "quinta", "sexta",
+  "sabado", "domingo", "janeiro", "fevereiro", "marco", "abril", "maio", "junho", "julho", "agosto", "setembro",
+  "outubro", "novembro", "dezembro", "bradesco", "sulamerica", "sul", "america", "porto", "seguro", "amil",
+  "unimed", "hapvida", "omint", "mediservice", "gama", "care", "plus", "whatsapp", "pix",
+]);
+
+export function corrigirVocativo(
+  texto: unknown,
+  ctx: { interlocutores?: Array<unknown>; mensagemDoPaciente?: unknown } = {},
+): string {
+  let s = String(texto ?? "");
+  if (!s) return s;
+  const primeiros = new Set<string>();
+  for (const n of ctx.interlocutores || []) {
+    const p = _semAcento(String(n ?? "").trim()).split(/\s+/)[0];
+    if (p) primeiros.add(p);
+  }
+  const original = String(ctx.mensagemDoPaciente ?? "");
+  const msg = _semAcento(original);
+  const ruins = new Set<string>();
+  if (!primeiros.has("julia")) ruins.add("julia");
+  for (const m of original.matchAll(/(?<![\p{L}])(\p{Lu}\p{Ll}{2,})(?![\p{L}])/gu)) {
+    const antes = original.slice(0, m.index ?? 0).trimEnd();
+    if (!antes || /[.!?\n]$/.test(antes)) continue; // começo de frase: maiúscula não prova nome
+    const n = _semAcento(m[1]);
+    if (primeiros.has(n) || _NAO_SAO_NOMES.has(n)) continue;
+    if (new RegExp(`\\b(?:sou|aqui e|meu nome e|me chamo|quem fala e|falando)\\s+(?:o\\s+|a\\s+)?${n}\\b`).test(msg)) continue;
+    const terceira = new RegExp(
+      `\\b(?:o|a|meu|minha|do|da|pro|pra|para o|para a|com o|com a)\\s+${n}\\b|\\b${n}\\s+(?:esta|estara|vai|foi|tem|teve|precisa|chegou|ficou|machucou|chega|sente|sentiu|nao|ja|mora|trabalha)\\b`,
+    );
+    if (terceira.test(msg)) ruins.add(n);
+  }
+  for (const n of ruins) {
+    const N = _nomeComoRegex(n);
+    // "Julia, para..." / "Bernardo! Obrigada" no começo do parágrafo → sem o nome
+    s = s.replace(
+      new RegExp(`(^|\\n)([ \\t]*)${N}[ \\t]*[,!][ \\t]*(\\S)`, "giu"),
+      (_m, a: string, b: string, c: string) => `${a}${b}${c.toUpperCase()}`,
+    );
+    // "Tudo bem, Bernardo!" → "Tudo bem!"
+    s = s.replace(new RegExp(`,[ \\t]*${N}[ \\t]*([!.?])`, "giu"), "$1");
+    // "Claro, Laura, vou" → "Claro, vou"
+    s = s.replace(new RegExp(`,[ \\t]*${N}[ \\t]*,`, "giu"), ",");
+  }
+  return s;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RESGATE: a resposta que chega depois de 30 min pede desculpa uma vez (23/09)
+// ─────────────────────────────────────────────────────────────────────────────
+export const DESCULPA_PELA_DEMORA = "Desculpe a demora para te responder! 🙏";
+
+export function comDesculpasPelaDemora(texto: unknown): string {
+  const s = String(texto ?? "");
+  if (!s.trim()) return s;
+  if (/desculp\w*\s+(?:a|pela)\s+demora/i.test(s)) return s;
+  const saudacao = /^((?:Bom dia|Boa tarde|Boa noite|Ol[áa]|Oi)[^\n]*\n\n)/i.exec(s);
+  if (saudacao) return `${saudacao[1]}${DESCULPA_PELA_DEMORA}\n\n${s.slice(saudacao[1].length)}`;
+  return `${DESCULPA_PELA_DEMORA}\n\n${s}`;
+}

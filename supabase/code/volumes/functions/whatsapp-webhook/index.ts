@@ -57,6 +57,14 @@ import {
   horaDoSlot,
   mesmoMedico,
   slotJaPassou,
+  podeCancelarSemPerguntar,
+  textoPerguntaCancelar,
+  pedidoDeNovaMarcacao,
+  filtrarPeloPeriodo,
+  textoSemHorarioNoPeriodo,
+  textoDoLimiteDeAtendimentos,
+  consultaParaOutraPessoa,
+  cpfDigitadoNaConversa,
 } from "./helpers.ts";
 import type { JanelaDeDatas } from "./helpers.ts";
 import { tryFetch } from "./amigoApi.ts";
@@ -93,7 +101,10 @@ import {
   textoDaAcaoParaOPaciente,
   marcacaoRecenteDaConversa,
   repeteMarcacaoRecente,
+  corrigirVocativo,
+  comDesculpasPelaDemora,
 } from "./guards.ts";
+import { chamadaDeCronAutorizada } from "../_shared/cron.ts";
 import {
   readPatientInsurance,
   describeInsuranceShape,
@@ -3815,8 +3826,26 @@ async function executeAction(
           );
           entities.time = "";
         }
+        // CONSULTA PARA OUTRA PESSOA (23/09, caso Karina — ver consultaParaOutraPessoa em
+        // helpers.ts). "teria um horário para atender minha filha?" e, no dia seguinte,
+        // "Se ainda tiver na sexta às 15h": a Julia tentou marcar no CPF da MÃE, que o
+        // cache achou pelo telefone. Quando a conversa diz que a consulta é de outra
+        // pessoa, o CPF que o paciente NÃO digitou (cache, telefone, busca antiga) é do
+        // dono do telefone e não vale: a Julia segura o horário e pede nome completo e
+        // CPF de quem vai ser atendido. A mensagem mais recente decide ("agora é para mim").
+        const _textosDoPaciente = [
+          ...(recentMessages || []).filter((m: any) => m?.role === "user").map((m: any) => String(m?.content || "")),
+          String(currentMessageText || ""),
+        ];
+        const _paraOutra = consultaParaOutraPessoa(_textosDoPaciente);
+        if (_paraOutra && entities.cpf && !cpfDigitadoNaConversa(entities.cpf, _textosDoPaciente)) {
+          console.log(
+            `[Webhook] agendar - consulta para ${_paraOutra.comArtigo}: descartando o CPF que o paciente não digitou (${String(entities.cpf).slice(0, 3)}***)`,
+          );
+          entities.cpf = "";
+        }
         // Step 1: Check CPF - try to identify by phone first
-        if (!entities.cpf && senderPhone && supabaseClient) {
+        if (!entities.cpf && senderPhone && supabaseClient && !_paraOutra) {
           // PRIORITY: Check conversation history for previously provided CPF before phone lookup
           const conversationForPhone = await supabaseClient
             .from("chat_conversations")
@@ -4450,6 +4479,11 @@ async function executeAction(
                 // (um médico, multi-data) já cortavam; este não — às 22h58 de 21/09
                 // a busca por "joelho" ofereceu "21/09 (segunda): 17:20".
                 const _agMulti = agoraSP();
+                // MANHÃ/TARDE (23/09, Deia e Mari): o período pedido filtra os HORÁRIOS
+                // antes do teto por médico. Sem isto a lista enchia com as primeiras datas
+                // (todas à tarde) e a Julia respondia "não encontrei de manhã" — havia
+                // 07/10 às 08h40. Ver filtrarPeloPeriodo (helpers.ts).
+                const _perMulti = entities.preferred_period === "manha" || entities.preferred_period === "tarde" ? entities.preferred_period : "";
                 const _availIso = (availDates as string[]).map((dateStr) => {
                   if (dateStr.includes("/")) {
                     const [d, m, y] = dateStr.split("/");
@@ -4457,15 +4491,16 @@ async function executeAction(
                   }
                   return dateStr;
                 });
-                const _montarDoc = (datas: string[]): Array<{ date: string; label: string; times: string[] }> => {
+                const _montarDoc = (datas: string[], comPeriodo = true): Array<{ date: string; label: string; times: string[] }> => {
                   const docSlots: Array<{ date: string; label: string; times: string[] }> = [];
                   let totalSlots = 0;
                   for (const isoDate of datas) {
                     if (totalSlots >= MAX_SLOTS_PER_DOCTOR) break;
                     const slots = (slotsMap.get(isoDate) || []).filter((t) => !slotJaPassou(isoDate, t, _agMulti));
-                    if (slots.length === 0) continue;
+                    const slotsDoPeriodo = comPeriodo ? filtrarPeloPeriodo(slots, _perMulti) : slots;
+                    if (slotsDoPeriodo.length === 0) continue;
                     const remaining = MAX_SLOTS_PER_DOCTOR - totalSlots;
-                    const taken = slots.slice(0, remaining);
+                    const taken = slotsDoPeriodo.slice(0, remaining);
                     totalSlots += taken.length;
                     // Format date label
                     const parts = isoDate.split("-").map(Number);
@@ -4480,11 +4515,13 @@ async function executeAction(
                 // guardada para o caso de nenhum médico ter horário na janela.
                 const _jbMulti = _janela && !_janela.qualquerData ? _janela : null;
                 const docSlots = _montarDoc(filtrarDatasPelaJanela(_availIso, _jbMulti));
+                // degrau do período: há vaga na janela, só não no período pedido
+                const slotsSemPeriodo = _perMulti ? _montarDoc(filtrarDatasPelaJanela(_availIso, _jbMulti), false) : docSlots;
                 const slotsSemJanela = _jbMulti ? _montarDoc(_availIso) : docSlots;
 
-                if (docSlots.length > 0 || slotsSemJanela.length > 0) {
+                if (docSlots.length > 0 || slotsSemPeriodo.length > 0 || slotsSemJanela.length > 0) {
                   const sub = subspecialtyMap.get(String(doc.id)) || "";
-                  return { docName: (doc.name as string) || "Médico", docId: String(doc.id), sub, slots: docSlots, slotsSemJanela };
+                  return { docName: (doc.name as string) || "Médico", docId: String(doc.id), sub, slots: docSlots, slotsSemPeriodo, slotsSemJanela };
                 }
               } catch (e) {
                 console.log(`[Webhook] Error fetching schedule for doctor ${doc.id}: ${e.message}`);
@@ -4496,13 +4533,21 @@ async function executeAction(
             // nenhum médico tem horário na janela → mostra o que há, com o aviso
             const _jbMulti = _janela && !_janela.qualquerData ? _janela : null;
             let _nivelMulti: 1 | 2 | 3 = 1;
-            if (_jbMulti && !results.some((r) => r && r.slots.length > 0)) {
+            // nenhum médico tem o período pedido na janela, mas há vaga em outro período
+            const _perMultiPedido = entities.preferred_period === "manha" || entities.preferred_period === "tarde" ? entities.preferred_period : "";
+            const _semPeriodoMulti =
+              !!_perMultiPedido &&
+              !results.some((r) => r && r.slots.length > 0) &&
+              results.some((r) => r && r.slotsSemPeriodo.length > 0);
+            if (_semPeriodoMulti) {
+              console.log(`[Janela] vários médicos: nenhum horário de ${_perMultiPedido} — mostrando os de outro período, com aviso`);
+            } else if (_jbMulti && !results.some((r) => r && r.slots.length > 0)) {
               _nivelMulti = _jbMulti.inicio || _jbMulti.fim || _jbMulti.datas ? 2 : 3;
               console.log(`[Janela] vários médicos: nenhum médico tem horário na janela "${_jbMulti.rotulo}" ${_jbMulti.rotuloDias} — mostrando o que há (nível ${_nivelMulti})`);
             }
             for (const r of results) {
               if (!r) continue;
-              const slots = _nivelMulti === 1 ? r.slots : r.slotsSemJanela;
+              const slots = _semPeriodoMulti ? r.slotsSemPeriodo : _nivelMulti === 1 ? r.slots : r.slotsSemJanela;
               if (slots.length > 0) allSchedules.push({ ...r, slots });
             }
 
@@ -4537,19 +4582,31 @@ async function executeAction(
               const extraNote = extraCount > 0
                 ? `\n(Temos mais ${extraCount} especialistas com agenda — me diga a região do corpo que eu filtro pra você! 😊)\n\n`
                 : "";
+              if (_semPeriodoMulti) {
+                const _corpoPer = `${lines.join("\n")}${extraNote}`.trimEnd();
+                const _rotPer = _jbMulti ? `${_jbMulti.rotulo || ""}${_jbMulti.rotuloDias ? ` ${_jbMulti.rotuloDias}` : ""}`.trim() : "";
+                const msgPeriodo = textoSemHorarioNoPeriodo({
+                  periodo: _perMultiPedido,
+                  quem: entities.subspecialty ? `os especialistas em ${entities.subspecialty}` : "os especialistas",
+                  rotulo: _rotPer,
+                  corpo: _corpoPer,
+                });
+                return { status: "needs_info", response: msgPeriodo, error: msgPeriodo, verifiedSchedule: true, bypassAiRewrite: true } as any;
+              }
               if (_jbMulti && _nivelMulti > 1) {
                 const _corpo = `${lines.join("\n")}${extraNote}`.trimEnd();
                 const msgJanela = textoHorariosNaJanela({
                   nivel: _nivelMulti,
                   medico: entities.subspecialty ? `os especialistas em ${entities.subspecialty}` : "os especialistas",
                   janela: _jbMulti,
-                  periodo: "",
+                  periodo: _perMultiPedido,
                   corpo: _corpo,
                 });
                 return { status: "needs_info", response: msgJanela, error: msgJanela, verifiedSchedule: true, bypassAiRewrite: true } as any;
               }
               const _rotJanela = _jbMulti ? `${_jbMulti.rotulo ? ` ${_jbMulti.rotulo}` : ""}${_jbMulti.rotuloDias ? ` ${_jbMulti.rotuloDias}` : ""}` : "";
-              const msg = `Encontrei estes especialistas com disponibilidade${_rotJanela}:\n\n${lines.join("\n")}${extraNote}Qual médico e horário prefere?`;
+              const _rotPeriodo = _perMultiPedido === "manha" ? " de manhã" : _perMultiPedido === "tarde" ? " à tarde" : "";
+              const msg = `Encontrei estes especialistas com disponibilidade${_rotJanela}${_rotPeriodo}:\n\n${lines.join("\n")}${extraNote}Qual médico e horário prefere?`;
               return { status: "needs_info", response: msg, error: msg, verifiedSchedule: true } as any;
             }
           }
@@ -5628,8 +5685,18 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
 
         // If CPF is already known (from phone lookup or conversation memory), skip asking
         if (!entities.cpf) {
-          const patientRef = entities.patient_full_name ? `de ${entities.patient_full_name}` : "seu";
-          const cpfRef = entities.patient_full_name ? `do(a) ${entities.patient_full_name}` : "seu";
+          // Quem é a consulta: o nome dado, "para a sua filha" (outra pessoa), ou nada.
+          // Antes saía "com Dr. X seu por 3 minutos … me passa o CPF seu?".
+          const patientRef = entities.patient_full_name
+            ? `de ${entities.patient_full_name}`
+            : _paraOutra
+              ? `para ${_paraOutra.comArtigo}`
+              : "";
+          const _pedidoDoCpf = entities.patient_full_name
+            ? `o CPF do(a) ${entities.patient_full_name}`
+            : _paraOutra
+              ? `o nome completo e o CPF ${_paraOutra.pronome}`
+              : "o seu CPF";
           // FIX (<paciente> <telefone-removido>): NÃO afirmar "agendado/confirmado" antes do POST real
           // no Amigo. Apenas reservar o horário (slot_lock já criado acima por 3 min) e
           // pedir o CPF. A confirmação real só acontece depois do POST com sucesso.
@@ -5662,8 +5729,8 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           // o dedup de pergunta de CPF mais adiante.
           const _msgReserva =
             `Estou segurando o horário das ${entities.time} do dia ${formatDateLabel(entities.date)} ` +
-            `com ${doctorName || "o médico"} ${patientRef} por 3 minutos — ainda *não* está confirmado. ` +
-            `Para fechar, me passa o CPF ${cpfRef}?`;
+            `com ${doctorName || "o médico"}${patientRef ? ` ${patientRef}` : ""} por 3 minutos — ainda *não* está confirmado. ` +
+            `Para fechar, me passa ${_pedidoDoCpf}?`;
           return {
             status: "needs_info",
             response: _msgReserva,
@@ -6385,10 +6452,34 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         // Check if it's a "Limite de atendimentos" error — inform patient clearly and transfer to human
         const errorStr = JSON.stringify(createResult.data).toLowerCase();
         if (errorStr.includes("limite") && errorStr.includes("atendimento")) {
-          console.log("[Webhook] ⚠️ Limite de atendimento error detected — informing patient and transferring");
-          
-          // Try to transfer to human for manual resolution
-          if (avanceaiConfig && senderPhone) {
+          console.log("[Webhook] ⚠️ Limite de atendimento error detected — lendo as consultas do paciente");
+
+          // O TEXTO CERTO PARA O TETO DO AMIGO (23/09, caso Karina — ver
+          // textoDoLimiteDeAtendimentos em helpers.ts). Antes a Julia citava a consulta
+          // MAIS ANTIGA do paciente ("você já tem uma consulta marcada para 31/08" — que
+          // já tinha passado; a que pesava era a de 15/09) e transferia sempre. O teto NÃO
+          // é "uma por mês" (a Julia marcou a segunda do mês para 4 pacientes); em 11 de 13
+          // bloqueios havia consulta até 16 dias antes, e em 4 era a própria marcação
+          // repetida (o site já tinha marcado). Agora: mesmo dia → confirma a que existe e
+          // NÃO transfere; futura → cita e oferece trocar; recente → cita a última e passa
+          // para a equipe; nada → texto neutro. Vai literal (caso Maria Inês, 02/09: o
+          // modelo inventou "limite de vagas para esse horário").
+          let _atendimentosDoPaciente: Array<Record<string, unknown>> = [];
+          try {
+            const _attRes = await tryFetch(`attendances/${patId}?company_id=${companyId}`, amigoToken);
+            const _attList = normalizeApiResponse(_attRes) as Array<Record<string, unknown>>;
+            _atendimentosDoPaciente = Array.isArray(_attList) ? _attList : [];
+          } catch (e) {
+            console.log(`[Webhook] limite - não consegui ler as consultas do paciente (não bloqueante): ${(e as Error).message}`);
+          }
+          const _limite = textoDoLimiteDeAtendimentos({
+            atendimentos: _atendimentosDoPaciente,
+            dataPedida: String(entities.date || ""),
+            hoje: getTodayISO_SP(),
+          });
+          console.log(`[Webhook] limite - situação=${_limite.tipo} transferir=${_limite.transferir}`);
+
+          if (_limite.transferir && avanceaiConfig && senderPhone) {
             try {
               let formattedPhone = senderPhone.replace(/\D/g, "");
               if (!formattedPhone.startsWith("55")) formattedPhone = "55" + formattedPhone;
@@ -6404,43 +6495,10 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               console.log(`[Webhook] Limite transfer error (non-blocking): ${(transferErr as Error).message}`);
             }
           }
-          
-          // O texto antigo dizia "limite atingido para esse HORÁRIO/PROFISSIONAL" e ia
-          // como `error` com response vazio — o LLM reescreveu para "atingimos o limite
-          // de vagas automáticas para esse horário" (02/09 16:59, caso Maria Inês). As
-          // duas versões estão erradas: o limite do Amigo é por CPF, não por vaga nem
-          // por médico, e a paciente ficou achando que o horário tinha acabado.
-          // Agora diz o que de fato aconteceu, nomeia a consulta que ela já tem, e vai
-          // literal para o LLM não reinventar a causa.
-          let _consultaQueJaTem = "";
-          try {
-            const _attRes = await tryFetch(`attendances/${patId}?company_id=${companyId}`, amigoToken);
-            const _attList = normalizeApiResponse(_attRes) as Array<Record<string, unknown>>;
-            const _viva = (Array.isArray(_attList) ? _attList : [])
-              .filter((a) => a.canceled !== true && String(a.status || "").toLowerCase() !== "cancelled")
-              .map((a) => String(a.start_date || a.date || ""))
-              .filter(Boolean)
-              .sort()[0];
-            if (_viva) {
-              const _dia = _viva.split(" ")[0].split("T")[0];
-              const _hora = _viva.includes("T")
-                ? _viva.split("T")[1]?.substring(0, 5)
-                : _viva.split(" ")[1]?.substring(0, 5);
-              _consultaQueJaTem =
-                ` Vi aqui que você já tem uma consulta marcada para *${formatDateLabel(_dia)}*` +
-                `${_hora ? ` às *${_hora}*` : ""}.`;
-            }
-          } catch (e) {
-            console.log(`[Webhook] limite - não consegui ler a consulta existente (não bloqueante): ${(e as Error).message}`);
-          }
-          const _msgLimite =
-            `Não consegui concluir esse agendamento: o sistema da clínica não aceitou uma segunda ` +
-            `marcação para o seu CPF.${_consultaQueJaTem} Já chamei uma atendente — se você quiser ` +
-            `*remarcar* a consulta que já existe, ela resolve rapidinho. 🙏`;
           return {
             status: "success",
-            response: _msgLimite,
-            error: _msgLimite,
+            response: _limite.texto,
+            error: _limite.texto,
             bypassAiRewrite: true,
           };
         }
@@ -6462,6 +6520,8 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         }
 
         let attId = entities.attendance_id;
+        // a consulta que o lookup escolheu — dá data, hora e médico à pergunta de antes do PUT
+        let _attEscolhido: Record<string, unknown> | null = null;
         // Validate attendance_id is numeric
         if (attId && !/^\d+$/.test(attId)) {
           console.log("[Webhook] Invalid attendance_id (not numeric), falling back to CPF lookup: " + attId);
@@ -6535,6 +6595,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                 console.log("[Webhook] cancelar - Final upcoming: " + upcoming.length);
                 if (upcoming.length === 1) {
                   attId = String(upcoming[0].id);
+                  _attEscolhido = upcoming[0];
                   console.log("[Webhook] cancelar - Single match, selected attendance ID: " + attId);
                 } else if (upcoming.length > 1) {
                   // Multiple candidates — list and ask which one. Auto-selecting [0]
@@ -6563,6 +6624,47 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         if (!attId) {
           // "Não encontrei" não é instabilidade (19/09) — texto fixo, ver helpers.ts
           return { status: "failed", response: TEXTO_SEM_CONSULTA_PARA_CANCELAR, error: "Agendamento não encontrado para cancelar", bypassAiRewrite: true } as any;
+        }
+
+        // CANCELAR SÓ COM PEDIDO (23/09, caso Adriana — ver podeCancelarSemPerguntar em
+        // helpers.ts). "Meu filho passou muito mal / Preciso cuidar dele" cancelou a
+        // consulta do dia sem a palavra "cancelar"; o "preciso remarcar" chegou 14 s
+        // depois e já não achou consulta. Sem pedido explícito (agora, antes, ou o "sim"
+        // à pergunta da Julia), NADA é cancelado: a Julia pergunta, dizendo qual consulta,
+        // e oferece remarcar. Sai literal — o modelo não pode transformar a pergunta em
+        // "cancelei".
+        {
+          const _doPaciente = (recentMessages || [])
+            .filter((m: any) => m?.role === "user")
+            .map((m: any) => String(m?.content || ""));
+          const _ultimaDaJulia =
+            [...(recentMessages || [])].reverse().find((m: any) => m?.role === "assistant")?.content || "";
+          if (
+            !podeCancelarSemPerguntar({
+              atual: currentMessageText,
+              anterioresDoPaciente: _doPaciente,
+              ultimaDaJulia: _ultimaDaJulia,
+            })
+          ) {
+            const _quandoBruto = String(_attEscolhido?.start_date || _attEscolhido?.date || "");
+            const _userDoAtt = _attEscolhido?.user as Record<string, unknown> | undefined;
+            const _pergunta = textoPerguntaCancelar({
+              dataISO: _quandoBruto.slice(0, 10),
+              hora: /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(_quandoBruto) ? _quandoBruto.slice(11, 16) : "",
+              medico: String(_attEscolhido?.doctor_name || _attEscolhido?.user_name || _userDoAtt?.name || ""),
+              hojeISO: getTodayISO_SP(),
+            });
+            console.log(
+              `[Webhook] cancelar - sem pedido explícito ("${String(currentMessageText || "").slice(0, 60)}") — perguntando antes do PUT (attId=${attId})`,
+            );
+            return {
+              status: "needs_info",
+              response: _pergunta,
+              error: _pergunta,
+              bypassAiRewrite: true,
+              schedulingContext: { attendance_id: String(attId) },
+            } as any;
+          }
         }
 
         const cancelResult = await tryFetch(
@@ -11196,6 +11298,31 @@ Deno.serve(async (req) => {
       });
     }
 
+    // ── RESGATE DA MENSAGEM PARADA (23/09) ──────────────────────────────────────
+    // A Fase 5 do human-transfer-timeout reenvia a mensagem que ficou parada (pulada
+    // pela guarda de humano, 30 min sem ninguém da equipe responder) com a marca
+    // `__resgate`. Aqui ela vira a mensagem do paciente e a guarda NÃO roda — o cron
+    // já conferiu o prazo; antes de responder, conferimos de novo se alguém falou.
+    // Só com o segredo do cron: sem ele, qualquer um furaria a guarda de humano.
+    // Ver decidirResgate em _shared/atendimento.ts.
+    const _resgateBruto = (payload as any)?.__resgate;
+    let _resgate: { ids: string[]; texto: string; desde: string } | null = null;
+    if (_resgateBruto) {
+      if (!chamadaDeCronAutorizada(req, Deno.env.get("CRON_SECRET"), Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"))) {
+        console.log("[Resgate] __resgate sem o segredo do cron — recusado");
+        return new Response(JSON.stringify({ error: "Unauthorized" }), {
+          status: 401,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      _resgate = {
+        ids: Array.isArray(_resgateBruto.ids) ? _resgateBruto.ids.map((x: unknown) => String(x)) : [],
+        texto: String(_resgateBruto.texto || ""),
+        desde: String(_resgateBruto.desde || ""),
+      };
+      console.log(`[Resgate] mensagem parada desde ${_resgate.desde} (${_resgate.ids.length} msg) — a Julia vai responder`);
+    }
+
     const extracted = extractMessageFields(payload);
     const {
       phone,
@@ -11451,6 +11578,8 @@ Deno.serve(async (req) => {
     }
 
     let messageStr = typeof message === "string" ? message : String(message || "");
+    // resgate: o texto é o das mensagens paradas juntas ("Olá tudo bem?\nConsigo ... hoje")
+    if (_resgate) messageStr = _resgate.texto || messageStr;
     if (!messageStr && (mediaUrl || audioBase64FromTest) && !isMediaMessage) {
       isAudioMessage = true;
       messageStr = "[🎤 Áudio recebido - aguardando transcrição]";
@@ -12412,7 +12541,28 @@ Deno.serve(async (req) => {
       // Z-PRO often creates a NEW "pending" ticket even when a human is actively working on the
       // previous ticket; the manual_reply and DB-history signals catch that case before we waste
       // a showticket API call.
-      {
+      if (_resgate && conversationId) {
+        // conferência final do resgate: alguém falou com o paciente depois da parada?
+        const { data: _falouDepois } = await supabase
+          .from("webhook_messages")
+          .select("id")
+          .eq("conversation_id", conversationId)
+          .eq("direction", "outgoing")
+          .gt("created_at", _resgate.desde || new Date(0).toISOString())
+          .limit(1);
+        if (_falouDepois && _falouDepois.length > 0) {
+          console.log("[Resgate] resgate cancelado: alguém respondeu depois da mensagem parada");
+          await supabase
+            .from("webhook_messages")
+            .update({ action_status: "skipped", action_error: "resgate cancelado: alguém respondeu" })
+            .eq("id", messageId);
+          return new Response(JSON.stringify({ status: "skipped", reason: "resgate_ja_respondido" }), {
+            status: 200,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+      }
+      if (!_resgate) {
         const payloadTicketSec = payload.ticket as Record<string, unknown> | undefined;
         if (payloadTicketSec && String(payloadTicketSec.status || "") === "pending" && payloadTicketSec.isCreated) {
           console.log(
@@ -14009,7 +14159,7 @@ Deno.serve(async (req) => {
         } else if (currentConvState.current_state === "slot_search") {
           stateMsg += `IA mostrou horários disponíveis. Resposta com data+hora preenche o agendamento - intent "agendar".`;
         } else if (currentConvState.current_state === "cancel_pending") {
-          stateMsg += `IA pediu para o paciente escolher qual agendamento cancelar. Número ou ID = intent "cancelar" com attendance_id.`;
+          stateMsg += `IA pediu para o paciente escolher qual agendamento cancelar. Número ou ID = intent "cancelar" com attendance_id. Se a IA perguntou "Quer que eu cancele...?": "sim"/"pode"/"cancela" = intent "cancelar"; "remarcar"/"outro dia"/data nova = intent "reagendar"; "não" = intent "unknown".`;
         } else if (currentConvState.current_state === "reschedule_search") {
           stateMsg += `Reagendamento em curso. Resposta com data/hora = intent "reagendar".`;
         } else if (currentConvState.current_state === "booking_created") {
@@ -14885,7 +15035,15 @@ Deno.serve(async (req) => {
           // of preventing duplicate bookings right after a successful one.
           const msgLowerGuard = finalMessage.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
           const hasNaturalDateRef = /\b(dia\s+\d{1,2}|semana\s+(do|que|de)|proxim[ao]\s+(semana|segunda|terca|quarta|quinta|sexta|sabado|domingo|dia|mes)|outr[ao]\s+(data|dia|semana)|outro\s+dia|na\s+(segunda|terca|quarta|quinta|sexta|sabado|domingo))\b/i.test(msgLowerGuard);
-          const hasExplicitNewBooking = hasNewDoctor || hasNewDate || hasNaturalDateRef;
+          // Data em palavras ("amanhã", "sexta", "outubro") pelo leitor da janela de datas,
+          // e, depois de CANCELAR, "quero marcar outra" mesmo sem data (23/09, Adriana:
+          // "É possível agendar para amanhã?" virou unknown e a Julia prometeu "já te
+          // informo" duas vezes, sem buscar nada). Ver pedidoDeNovaMarcacao (helpers.ts).
+          const hasExplicitNewBooking =
+            hasNewDoctor ||
+            hasNewDate ||
+            hasNaturalDateRef ||
+            pedidoDeNovaMarcacao(finalMessage, getTodayISO_SP(), !!recentCancelInvalidatesContext);
 
           if (!hasExplicitNewBooking) {
             console.log(
@@ -16461,6 +16619,21 @@ Deno.serve(async (req) => {
           console.log(`[ClosedDays] notice error (non-blocking): ${(e as Error).message}`);
         }
 
+        // === VOCATIVO ERRADO (23/09) — ver corrigirVocativo (guards.ts) ===
+        // "Julia, para realizar seu cadastro..." para o Rodrigo; "Tudo bem, Bernardo!"
+        // para a mãe do Bernardo. Roda ANTES da saudação fria (que traz "Eu sou a
+        // Julia," — e essa menção nunca é mexida). Interlocutor = quem escreve: o nome
+        // do WhatsApp e o caller_name; NÃO o paciente achado pelo telefone, que pode
+        // ser o filho de quem escreve.
+        try {
+          replyText = corrigirVocativo(replyText, {
+            interlocutores: [name, (classification as any)?.caller_name],
+            mensagemDoPaciente: finalMessage,
+          });
+        } catch (e) {
+          console.log(`[Vocativo] erro (não bloqueante): ${(e as Error).message}`);
+        }
+
         // === SAUDACAO DE PRIMEIRO CONTATO (avaliacao 06/07) ===
         // Paciente abria a conversa com "boa tarde, quero marcar com o Dr. X" e a
         // resposta deterministica ("Horários disponíveis com...") saia SECA. Se a
@@ -16492,6 +16665,9 @@ Deno.serve(async (req) => {
         } catch (e) {
           console.log(`[ColdGreeting] check error (non-blocking): ${(e as Error).message}`);
         }
+
+        // resgate: a resposta chega 30+ min depois — pede desculpa uma vez, depois da saudação
+        if (_resgate) replyText = comDesculpasPelaDemora(replyText);
 
         // === SHADOW MODE: register conversation state transition based on outcome ===
         // This is observation only — the rest of the pipeline still infers state from
@@ -16591,7 +16767,9 @@ Deno.serve(async (req) => {
           console.log("[Webhook] Test mode: reply saved to DB without WhatsApp delivery");
         } else {
           // ── REVALIDATE TICKET before sending AI reply ──
-          if (avanceaiBaseUrl && avanceaiApiId && avanceaiBearerToken && phone) {
+          // No resgate o ticket AINDA pode estar "open" com a atendente calada — é
+          // justamente o caso que o resgate existe para atender (o cron conferiu o prazo).
+          if (!_resgate && avanceaiBaseUrl && avanceaiApiId && avanceaiBearerToken && phone) {
             const replyTicketCheck = await checkTicketIsHumanOwned(
               avanceaiBaseUrl,
               avanceaiApiId,
@@ -16625,8 +16803,12 @@ Deno.serve(async (req) => {
           // esta resposta conversacional está velha — não envia. Colapsa a rajada em UMA
           // resposta. Deadlock-free: esta msg já não está "pending", então a mais nova
           // sempre responde. NUNCA suprime confirmações (success) nem transferências.
+          // needs_registration também (23/09, Rodrigo 18h09): "Queria aplicar ácido
+          // hialurônico" e "Com o Dr. HUGO" chegaram com 11 s de diferença, cada uma
+          // respondeu — uma pedindo o cadastro inteiro, a outra dizendo que a Lidiane
+          // agenda. A pergunta de cadastro é conversa: a mais nova responde por ela.
           const _isConversationalReply =
-            actionResult.status === "needs_info" || actionResult.status === "unknown_intent";
+            actionResult.status === "needs_info" || actionResult.status === "unknown_intent" || actionResult.status === "needs_registration";
           if (_isConversationalReply && conversationId && (msgRecord as any)?.created_at) {
             try {
               const _since90 = new Date(Date.now() - 90 * 1000).toISOString();
