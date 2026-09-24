@@ -13,6 +13,8 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 import { chamadaDeCronAutorizada } from "../_shared/cron.ts";
+import { situacaoDoTicket } from "../_shared/zpro.ts";
+import { CATEGORIA_ABANDONO, ehPerguntaDeAgenda, textoDaRecuperacao } from "../_shared/recuperacao.ts";
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-cron-secret",
@@ -25,6 +27,11 @@ const DELAY_PRICE_MIN = 240;    // pergunta de preço: follow-up 4h depois
 const QUIET_HOUR_START = 20;    // sem mensagens 20h–7h (SP) — só a fase de ENVIO respeita
 const QUIET_HOUR_END = 7;
 const ACTIVE_CONV_MIN = 120;    // conversa com incoming < 2h → adia (não interromper)
+// C) parou de responder no meio da marcação (23/09 — o antigo "resgate de 24 h"):
+// pergunta de agenda da Julia sem NENHUMA mensagem depois por 20 h. Mais velha que
+// 36 h já seria skipped_stale no envio (STALE_SEND_H), então nem entra.
+const ABANDONO_H = 20;
+const ABANDONO_LOOKBACK_H = 36;
 
 function getNowSPHour(): number {
   const fmt = new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", hour12: false });
@@ -131,10 +138,6 @@ async function resolveSendTarget(
   return null; // multi-canal e não sabemos o canal do paciente: não enviar errado
 }
 
-function firstName(n: string | null | undefined): string {
-  return String(n || "").trim().split(/\s+/)[0] || "";
-}
-
 async function sendWhats(
   creds: { avanceai_base_url: string; avanceai_api_id: string; avanceai_bearer_token: string },
   phone: string,
@@ -167,30 +170,9 @@ async function sendWhats(
   }
 }
 
-// Ticket open COM agente humano real (paridade com process-waitlist/avanceai.ts).
-async function isTicketHumanActive(baseUrl: string, apiId: string, bearerToken: string, phone: string): Promise<boolean> {
-  try {
-    const clean = phone.replace(/\D/g, "");
-    const full = clean.length <= 11 ? `55${clean}` : clean;
-    const controller = new AbortController();
-    const t = setTimeout(() => controller.abort(), 5000);
-    const res = await fetch(`${baseUrl}/v2/api/external/${apiId}/showticket`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${bearerToken}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ number: full }),
-      signal: controller.signal,
-    });
-    clearTimeout(t);
-    if (res.ok) {
-      const data = await res.json();
-      const status = String(data?.status || "");
-      const userId = Number(data?.userId ?? data?.user?.id ?? 0);
-      const userName = String(data?.user?.name || "").trim();
-      return status === "open" && (userId > 0 || userName.length > 0);
-    }
-  } catch (_) { /* fail-safe: não bloquear por falha do showticket */ }
-  return false;
-}
+// A conferência de ticket saiu daqui (23/09): lia `status` na RAIZ da resposta do
+// showticket, e o Z-PRO devolve {success, data:{status}} — nunca viu atendente.
+// Agora é a situacaoDoTicket de _shared/zpro.ts, com o canal do paciente.
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
@@ -313,6 +295,36 @@ Deno.serve(async (req) => {
       seen.add(key);
       candidates.push({ ...r, category: "pergunta_preco", delayMin: DELAY_PRICE_MIN });
     }
+    // C) Parou de responder no meio da marcação (ver _shared/recuperacao.ts). A
+    // última coisa da conversa é uma pergunta de agenda da Julia — lista de
+    // horários, reserva, pedido de CPF ou de cadastro, link do site — de 20 a 36 h
+    // atrás. O detected_at é a pergunta: o due (+20 h) já venceu e o stale conta dela.
+    const { data: perguntas } = await supabase
+      .from("webhook_messages")
+      .select("conversation_id, sender_phone, sender_name, clinic_token_id, user_id, created_at, ai_intent, action_status, message_text")
+      .eq("direction", "outgoing")
+      .in("ai_intent", ["agendar", "reagendar", "cadastrar", "widget_link_sent"])
+      .gte("created_at", new Date(Date.now() - ABANDONO_LOOKBACK_H * 3600_000).toISOString())
+      .lte("created_at", new Date(Date.now() - ABANDONO_H * 3600_000).toISOString())
+      .order("created_at", { ascending: false })
+      .limit(150);
+    for (const r of (perguntas || []) as Array<Cand & { ai_intent: string; action_status: string }>) {
+      const key = `${r.conversation_id}|${CATEGORIA_ABANDONO}`;
+      if (!r.conversation_id || !r.sender_phone || seen.has(key) || !ehPerguntaDeAgenda(r)) continue;
+      // a conversa já é caso de falha ou de preço nesta rodada: um follow-up só
+      if (seen.has(`${r.conversation_id}|falha_agendamento`) || seen.has(`${r.conversation_id}|pergunta_preco`)) continue;
+      seen.add(key); // a pergunta mais nova da conversa decide; as antigas não contam
+      // silêncio total depois da pergunta: qualquer mensagem (do paciente, da equipe,
+      // de sistema, do lembrete do link) desfaz o caso — a marcação não parou ali
+      const { data: depois } = await supabase
+        .from("webhook_messages")
+        .select("id")
+        .eq("conversation_id", r.conversation_id)
+        .gt("created_at", r.created_at)
+        .limit(1);
+      if (depois && depois.length > 0) continue;
+      candidates.push({ ...r, category: CATEGORIA_ABANDONO, delayMin: ABANDONO_H * 60 });
+    }
 
     for (const c of candidates) {
       try {
@@ -391,7 +403,7 @@ Deno.serve(async (req) => {
 
   const { data: dueRows } = await supabase
     .from("lost_conversions")
-    .select("id, clinic_token_id, conversation_id, phone, patient_name, category, detected_at, clinic_tokens:clinic_token_id (avanceai_base_url, avanceai_api_id, avanceai_bearer_token, avanceai_active_channel, user_id, lost_recovery_enabled)")
+    .select("id, clinic_token_id, conversation_id, phone, patient_name, category, detected_at, clinic_tokens:clinic_token_id (avanceai_base_url, avanceai_api_id, avanceai_bearer_token, avanceai_active_channel, user_id, lost_recovery_enabled, recovery_enabled)")
     .eq("status", "pending")
     .lte("followup_due_at", nowIso)
     .order("followup_due_at", { ascending: true }) // FIFO: linha presa não afoga as demais
@@ -434,6 +446,9 @@ Deno.serve(async (req) => {
       // Interruptor por clínica (revisão 19/07): desligar = UPDATE clinic_tokens
       // SET lost_recovery_enabled = false. Detecção continua (painel), envio para.
       if (creds.lost_recovery_enabled === false) continue;
+      // A categoria nova tem o botão do antigo resgate de 24 h: desligar só ela =
+      // UPDATE clinic_tokens SET recovery_enabled = false. Detecção continua (painel).
+      if (r.category === CATEGORIA_ABANDONO && creds.recovery_enabled !== true) continue;
 
       // Re-checagens frescas na hora do envio:
       if (await hasBookingSince(r.clinic_token_id, r.phone, r.detected_at, r.conversation_id)) {
@@ -482,8 +497,15 @@ Deno.serve(async (req) => {
         await supabase.from("lost_conversions").update({ status: "send_failed", updated_at: nowIso }).eq("id", r.id);
         continue;
       }
-      // ticket com atendente humano AGORA → adia
-      if (await isTicketHumanActive(target.creds.avanceai_base_url, target.creds.avanceai_api_id, target.creds.avanceai_bearer_token, r.phone)) continue;
+      // ticket com atendente humano AGORA → adia (sem conseguir conferir, segue: o
+      // "atendente respondeu" acima já cobre quem está na conversa)
+      const _canalDoPaciente = {
+        baseUrl: target.creds.avanceai_base_url,
+        apiId: target.creds.avanceai_api_id,
+        bearerToken: target.creds.avanceai_bearer_token,
+        channelId: target.channelId,
+      };
+      if ((await situacaoDoTicket(_canalDoPaciente, r.phone)) === "atendente") continue;
 
       // CLAIM (compare-and-swap): marca 'sent' só se ainda pending — execução
       // sobreposta pega 0 linhas e não duplica a mensagem.
@@ -495,14 +517,12 @@ Deno.serve(async (req) => {
         .select("id");
       if (!claim || claim.length === 0) continue;
 
-      const nome = firstName(r.patient_name);
+      // Texto de _shared/recuperacao.ts (23/09): sem o nome do WhatsApp (regra de
+      // 11/08), sem "instabilidade" (muita falha não é queda), sem instrução de
+      // responder/confirmar com a afirmativa (orphan-ACK a silenciaria como
+      // confirmação externa) e sem datas/horários (anti-alucinação).
       const widgetUrl = await getWidgetUrl(r.clinic_token_id);
-      const linkLine = widgetUrl ? `\n\nSe preferir, é só clicar aqui para agendar online:\n${widgetUrl}` : "";
-      // Sem instrução de responder/confirmar com a afirmativa (orphan-ACK a
-      // silenciaria como confirmação externa) e sem datas/horários (anti-alucinação).
-      const msg = r.category === "falha_agendamento"
-        ? `Oi${nome ? `, ${nome}` : ""}! 👋 Mais cedo tivemos uma instabilidade aqui e não consegui concluir seu agendamento — me desculpe! 🙏 Já normalizou: quer que eu verifique os horários pra você agora? Me diga o médico ou o que você está sentindo.${linkLine}`
-        : `Oi${nome ? `, ${nome}` : ""}! 👋 Vi que você perguntou sobre valores mais cedo. Posso ajudar em mais alguma coisa? Se quiser marcar uma consulta, me diga o médico ou o que você está sentindo que eu já verifico os horários.${linkLine}`;
+      const msg = textoDaRecuperacao(r.category, widgetUrl);
 
       const send = await sendWhats(target.creds, r.phone, msg, target.channelId);
       if (!send.ok) {

@@ -12352,63 +12352,15 @@ Deno.serve(async (req) => {
               `[Webhook] Conversation inactive for ${hoursSinceLastMsg.toFixed(1)}h (>24h) — treating as new conversation`,
             );
 
-            // Schedule patient recovery follow-up if enabled for this clinic
-            if (clinicTokenId && conversationId) {
-              try {
-                const { data: clinicCheck } = await supabase
-                  .from("clinic_tokens")
-                  .select("recovery_enabled")
-                  .eq("id", clinicTokenId)
-                  .maybeSingle();
-
-                if (clinicCheck?.recovery_enabled) {
-                  // Check if there's already a pending follow-up for this conversation
-                  const { data: existingFollowUp } = await supabase
-                    .from("pending_follow_ups")
-                    .select("id")
-                    .eq("conversation_id", conversationId)
-                    .eq("status", "pending")
-                    .maybeSingle();
-
-                  if (!existingFollowUp) {
-                    // Check if the conversation had a successful booking — if so, skip
-                    const { data: successBooking } = await supabase
-                      .from("webhook_messages")
-                      .select("id")
-                      .eq("conversation_id", conversationId)
-                      .eq("ai_intent", "agendar")
-                      .eq("action_status", "success")
-                      .limit(1);
-
-                    if (!successBooking || successBooking.length === 0) {
-                      // Schedule follow-up for next day at ~12:30 BRT (15:30 UTC)
-                      const now = new Date();
-                      const nextDay = new Date(now);
-                      nextDay.setUTCDate(nextDay.getUTCDate() + 1);
-                      nextDay.setUTCHours(15, 30, 0, 0); // 12:30 BRT = 15:30 UTC
-                      // Skip weekends
-                      const dow = nextDay.getUTCDay();
-                      if (dow === 0) nextDay.setUTCDate(nextDay.getUTCDate() + 1); // Sunday -> Monday
-                      if (dow === 6) nextDay.setUTCDate(nextDay.getUTCDate() + 2); // Saturday -> Monday
-
-                      await supabase.from("pending_follow_ups").insert({
-                        conversation_id: conversationId,
-                        phone,
-                        contact_name: name,
-                        clinic_token_id: clinicTokenId,
-                        user_id: userId,
-                        execute_at: nextDay.toISOString(),
-                      });
-                      console.log(
-                        `[Webhook] Scheduled patient recovery follow-up for ${phone} at ${nextDay.toISOString()}`,
-                      );
-                    }
-                  }
-                }
-              } catch (recoveryErr) {
-                console.error("[Webhook] Failed to schedule recovery follow-up:", recoveryErr);
-              }
-            }
+            // RESGATE DE 24 H ANTIGO — saiu daqui (23/09). Com recovery_enabled ligado,
+            // este ponto gravava um follow-up em pending_follow_ups para o dia seguinte
+            // às 12h30 toda vez que um paciente VOLTAVA depois de 24 h — perguntasse o
+            // endereço ou o resultado do exame — e o patient-recovery desistia dele
+            // assim que aparecia qualquer mensagem depois, inclusive a resposta da
+            // própria Julia: nunca funcionou (desligado desde abril). A intenção
+            // ("voltar a falar com quem não marcou") virou a categoria
+            // agendamento_abandonado da Recuperação (process-lost-conversions,
+            // _shared/recuperacao.ts), com recovery_enabled como interruptor.
           }
         }
       }

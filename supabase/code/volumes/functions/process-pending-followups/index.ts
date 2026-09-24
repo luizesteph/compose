@@ -1,6 +1,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 import { chamadaDeCronAutorizada } from "../_shared/cron.ts";
+import { canalVivo, enviarTexto, situacaoDoTicket } from "../_shared/zpro.ts";
 // Janela de silêncio 20h–7h (SP): nada de mensagem de madrugada/noite. Mesma
 // regra e mesmos limites do motor da lista de espera — lá isso já valia, aqui
 // não. Cada função tem sua cópia porque as edge functions não compartilham
@@ -21,37 +22,16 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-cron-secret",
 };
 
-// FAIL-SAFE: returns "open"/"pending"/"closed"/"unknown".
-async function checkTicketStatus(
-  baseUrl: string,
-  apiId: string,
-  bearerToken: string,
-  phone: string,
-): Promise<string> {
-  try {
-    const cleanPhone = phone.replace(/\D/g, "");
-    const fullPhone = cleanPhone.length <= 11 ? `55${cleanPhone}` : cleanPhone;
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
-    const res = await fetch(`${baseUrl}/v2/api/external/${apiId}/showticket`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${bearerToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ number: fullPhone }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (res.ok) {
-      const data = await res.json();
-      return (data?.status as string) || "";
-    }
-  } catch (_) {
-    // fail-safe
-  }
-  return "unknown";
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// O LEMBRETE NUNCA TINHA SAÍDO (medido em 23/09)
+// ─────────────────────────────────────────────────────────────────────────────
+// Zero linhas com status 'sent' desde que a tabela existe. Quem sobrevivia a
+// "paciente respondeu" e "marcou pelo site" morria na conferência do ticket como
+// `human_active_unknown` (52 em 60 dias): ela chamava o showticket com as
+// credenciais PLANAS da clinic_tokens — canal 143, desligado — e, mesmo quando
+// respondia, lia `status` na raiz, e o Z-PRO devolve {success, data:{status}}.
+// O envio também ia pelas credenciais planas, sem channelId. Agora canal, ticket
+// e envio saem de _shared/zpro.ts, o mesmo módulo da Recuperação.
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
@@ -111,7 +91,7 @@ Deno.serve(async (req) => {
     .select(`
       id, phone, conversation_id, clinic_token_id, type, scheduled_at, metadata, created_at,
       clinic_tokens:clinic_token_id (
-        avanceai_base_url, avanceai_api_id, avanceai_bearer_token, user_id
+        avanceai_base_url, avanceai_api_id, avanceai_bearer_token, avanceai_active_channel, user_id
       )
     `)
     .eq("status", "pending")
@@ -196,38 +176,61 @@ Deno.serve(async (req) => {
         continue;
       }
 
-      // === GUARD 3: humano assumiu o ticket? ===
+      // === GUARD 3: atendente no caso? (23/09) ===
+      // Canal vivo, resposta do showticket lida em `data`, e "sem ticket" é livre.
       const creds = fu.clinic_tokens;
-      if (!creds?.avanceai_base_url || !creds?.avanceai_api_id || !creds?.avanceai_bearer_token) {
+      const canal = canalVivo(fu.clinic_tokens);
+      if (!canal) {
         await supabase
           .from("pending_followups")
           .update({
             status: "skipped",
-            cancelled_reason: "missing_avanceai_credentials",
+            cancelled_reason: "sem_canal_unico",
             processed_at: new Date().toISOString(),
           })
           .eq("id", fu.id);
-        console.log(`[FollowUp] ${fu.id}: skipped (missing credentials)`);
+        console.log(`[FollowUp] ${fu.id}: skipped (sem canal único ligado)`);
         skipped++;
         continue;
       }
 
-      const ticketStatus = await checkTicketStatus(
-        creds.avanceai_base_url,
-        creds.avanceai_api_id,
-        creds.avanceai_bearer_token,
-        fu.phone,
-      );
-      if (ticketStatus === "open" || ticketStatus === "unknown") {
+      // atendente respondeu depois do link? então a conversa é dela
+      if (fu.conversation_id) {
+        const { data: falouGente } = await supabase
+          .from("webhook_messages")
+          .select("id")
+          .eq("conversation_id", fu.conversation_id)
+          .eq("direction", "outgoing")
+          .eq("ai_intent", "manual_reply")
+          .gte("created_at", linkSentAt)
+          .limit(1)
+          .maybeSingle();
+        if (falouGente) {
+          await supabase
+            .from("pending_followups")
+            .update({
+              status: "cancelled",
+              cancelled_reason: "human_replied",
+              processed_at: new Date().toISOString(),
+            })
+            .eq("id", fu.id);
+          console.log(`[FollowUp] ${fu.id}: cancelled (human_replied)`);
+          skipped++;
+          continue;
+        }
+      }
+
+      const situacao = await situacaoDoTicket(canal, fu.phone);
+      if (situacao !== "livre") {
         await supabase
           .from("pending_followups")
           .update({
             status: "skipped",
-            cancelled_reason: `human_active_${ticketStatus}`,
+            cancelled_reason: `human_active_${situacao === "atendente" ? "open" : "unknown"}`,
             processed_at: new Date().toISOString(),
           })
           .eq("id", fu.id);
-        console.log(`[FollowUp] ${fu.id}: skipped (ticket=${ticketStatus})`);
+        console.log(`[FollowUp] ${fu.id}: skipped (ticket=${situacao})`);
         skipped++;
         continue;
       }
@@ -255,21 +258,9 @@ Deno.serve(async (req) => {
         `pra você. 😊`;
 
       const fullPhone = cleanPhone.length <= 11 ? `55${cleanPhone}` : cleanPhone;
-      const sendRes = await fetch(`${creds.avanceai_base_url}/v2/api/external/${creds.avanceai_api_id}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${creds.avanceai_bearer_token}`,
-        },
-        body: JSON.stringify({
-          number: fullPhone,
-          body: msg,
-          externalKey: crypto.randomUUID(),
-          isClosed: false,
-        }),
-      });
+      const envio = await enviarTexto(canal, fullPhone, msg);
 
-      if (sendRes.ok) {
+      if (envio.ok) {
         await supabase.from("webhook_messages").insert({
           clinic_token_id: fu.clinic_token_id,
           user_id: creds.user_id || null,
@@ -289,8 +280,7 @@ Deno.serve(async (req) => {
         sent++;
         console.log(`[FollowUp] ${fu.id}: sent to ${fullPhone}`);
       } else {
-        const errText = await sendRes.text();
-        console.log(`[FollowUp] ${fu.id}: AvanceAI HTTP ${sendRes.status}: ${errText.substring(0, 200)}`);
+        console.log(`[FollowUp] ${fu.id}: AvanceAI ${envio.detalhe}`);
         errors++;
       }
     } catch (err) {
