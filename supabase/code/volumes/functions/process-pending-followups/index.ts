@@ -258,29 +258,41 @@ Deno.serve(async (req) => {
         `pra você. 😊`;
 
       const fullPhone = cleanPhone.length <= 11 ? `55${cleanPhone}` : cleanPhone;
+
+      // MARCA ANTES DE ENVIAR (25/09): uma tentativa por linha, nunca mais.
+      // Marcar depois do envio fez o paciente receber o lembrete a cada minuto
+      // (cron de 1 min) quando qualquer passo entre o envio e a marcação falhava
+      // — em 24–25/09 um ReferenceError mandou até 39 cópias para a mesma pessoa.
+      const { data: reservada } = await supabase
+        .from("pending_followups")
+        .update({ status: "sent", processed_at: new Date().toISOString() })
+        .eq("id", fu.id)
+        .eq("status", "pending")
+        .select("id");
+      if (!reservada || reservada.length === 0) continue;
+
       const envio = await enviarTexto(canal, fullPhone, msg);
 
       if (envio.ok) {
+        sent++;
+        console.log(`[FollowUp] ${fu.id}: sent to ${fullPhone}`);
         await supabase.from("webhook_messages").insert({
           clinic_token_id: fu.clinic_token_id,
           user_id: creds.user_id || null,
           sender_phone: fu.phone,
-          sender_name: patientName || null,
+          sender_name: null,
           message_text: msg,
           direction: "outgoing",
           ai_intent: "widget_followup",
           action_status: "success",
           conversation_id: fu.conversation_id,
         });
-
-        await supabase
-          .from("pending_followups")
-          .update({ status: "sent", processed_at: new Date().toISOString() })
-          .eq("id", fu.id);
-        sent++;
-        console.log(`[FollowUp] ${fu.id}: sent to ${fullPhone}`);
       } else {
         console.log(`[FollowUp] ${fu.id}: AvanceAI ${envio.detalhe}`);
+        await supabase
+          .from("pending_followups")
+          .update({ status: "skipped", cancelled_reason: "send_failed" })
+          .eq("id", fu.id);
         errors++;
       }
     } catch (err) {
