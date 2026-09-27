@@ -19,7 +19,34 @@ export function ehPerguntaDeAgenda(m: { ai_intent?: string | null; action_status
   const intent = String(m?.ai_intent ?? "");
   const status = String(m?.action_status ?? "");
   if (intent === "widget_link_sent") return true;
-  return ["agendar", "reagendar", "cadastrar"].includes(intent) && ["needs_info", "needs_registration"].includes(status);
+  // REMARCAR NÃO CONTA (27/09): quem remarca JÁ TEM consulta. "Ficou faltando fechar
+  // o seu agendamento" foi para a Cristal (26/09 7h), que tem consulta em 05/10 e só
+  // queria entrar na lista de espera.
+  return ["agendar", "cadastrar"].includes(intent) && ["needs_info", "needs_registration"].includes(status);
+}
+
+/**
+ * O paciente disse que não vai seguir? (27/09, caso Catherine 24/09: "Agradeço, mas
+ * não vou prosseguir com o agendamento" às 10h30 e, às 14h30, a Recuperação mandou
+ * "Vi que você perguntou sobre valores mais cedo…"). Recusa depois do caso = não
+ * envia. Só frases de desistência explícita — "não" solto, "agora não" e "vou
+ * ver" não contam (medido nas respostas às perguntas de preço de 60 dias).
+ */
+export function recusouSeguir(texto: unknown): boolean {
+  const t = String(texto ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  if (!t.trim()) return false;
+  return /\bnao\s+vou\s+(?:prosseguir|seguir|continuar|marcar|agendar|querer)\b|\bnao\s+(?:quero|preciso)\s+(?:mais\s+)?(?:marcar|agendar|a\s+consulta|consulta)\b|\bdesisto\b|\bdesist(?:i|ir)\s+(?:da|de)\b|\b(?:consegui|marquei|vou\s+(?:tentar|procurar|marcar))\s+(?:em\s+|n[ao]\s+)?outr[oa]\s+(?:lugar|clinica|medico|local)\b|\bnao\s+tenho\s+(?:mais\s+)?interesse\b|^\s*nao,?\s+obrigad[oa]s?\b/.test(t);
+}
+
+/**
+ * A conversa é de procedimento (infiltração, fisioterapia, cirurgia)? Esses casos
+ * são da equipe (Lidiane, Vânia, a fisio), não de marcação de consulta: "Ficou
+ * faltando fechar o seu agendamento" foi para o André (26/09 19h), que espera a
+ * Lidiane marcar as infiltrações (27/09).
+ */
+export function falaDeProcedimento(texto: unknown): boolean {
+  const t = String(texto ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  return /infiltra|fisioterap|\bfisio\b|cirurgi/.test(t);
 }
 
 /**

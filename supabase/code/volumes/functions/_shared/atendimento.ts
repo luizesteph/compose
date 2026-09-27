@@ -190,12 +190,67 @@ export function decideNovaIdaAFila(s: {
   casoLongo: boolean;
   jaPassouPelaFila: boolean;
   urgenciaClinica: boolean;
+  /** cobrando retorno (`cobraRetorno`), a dona calada há 2 h+ e nenhuma ida à fila nas últimas 4 h */
+  cobrancaSemResposta?: boolean;
 }): { mover: boolean; motivo: string } {
   if (!s.casoLongo) return { mover: true, motivo: "regra_normal" };
   if (!s.jaPassouPelaFila) return { mover: true, motivo: "primeira_ida" };
   if (s.urgenciaClinica) return { mover: true, motivo: "urgencia_clinica" };
+  if (s.cobrancaSemResposta) return { mover: true, motivo: "cobranca_sem_resposta" };
   return { mover: false, motivo: "caso_longo_fica_com_a_dona" };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CASO LONGO: A COBRANÇA SEM RESPOSTA SOLTA A REGRA (27/09, caso Felipe 25/09)
+// ─────────────────────────────────────────────────────────────────────────────
+// Felipe pedia o pedido médico havia duas semanas. A dona (Lidiane) não falava
+// com ele desde a véspera, e a Julia respondeu SETE vezes "sua mensagem ficou com
+// a Lidiane" enquanto ele escrevia "Você só fala isso", "Nem sei quem é a
+// Lidiane", "Preciso de uma pessoa". A regra do caso longo existe contra o
+// pingue-pongue (6 idas à fila em 4 min); ela não pode prender quem está cobrando
+// um retorno que não vem.
+//
+// Por que o CONTEÚDO e não o tempo: em 30 dias a trava segurou 48 respostas, e a
+// dona costuma ficar dias sem falar nesses casos — é o normal de um caso longo.
+// "Dona calada há horas" sozinho soltaria quase todos. A cobrança é o sinal: o
+// paciente diz que não tem retorno, que já pediu, que a Julia repete, que quer
+// uma pessoa. Estas expressões só são lidas DENTRO do caminho do caso longo (a
+// mensagem já foi entendida como pedido de atendente), nunca para transferir
+// alguém fora dele. Além delas, `sinalDeFrustracao` (helpers.ts) também conta.
+const COBRANCA_RE = new RegExp(
+  [
+    String.raw`\b(?:muitas|varias|tantas|diversas)\s+vezes\b`,
+    String.raw`\b(?:de\s+novo|mais\s+uma\s+vez|outra\s+vez)\s*[.!]*\s*$`,
+    String.raw`\bso\s+(?:fala|diz|repete|responde)\b`,
+    String.raw`\b(?:mesma|mesmo)\s+(?:coisa|mensagem|resposta|texto)\b`,
+    String.raw`\brepetindo\b`,
+    String.raw`\b(?:preciso|quero|gostaria)\s+(?:de\s+)?(?:falar|conversar)\s+com\s+(?:uma\s+|um\s+|alguma\s+)?(?:pessoa|humano|ser\s+humano|alguem)\b`,
+    String.raw`\b(?:preciso|quero)\s+de\s+uma\s+pessoa\s*[.!]*\s*$`,
+    String.raw`\bnem\s+sei\s+quem\b`,
+    String.raw`\bfa(?:z|ca)\s+alguma\s+coisa\b`,
+    String.raw`\bretorno\s+serio\b`,
+    String.raw`\b(?:ha|faz|mais\s+de)\s+(?:\d+|uma|duas|tres|quatro|cinco|varios|varias|muitos|muitas)\s+(?:dias|semanas|meses)\b`,
+    String.raw`\bninguem\s+(?:me\s+)?(?:respond|retorn|fala|atende)`,
+    String.raw`\bnao\s+(?:me\s+)?(?:respondem|retornam|responderam|retornaram)\b`,
+    String.raw`\b(?:ainda\s+)?nao\s+(?:recebi|tive|obtive)\s+(?:nenhum\s+|nenhuma\s+|o\s+|a\s+|um\s+|uma\s+)?(?:retorno|resposta|posicao|resposta)\b`,
+    String.raw`\bsem\s+(?:nenhum\s+)?retorno\b`,
+    String.raw`\b(?:anda|ate\s+agora)\s+nada\b`,
+  ].join("|"),
+);
+
+export function cobraRetorno(texto: unknown, frustracao: (t: string) => boolean = () => false): boolean {
+  const bruto = typeof texto === "string" ? texto : "";
+  // texto longo (relato, e-mail colado) conta outra história, como no detector de frustração
+  if (!bruto.trim() || bruto.length > 280) return false;
+  if (frustracao(bruto)) return true;
+  const t = bruto.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  // uma linha por vez: "De novo / Mais uma vez" chega junto pelo lote
+  return t.split(/\n+/).some((linha) => COBRANCA_RE.test(linha.trim()));
+}
+
+/** Prazos da cobrança: a dona calada há 2 h+ e nenhuma ida à fila nas últimas 4 h. */
+export const COBRANCA_DONA_CALADA_MIN = 120;
+export const COBRANCA_SEM_NOVA_IDA_MIN = 240;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RELÓGIO DA GUARDA DE HUMANO — o handoff zera a contagem (19/09)

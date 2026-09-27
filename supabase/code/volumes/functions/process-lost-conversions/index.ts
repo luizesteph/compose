@@ -14,7 +14,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 import { chamadaDeCronAutorizada } from "../_shared/cron.ts";
 import { situacaoDoTicket } from "../_shared/zpro.ts";
-import { CATEGORIA_ABANDONO, ehPerguntaDeAgenda, textoDaRecuperacao } from "../_shared/recuperacao.ts";
+import { CATEGORIA_ABANDONO, ehPerguntaDeAgenda, falaDeProcedimento, recusouSeguir, textoDaRecuperacao } from "../_shared/recuperacao.ts";
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-cron-secret",
@@ -264,7 +264,10 @@ Deno.serve(async (req) => {
       .eq("direction", "incoming")
       .gte("created_at", lookback)
       .in("action_status", ["failed", "transient_error"])
-      .in("ai_intent", ["agendar", "reagendar", "cadastrar"])
+      // remarcar fora (27/09): quem remarca já tem consulta — "não consegui concluir
+      // seu agendamento" foi para o Marco Aurélio (25/09 16h50), que pediu para
+      // antecipar a consulta das 14h40 e foi atendido
+      .in("ai_intent", ["agendar", "cadastrar"])
       .order("created_at", { ascending: false })
       .limit(60);
     const fails = [...(failsBlocked || []), ...(failsErr || [])];
@@ -338,6 +341,19 @@ Deno.serve(async (req) => {
           .limit(1);
         if (existing && existing.length > 0) continue; // conversa já tem caso
         if (await hasBookingSince(c.clinic_token_id, c.sender_phone, c.created_at, c.conversation_id)) continue; // já marcou — nada a fazer
+        // Conversa de procedimento (infiltração, fisioterapia, cirurgia) é da equipe,
+        // não de marcação de consulta (27/09, André: esperava a Lidiane marcar as
+        // infiltrações e recebeu "Ficou faltando fechar o seu agendamento").
+        {
+          const { data: _falas } = await supabase
+            .from("webhook_messages")
+            .select("message_text")
+            .eq("conversation_id", c.conversation_id)
+            .eq("direction", "incoming")
+            .gte("created_at", new Date(new Date(c.created_at).getTime() - 7 * 24 * 3600_000).toISOString())
+            .limit(40);
+          if ((_falas || []).some((f: { message_text?: string }) => falaDeProcedimento(f.message_text))) continue;
+        }
         const human = await manualReplyAuthorSince(c.conversation_id, c.clinic_token_id, c.sender_phone, c.created_at);
         const due = new Date(new Date(c.created_at).getTime() + c.delayMin * 60_000).toISOString();
         const { error: insErr } = await supabase.from("lost_conversions").insert({
@@ -455,6 +471,21 @@ Deno.serve(async (req) => {
         await supabase.from("lost_conversions").update({ status: "booked", updated_at: nowIso }).eq("id", r.id);
         resolvedBooked++;
         continue;
+      }
+      // Recusou depois do caso (27/09, Catherine: "não vou prosseguir com o
+      // agendamento" e, 4 h depois, "Vi que você perguntou sobre valores…").
+      if (r.conversation_id) {
+        const { data: _depois } = await supabase
+          .from("webhook_messages")
+          .select("message_text")
+          .eq("conversation_id", r.conversation_id)
+          .eq("direction", "incoming")
+          .gte("created_at", r.detected_at)
+          .limit(40);
+        if ((_depois || []).some((f: { message_text?: string }) => recusouSeguir(f.message_text))) {
+          await supabase.from("lost_conversions").update({ status: "skipped_declined", updated_at: nowIso }).eq("id", r.id);
+          continue;
+        }
       }
       const _humanAuthor = await manualReplyAuthorSince(r.conversation_id, r.clinic_token_id, r.phone, r.detected_at);
       if (_humanAuthor) {

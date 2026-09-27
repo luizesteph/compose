@@ -180,7 +180,18 @@ export function isClosingThanks(text: string): boolean {
   if (!t || t.length > 60 || t.includes("?")) return false;
   const norm = stripAccents(t.toLowerCase());
   if (!/\b(obrigad[oa]s?|brigad[ao]u?|valeu|agradec\w*|gratidao)\b/.test(norm)) return false;
-  return !/\b(mas|porem|quando|onde|como|qual|quero|queria|preciso|pode|poderia|consigo|ainda|nao|cancelar|remarcar|mudar)\b/.test(norm);
+  if (/\b(mas|porem|quando|onde|como|qual|quero|queria|preciso|pode|poderia|consigo|ainda|nao|cancelar|remarcar|mudar)\b/.test(norm)) return false;
+  // PEDIDO JUNTO COM O OBRIGADA (27/09): em 60 dias a Regra 9 calou 5 pedidos —
+  // o horário escolhido ("Gostaria do dia 30/09 - 11h00. Obrigada.", Kurwenlucia
+  // 25/09), "Obrigada! / Lista de espera" (Fabiola 25/09), "Estou com dor na
+  // cervical / Obrigado" e "consulta on line… / Obrigada". Número de data ou hora,
+  // lista de espera, dor e palavra de agenda são pedido, não despedida. Dia da
+  // semana abreviado ("até 6f", "até 2af") continua sendo despedida.
+  const semDiaAbreviado = norm.replace(/\b\d\s*[aª]?\s*f(?:eira)?\b/g, " ");
+  if (/\d/.test(semDiaAbreviado)) return false;
+  if (/\blista\s+d?e?\s*espera\b/.test(norm)) return false;
+  if (/\b(dor|dores|doendo|doi|doeu|inchad\w*|machuc\w*)\b/.test(norm)) return false;
+  return !/\b(consulta|horario|agendar|agenda|marcar|desmarcar|encaixe|gostaria|online|on\s*line)\b/.test(norm);
 }
 
 // ─── Feriados / dias fechados (10/07) ───────────────────────────────────────
@@ -719,8 +730,15 @@ export async function fetchWithTimeout(
 // `(?![\p{L}])` no lugar de `\b`: "você" e "atendê-la" terminam em letra
 // acentuada e o `\b` do JS usa alfabeto ASCII — armadilha que já mordeu este
 // projeto três vezes.
+//
+// PROMESSA DE VOLTAR (27/09): "vou finalizar … e já te retorno" (Thaís 24/09),
+// "vou confirmar com nossa equipe … e já te retorno" (Caio 25/09), "nossa equipe
+// já está verificando" (04h26 de 26/09), "vou verificar … e já te informo"
+// (Adriana 23/09). A Julia responde na hora e nunca "volta": quem volta é gente.
+// Casando aqui, a rede transfere de verdade (ou troca por texto honesto). Em 30
+// dias de respostas (3.757), só estas 6 passavam a casar — as 6 promessas vazias.
 export const PROMESSA_DE_HUMANO_RE =
-  /(vou|estou|irei|já\s+(vou|estou))\s+(te\s+)?(transferir|transferindo|passar|passando|encaminhar|encaminhando|chamar|chamando|acionar|acionando|avisar|avisando|pedir)(?![\p{L}])|j[áa]\s+(te\s+)?(avisei|acionei|pedi|passei|chamei|transferi|notifiquei|encaminhei)(?![\p{L}])|(foi|foram)\s+(acionad|notificad|avisad)[oa]s?(?![\p{L}])|(uma\s+)?(atendente|colega|pessoa\s+da\s+equipe)\s+(vai|ir[áa])\s+(te\s+)?(atender|responder|continuar|ajudar|falar)(?![\p{L}])|nossa\s+equipe\s+(vai|ir[áa])\s+(te\s+)?(atender|responder|entrar\s+em\s+contato|continuar)(?![\p{L}])/iu;
+  /(vou|estou|irei|já\s+(vou|estou))\s+(te\s+)?(transferir|transferindo|passar|passando|encaminhar|encaminhando|chamar|chamando|acionar|acionando|avisar|avisando|pedir)(?![\p{L}])|j[áa]\s+(te\s+)?(avisei|acionei|pedi|passei|chamei|transferi|notifiquei|encaminhei)(?![\p{L}])|(foi|foram)\s+(acionad|notificad|avisad)[oa]s?(?![\p{L}])|(uma\s+)?(atendente|colega|pessoa\s+da\s+equipe)\s+(vai|ir[áa])\s+(te\s+)?(atender|responder|continuar|ajudar|falar)(?![\p{L}])|nossa\s+equipe\s+(vai|ir[áa])\s+(te\s+)?(atender|responder|entrar\s+em\s+contato|continuar)(?![\p{L}])|vou\s+(verificar|confirmar|checar|conferir|ver)\s+(isso\s+)?com\s+(a\s+)?(nossa\s+)?(equipe|atendente|recep[çc][ãa]o|colega)(?![\p{L}])|(nossa\s+)?equipe\s+j[áa]\s+est[áa]\s+(verificando|vendo|analisando|conferindo)(?![\p{L}])|j[áa]\s+te\s+(retorno|informo|respondo)(?![\p{L}])|te\s+retorno\s+(em\s+(breve|seguida|instantes)|assim\s+que|com\s+a\s+confirma)/iu;
 
 // ─── CONVÊNIO NO TEXTO (17/08) ──────────────────────────────────────────────
 // Pedido do dono: "você continua marcando as consultas como particular. As
@@ -845,6 +863,152 @@ export function mensagemCitaHora(texto: unknown, hhmm: unknown): boolean {
     if (new RegExp(`(?:^|\\s)[aà]s\\s+0?${h}(?![\\d/:h.])`).test(t)) return true;
   }
   return false;
+}
+
+/**
+ * A hora que o paciente escreveu, como "HH:MM", ou null (27/09, caso 
+ * 25/09). A escolha na lista lia "9h", "9hs", "9 horas" e "15:40", mas não "9hrs"
+ * nem "às 9": "28/09 as 9hrs" casava só o DIA, e a Julia devolvia a lista do dia
+ * (um horário só) quatro vezes, até o freio de repetição transferir.
+ * Aceita: "15:40", "15h40", "15 h 40", "9h", "9hs", "9hrs", "9hr", "9 horas",
+ * "1040h", "às 9"/"as 9". Nunca lê dia ("28/09"), CPF ou telefone. Hora fora de
+ * 6h–21h é descartada (a clínica atende das 8h às 18h; margem para quem erra).
+ */
+export function horaDoTexto(texto: unknown): string | null {
+  const t = stripAccents(String(texto || "").toLowerCase());
+  const ok = (h: number, m: number): string | null =>
+    h >= 6 && h <= 21 && m >= 0 && m <= 59 ? `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}` : null;
+  // 15:40 · 9;40 (tecla vizinha)
+  let m = t.match(/(?<![\d/])(\d{1,2})\s*[:;]\s*(\d{2})(?!\d)/);
+  if (m) return ok(+m[1], +m[2]);
+  // 10.40hs · 9,20 hs — só com o "h" depois (sem ele é data ou valor)
+  m = t.match(/(?<![\d/.,])(\d{1,2})[.,](\d{2})\s*h(?:rs?|s|oras?)?(?![a-z\d])/);
+  if (m) return ok(+m[1], +m[2]);
+  // 9h · 9hs · 9hrs · 9 horas · 15h40 · 15 h 40
+  m = t.match(/(?<![\d/.,])(\d{1,2})\s*h(?:rs?|s|oras?)?\s*(\d{2})?(?![a-z\d])/);
+  if (m) return ok(+m[1], m[2] ? +m[2] : 0);
+  // 1040h
+  m = t.match(/(?<![\d/])([01]?\d|2[0-3])([0-5]\d)\s*h(?:rs?|s)?(?![a-z\d])/);
+  if (m) return ok(+m[1], +m[2]);
+  // "às 9" sem o h: não vale em pergunta ("conseguiria as 13?") nem em intervalo
+  // ("o almoço das 13 às 14") — ali a hora não é a escolha do paciente.
+  if (t.includes("?") || /\bd[ao]s?\s+\d{1,2}\s*(?:h\w*)?\s+(?:a|as)\s+\d/.test(t)) return null;
+  m = t.match(/(?:^|\s)as\s+(\d{1,2})(?![\d/:;.,h])/);
+  if (m) return ok(+m[1], 0);
+  return null;
+}
+
+/**
+ * "Não tenho" em resposta a "Você tem preferência por algum deles?" (27/09, caso
+ * Manuela 24/09). A Julia listou os três especialistas em joelho e perguntou a
+ * preferência; "Não tenho" e depois "não tenho preferência de profissional" caíam
+ * no médico antigo grudado e o freio de repetição transferiu. Resposta curta de
+ * "tanto faz" à pergunta da preferência = buscar em todos os da especialidade.
+ */
+export function semPreferenciaDeMedico(mensagem: unknown, ultimaPerguntaDaJulia: unknown): boolean {
+  const perg = stripAccents(String(ultimaPerguntaDaJulia || "").toLowerCase());
+  if (!/preferencia por algum|qual (?:deles|delas|dos dois|das duas)|com qual (?:deles|delas|dos dois)|qual (?:medico|profissional|especialista) (?:voce )?prefere/.test(perg)) return false;
+  const t = stripAccents(String(mensagem || "").toLowerCase()).trim();
+  return /^(?:nao(?:\s+tenho)?(?:\s+preferencia)?|nenhum|nenhuma|tanto\s+faz|qualquer(?:\s+um|\s+uma)?|indiferente|sem\s+preferencia|pode\s+ser\s+qualquer(?:\s+um|\s+uma)?|o\s+que\s+tiver(?:\s+antes)?|quem\s+tiver(?:\s+antes)?)[\s.,!]*$/.test(t);
+}
+
+// LISTA DE ESPERA PARA QUEM JÁ TEM CONSULTA (27/09, caso Cristal 25/09) ─────────
+// A entrada na lista só aceitava o "convite" gravado quando a Julia marca (24 h).
+// A Cristal tinha consulta com o Dr. Lucas em 05/10, marcada antes, pediu a lista
+// e ouviu "primeiro precisamos garantir um horário"; a conversa virou remarcação
+// e a Julia disse "vou registrar dessa forma" sem registrar nada. Agora, sem
+// convite, a Julia pede o CPF e procura a consulta futura no Amigo (só leitura).
+export const MARCA_CPF_LISTA = "localizo a consulta que você já tem";
+export const TEXTO_PEDE_CPF_LISTA =
+  "Para entrar na lista de espera, preciso de uma consulta marcada — aí, se abrir uma vaga antes, eu antecipo. 😊 " +
+  `Se você já tem consulta, me passa o seu CPF que eu ${MARCA_CPF_LISTA}; se ainda não tem, me diga o médico que eu vejo a agenda.`;
+export const TEXTO_SEM_CONSULTA_PARA_LISTA =
+  "Não encontrei consulta futura no seu CPF. 🙏 Para entrar na lista de espera, primeiro marcamos um horário — " +
+  "me diga o médico que você procura que eu vejo a agenda!";
+
+/** A consulta futura que serve de base para a lista: a do médico pedido, senão a mais próxima. */
+export function consultaParaLista(
+  atendimentos: Array<Record<string, unknown>>,
+  hojeISO: string,
+  medicoPedido?: string | null,
+): { doctor_id: string; doctor_name: string; booked_date: string } | null {
+  const futuras = (Array.isArray(atendimentos) ? atendimentos : [])
+    .filter((a) => {
+      const st = String(a.status || "").toLowerCase();
+      if (st === "cancelled" || st === "cancelado" || a.canceled === true || a.canceled === "true") return false;
+      const dia = String(a.start_date || a.date || "").split(" ")[0].split("T")[0];
+      return !!dia && dia >= hojeISO;
+    })
+    .map((a) => {
+      const u = (a.user || {}) as Record<string, unknown>;
+      return {
+        doctor_id: String(a.user_id || u.id || ""),
+        doctor_name: String(a.doctor_name || a.user_name || u.name || ""),
+        booked_date: String(a.start_date || a.date || "").split(" ")[0].split("T")[0],
+      };
+    })
+    .filter((c) => c.doctor_id && c.doctor_name)
+    .sort((x, y) => x.booked_date.localeCompare(y.booked_date));
+  if (futuras.length === 0) return null;
+  const pedido = stripAccents(String(medicoPedido || "").toLowerCase()).replace(/^(dr|dra|doutor|doutora)\.?\s+/, "").trim();
+  if (pedido) {
+    const primeiro = pedido.split(/\s+/)[0];
+    const doPedido = futuras.find((c) => stripAccents(c.doctor_name.toLowerCase()).includes(primeiro));
+    if (doPedido) return doPedido;
+  }
+  return futuras[0];
+}
+
+/**
+ * O nome do CADASTRO achado pelo telefone só vira tratamento quando o nome do
+ * WhatsApp concorda com ele (27/09). O telefone é da família: a Julia chamou a Bel
+ * de "Arthur", a Juliana de "Matheus" e a Carolina de "Jonilson" (24–25/09) — o
+ * número estava na ficha de outra pessoa. Concorda = um nome do WhatsApp é o
+ * primeiro nome do cadastro, ou um começa pelo outro ("Dani" / "Daniela").
+ * WhatsApp sem nome (emoji, ponto) não contradiz: vale o cadastro.
+ * Devolve o primeiro nome do cadastro, ou "" (sem vocativo).
+ */
+export function nomeParaTratamento(nomeDoCadastro: unknown, nomeDoWhatsApp: unknown): string {
+  const cad = stripAccents(String(nomeDoCadastro || "").toLowerCase()).match(/[a-z]+/g) || [];
+  const primeiro = cad[0] || "";
+  if (primeiro.length < 2) return "";
+  const original = String(nomeDoCadastro || "").trim().split(/\s+/)[0] || "";
+  const bonito = original ? original.charAt(0).toUpperCase() + original.slice(1).toLowerCase() : "";
+  const zap = (stripAccents(String(nomeDoWhatsApp || "").toLowerCase()).match(/[a-z]+/g) || []).filter((w) => w.length >= 2);
+  if (zap.length === 0) return bonito;
+  const concorda = zap.some((w) => w === primeiro || (w.length >= 3 && (primeiro.startsWith(w) || w.startsWith(primeiro))));
+  return concorda ? bonito : "";
+}
+
+/**
+ * Data de nascimento → "YYYY-MM-DD", ou null se não for uma data de nascimento
+ * possível (27/09). O cadastro só entendia "DD/MM/AAAA" e "AAAA-MM-DD": "18101983"
+ * (Andréa, 25/09) virava 1900-01-01 em silêncio, e "09/03/1054" (Kurwenlucia,
+ * 25/09) foi aceito. Aceita também 8 dígitos, ponto e ano com 2 dígitos; recusa
+ * dia inexistente, ano antes de 1900 e data no futuro.
+ */
+const MESES_NASC: Record<string, number> = {
+  janeiro: 1, fevereiro: 2, marco: 3, abril: 4, maio: 5, junho: 6,
+  julho: 7, agosto: 8, setembro: 9, outubro: 10, novembro: 11, dezembro: 12,
+};
+
+export function dataDeNascimentoISO(texto: unknown, hojeISO: string): string | null {
+  const extenso = stripAccents(String(texto ?? "").toLowerCase()).match(/^\s*(\d{1,2})\s*(?:de\s*)?([a-z]+)\s*(?:de\s*)?(\d{4})\s*$/);
+  const t = String(texto ?? "").trim().replace(/\s+/g, "");
+  let d = 0, m = 0, y = 0;
+  let r = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (extenso && MESES_NASC[extenso[2]]) { d = +extenso[1]; m = MESES_NASC[extenso[2]]; y = +extenso[3]; }
+  else if (r) { y = +r[1]; m = +r[2]; d = +r[3]; }
+  else if ((r = t.match(/^(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{2}|\d{4})$/))) { d = +r[1]; m = +r[2]; y = +r[3]; }
+  else if ((r = t.match(/^(\d{2})(\d{2})(\d{4})$/))) { d = +r[1]; m = +r[2]; y = +r[3]; }
+  else return null;
+  const anoHoje = +hojeISO.slice(0, 4);
+  if (y < 100) y += y > anoHoje % 100 ? 1900 : 2000;
+  if (y < 1900 || m < 1 || m > 12 || d < 1) return null;
+  const diasNoMes = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  if (d > diasNoMes) return null;
+  const iso = `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+  return iso <= hojeISO ? iso : null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

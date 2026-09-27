@@ -53,6 +53,14 @@ import {
   decodeJwtPayload,
   getPhoneVariants,
   telefoneSemJulia,
+  horaDoTexto,
+  semPreferenciaDeMedico,
+  consultaParaLista,
+  nomeParaTratamento,
+  dataDeNascimentoISO,
+  MARCA_CPF_LISTA,
+  TEXTO_PEDE_CPF_LISTA,
+  TEXTO_SEM_CONSULTA_PARA_LISTA,
   normalizeApiResponse,
   fetchWithTimeout,
   horaDoSlot,
@@ -71,6 +79,9 @@ import type { JanelaDeDatas } from "./helpers.ts";
 import { tryFetch } from "./amigoApi.ts";
 import {
   atendenteDeCasoLongo,
+  cobraRetorno,
+  COBRANCA_DONA_CALADA_MIN,
+  COBRANCA_SEM_NOVA_IDA_MIN,
   decideNovaIdaAFila,
   desdeJanelaCasoLongo,
   FILTRO_GATILHOS_SEM_MOVIMENTO,
@@ -691,7 +702,7 @@ async function registrarRespostaDeVagaSobAtendente(
   // MESMO crivo do guard [WaitlistReply] do fluxo normal: recusa testa primeiro
   // ("não quero" contém "quero"), aceite é curto e sem dígitos ("quero marcar
   // dia 12 às 15h" é outra intenção e não pode virar aceite silencioso).
-  const recusa = WAITLIST_DECLINE_RE.test(t) && t.length <= 60;
+  const recusa = WAITLIST_DECLINE_RE.test(t) && t.length <= 60 && !t.includes("?");
   const aceite = !recusa && WAITLIST_ACCEPT_RE.test(t) && t.length <= 40 && !/\d/.test(t);
   if (!aceite && !recusa) return "";
   try {
@@ -7696,23 +7707,19 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             ...(_hasSchedCtx ? { schedulingContext: _schedCtx } : {}),
           };
         }
-        // Convert birth date
-        let born = "1900-01-01";
-        const birthRaw = entities.patient_birth_date.replace(/\s/g, "");
-        const slashParts = birthRaw.split("/");
-        if (slashParts.length === 3) {
-          born = `${slashParts[2]}-${slashParts[1].padStart(2, "0")}-${slashParts[0].padStart(2, "0")}`;
-        } else {
-          const isoMatch = birthRaw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-          if (isoMatch) {
-            born = birthRaw;
-          } else {
-            const dashParts = birthRaw.split("-");
-            if (dashParts.length === 3 && dashParts[0].length <= 2) {
-              born = `${dashParts[2]}-${dashParts[1].padStart(2, "0")}-${dashParts[0].padStart(2, "0")}`;
-            }
-          }
+        // Data de nascimento (27/09): "18101983" virava 1900-01-01 em silêncio e
+        // "09/03/1054" era aceito. Data impossível → pede de novo (ver helpers.ts).
+        const _bornISO = dataDeNascimentoISO(entities.patient_birth_date, getTodayISO_SP());
+        if (!_bornISO) {
+          console.log(`[Webhook] cadastrar - data de nascimento inválida: "${entities.patient_birth_date}" — pedindo de novo`);
+          return {
+            status: "needs_info",
+            response: "",
+            error: `A data de nascimento "${String(entities.patient_birth_date).slice(0, 20)}" não parece certa. Pode me mandar o dia, o mês e o ano (por exemplo, 18/10/1983)?`,
+            ...(_hasSchedCtx ? { schedulingContext: _schedCtx } : {}),
+          };
         }
+        const born = _bornISO;
         console.log(`[Webhook] cadastrar - Birth date raw: "${entities.patient_birth_date}" -> born: "${born}"`);
 
         const cleanCpf = cpf.replace(/\D/g, "");
@@ -8949,6 +8956,9 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
       }
 
       case "falar_com_atendente": {
+        // Saída do caso longo por cobrança (27/09): a dona que não responde fica de
+        // fora da escolha — a transferência vai para OUTRA atendente, não de volta a ela.
+        let _escapeDaDona: string | null = null;
         // === CASO LONGO: Vânia e Lidiane vão para pendentes UMA vez (15/09) ===
         // Paciente delas cuja conversa já passou pela fila nos últimos 7 dias NÃO é
         // transferido de novo: o ticket fica com quem cuida do caso, e a Julia só
@@ -8974,11 +8984,44 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               // na dúvida transfere, como antes: segurar sem saber deixaria paciente sem ninguém
               _jaPassou = !_erroIdas && (_idas || 0) > 0;
             } catch { /* idem */ }
+            // COBRANÇA SEM RESPOSTA (27/09, caso Felipe): quem cobra um retorno que
+            // não vem sai da regra — desde que a equipe esteja calada nesta conversa
+            // há 2 h+ e a conversa não tenha ido à fila nas últimas 4 h (o pingue-
+            // pongue que a regra evita). Na dúvida (erro de leitura), segura como antes.
+            let _cobrancaSemResposta = false;
+            if (_jaPassou && cobraRetorno(currentMessageText || "", sinalDeFrustracao)) {
+              try {
+                const _agoraMs = Date.now();
+                const [{ data: _ultFala, error: _eFala }, { count: _idasRecentes, error: _eIdas }] = await Promise.all([
+                  supabaseClient
+                    .from("webhook_messages")
+                    .select("created_at")
+                    .eq("conversation_id", conversationIdParam)
+                    .eq("ai_intent", "manual_reply")
+                    .order("created_at", { ascending: false })
+                    .limit(1),
+                  supabaseClient
+                    .from("transfer_audit")
+                    .select("id", { count: "exact", head: true })
+                    .eq("conversation_id", conversationIdParam)
+                    .not("trigger", "in", FILTRO_GATILHOS_SEM_MOVIMENTO)
+                    .gte("created_at", new Date(_agoraMs - COBRANCA_SEM_NOVA_IDA_MIN * 60_000).toISOString()),
+                ]);
+                const _ultFalaMs = _ultFala && _ultFala[0] ? Date.parse(String(_ultFala[0].created_at)) : null;
+                const _caladaMin = _ultFalaMs == null ? Infinity : (_agoraMs - _ultFalaMs) / 60_000;
+                _cobrancaSemResposta = !_eFala && !_eIdas && (_idasRecentes || 0) === 0 && _caladaMin >= COBRANCA_DONA_CALADA_MIN;
+                console.log(
+                  `[CasoLongo] cobrança de retorno — equipe calada há ${Number.isFinite(_caladaMin) ? Math.round(_caladaMin) : "∞"} min, idas nas últimas 4 h: ${_idasRecentes ?? "?"} → ${_cobrancaSemResposta ? "vai para a fila" : "fica com a dona"}`,
+                );
+              } catch { /* segura como antes */ }
+            }
             const _dLonga = decideNovaIdaAFila({
               casoLongo: true,
               jaPassouPelaFila: _jaPassou,
               urgenciaClinica: classificarUrgencia(currentMessageText || "") === "clinica",
+              cobrancaSemResposta: _cobrancaSemResposta,
             });
+            if (_dLonga.mover && _dLonga.motivo === "cobranca_sem_resposta") _escapeDaDona = _donaLonga;
             if (!_dLonga.mover) {
               console.log(
                 `[CasoLongo] conversa ${conversationIdParam} já passou pela fila em ${JANELA_CASO_LONGO_DIAS}d — fica com a ${_donaLonga}, sem nova transferência`,
@@ -9165,6 +9208,13 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           }
           console.log(`[Webhook] falar_com_atendente - After admin/disabled/vacation filter: ${users.length} users`);
 
+          if (_escapeDaDona) {
+            const _donaNorm = stripAccents(_escapeDaDona.toLowerCase().trim());
+            const _semDona = users.filter((u: any) => !stripAccents(String(u.name || "").toLowerCase()).includes(_donaNorm));
+            if (_semDona.length > 0) users = _semDona;
+            console.log(`[CasoLongo] cobrança sem resposta — ${_escapeDaDona} fora da escolha (${users.length} atendentes)`);
+          }
+
           // Save full list before offline filter (for offline detection)
           const allUsersBeforeOfflineFilter = [...users];
 
@@ -9206,14 +9256,14 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           }
 
           // Step 2: Check routing rules first, then patient preference
-          let requestedName = entities.attendant_name
+          let requestedName = entities.attendant_name && !_escapeDaDona
             ? stripAccents(entities.attendant_name.trim().toLowerCase())
             : undefined;
           let selectedUser: { id: number; name: string } | null = null;
           let routingRuleMatched = false;
 
           // Check routing rules against conversation - prioritize current message
-          if (!requestedName && routingRules && routingRules.length > 0) {
+          if (!requestedName && !_escapeDaDona && routingRules && routingRules.length > 0) {
             const complaintText = (entities.complaint || "").toLowerCase();
             // Step 1: Try matching on current message (last user message) + complaint only
             const currentMsg =
@@ -9569,6 +9619,35 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         } catch (e) {
           console.log(`[Waitlist] busca de convite falhou (non-blocking): ${(e as Error).message}`);
         }
+        // Sem convite: a consulta que o paciente já tem, pelo CPF (27/09, Cristal).
+        if (!_wlInvite && (await isWaitlistEnabled(supabaseClient, clinicTokenId))) {
+          const _cpfWl = String(entities.cpf || "").replace(/\D/g, "");
+          if (_cpfWl.length !== 11) {
+            return { status: "needs_info", response: TEXTO_PEDE_CPF_LISTA, error: TEXTO_PEDE_CPF_LISTA, bypassAiRewrite: true } as any;
+          }
+          try {
+            const _patWl = await tryFetch(`patients/exists?cpf=${_cpfWl}&company_id=${companyId}`, amigoToken, "GET", undefined, true);
+            const _patWlData = normalizeApiResponse(_patWl) as Record<string, unknown>;
+            const _patWlId = _patWl.status < 400 && _patWlData ? (_patWlData.id || _patWlData.patient_id) : null;
+            if (_patWlId) {
+              const _attWl = await tryFetch(`attendances/${_patWlId}?company_id=${companyId}`, amigoToken);
+              const _base = consultaParaLista(
+                normalizeApiResponse(_attWl) as Array<Record<string, unknown>>,
+                getTodayISO_SP(),
+                entities.doctor_name || null,
+              );
+              if (_base) {
+                console.log(`[Waitlist] sem convite — consulta-base achada pelo CPF: ${_base.doctor_name} ${_base.booked_date}`);
+                _wlInvite = _base;
+              }
+            }
+            if (!_wlInvite && _patWl.status < 500) {
+              return { status: "needs_info", response: TEXTO_SEM_CONSULTA_PARA_LISTA, error: TEXTO_SEM_CONSULTA_PARA_LISTA, bypassAiRewrite: true } as any;
+            }
+          } catch (e) {
+            console.log(`[Waitlist] busca da consulta-base pelo CPF falhou (non-blocking): ${(e as Error).message}`);
+          }
+        }
         if (!_wlInvite) {
           const m =
             "Para entrar na lista de espera, primeiro precisamos garantir um horário marcado com o médico — " +
@@ -9673,6 +9752,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         // Paciente recusou a vaga ofertada: volta pro FIM da fila e o cron
         // oferece ao próximo no ciclo seguinte (a vaga é re-verificada fresca).
         let _wlDocName = "o médico";
+        let _wlDevolvida = false;
         if (supabaseClient && senderPhone && clinicTokenId) {
           try {
             const _nowIso = new Date().toISOString();
@@ -9686,6 +9766,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               .limit(1);
             const _wlEntry = _wlNotified?.[0] as any;
             if (_wlEntry) {
+              _wlDevolvida = true;
               _wlDocName = _wlEntry.doctor_name || _wlDocName;
               await supabaseClient
                 .from("waitlist_entries")
@@ -9705,6 +9786,28 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           } catch (e) {
             console.log(`[Waitlist] recusa falhou (non-blocking): ${(e as Error).message}`);
           }
+        }
+        // SEM VAGA ATIVA (27/09): não diz "passei essa vaga" (nada passou) nem
+        // "do(a) o médico" — usa o médico da entrada que ainda espera, se houver.
+        if (!_wlDevolvida) {
+          let _wlEspera: string | null = null;
+          if (supabaseClient && senderPhone && clinicTokenId) {
+            try {
+              const { data: _wlW } = await supabaseClient
+                .from("waitlist_entries")
+                .select("doctor_name")
+                .eq("clinic_token_id", clinicTokenId)
+                .in("phone", getPhoneVariants(senderPhone))
+                .eq("status", "waiting")
+                .order("updated_at", { ascending: false })
+                .limit(1);
+              _wlEspera = (_wlW?.[0] as any)?.doctor_name || null;
+            } catch { /* non-blocking */ }
+          }
+          const _wlSem = _wlEspera
+            ? `Tudo bem! 😊 Você continua na *lista de espera* do(a) ${_wlEspera} — se abrir outro horário, te aviso por aqui.`
+            : "Tudo bem! 😊 Se precisar de algo, é só me chamar.";
+          return { status: "success", response: _wlSem, error: _wlSem, bypassAiRewrite: true } as any;
         }
         const _wlDecl =
           `Tudo bem! Passei essa vaga para o próximo da lista. Você continua na *lista de espera* do(a) ${_wlDocName} — ` +
@@ -12350,6 +12453,13 @@ Deno.serve(async (req) => {
           console.log(`[Webhook] No patient found proactively by phone ${phoneDigits}`);
         }
       }
+      // Nome do cadastro achado pelo telefone só vira tratamento quando o nome do
+      // WhatsApp concorda (27/09 — "Arthur" para a Bel, "Matheus" para a Juliana). O
+      // CPF e o resto da identificação não mudam; só o vocativo. Ver helpers.ts.
+      const _nomeTrat = identifiedPatient ? nomeParaTratamento(identifiedPatient.name, name) : "";
+      if (identifiedPatient && !_nomeTrat) {
+        console.log(`[Webhook] Nome do cadastro não bate com o do WhatsApp — sem vocativo (telefone pode ser da família)`);
+      }
 
       // Check 24h inactivity — if last message was >24h ago, treat as new conversation
       let isInactiveConversation = false;
@@ -13321,7 +13431,7 @@ Deno.serve(async (req) => {
 
       // Inject identified patient info into classification context
       const classificationMessage = identifiedPatient
-        ? `${finalMessage}\n\n[CONTEXTO DO SISTEMA: Paciente identificado automaticamente pelo telefone: Nome: ${firstName(identifiedPatient.name)}${identifiedPatient.cpf ? `, CPF: ${identifiedPatient.cpf}` : ""}. Use o nome para personalizar a interação.]`
+        ? `${finalMessage}\n\n[CONTEXTO DO SISTEMA: Paciente identificado automaticamente pelo telefone${_nomeTrat ? `: Nome: ${_nomeTrat}` : ""}${identifiedPatient.cpf ? `, CPF: ${identifiedPatient.cpf}` : ""}. ${_nomeTrat ? "Use o nome para personalizar a interação." : "Não chame o paciente pelo nome: o telefone pode ser de outra pessoa da família."}]`
         : finalMessage;
 
       // === Reset keyword pre-check (hoisted: used by stale-cleanup, greeting shortcut, and routing below) ===
@@ -13932,16 +14042,28 @@ Deno.serve(async (req) => {
       if (conversationId && !isResetRequest) {
         try {
           const cutoff5min = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-          const { data: recentSuccess } = await supabase
+          const { data: recentSuccessBruto } = await supabase
             .from("webhook_messages")
-            .select("id")
+            .select("id, message_text, ai_entities")
             .eq("conversation_id", conversationId)
             .eq("direction", "incoming")
             .eq("action_status", "success")
             .eq("ai_intent", "agendar")
             .gte("created_at", cutoff5min)
-            .limit(1);
-          if (recentSuccess && recentSuccess.length > 0) {
+            .limit(10);
+          // SÓ MARCAÇÃO DE VERDADE ARMA A TRAVA (27/09, caso Thaís 24/09 22h08): em 30
+          // dias, 150 das 405 linhas "agendar/success" não eram marcação — 130 eram o
+          // ENVIO DO LINK do site e ~15 o texto do teto do Amigo ("não aceitou uma
+          // segunda marcação"). A Thaís recebeu o link, escolheu 05/10 10h20 na lista,
+          // mandou o CPF e a trava — armada pelo link de 4 min antes — jogou o CPF para
+          // "unknown": a Julia prometeu "vou finalizar e já te retorno" e não marcou.
+          // Marcação = auditoria da Julia (booked_event_id, gravada pelos dois
+          // caminhos desde 22/09) ou marcação pelo site ("Agendamento via widget: …").
+          const recentSuccess = (recentSuccessBruto || []).filter((r: any) =>
+            !!(r?.ai_entities && (r.ai_entities as Record<string, unknown>).booked_event_id) ||
+            String(r?.message_text || "").startsWith("Agendamento via widget")
+          );
+          if (recentSuccess.length > 0) {
             // BUG 25/08 (primeira noite na infra propria): ENVIAR O LINK DO WIDGET
             // grava incoming com ai_intent="agendar" + action_status="success" — que e
             // exatamente o que a busca acima procura. So que link enviado NAO e consulta
@@ -14502,7 +14624,9 @@ Deno.serve(async (req) => {
         // de CPF, tipo de consulta, convênio, auditoria e verify-booking.
         try {
           const _wlTxt = (finalMessage || "").trim();
-          const _wlDecline = WAITLIST_DECLINE_RE.test(_wlTxt) && _wlTxt.length <= 60;
+          // Pergunta não é recusa (27/09, Luiz Flávio: "Nao tinha confirmado sexta às 9?"
+          // virou "Passei essa vaga para o próximo" com a oferta já vencida).
+          const _wlDecline = WAITLIST_DECLINE_RE.test(_wlTxt) && _wlTxt.length <= 60 && !_wlTxt.includes("?");
           const _wlAccept = !_wlDecline && WAITLIST_ACCEPT_RE.test(_wlTxt) && _wlTxt.length <= 40 && !/\d/.test(_wlTxt);
           if ((_wlAccept || _wlDecline) && conversationId && clinicTokenId && phone) {
             // ACEITE TARDIO (caso Marcia 21/07): "quero" 51min DEPOIS da oferta expirar
@@ -14543,7 +14667,11 @@ Deno.serve(async (req) => {
                 .limit(1);
               if (_wlLastOut && _wlLastOut.length > 0) {
                 if (_wlLate) console.log(`[WaitlistReply] aceite/recusa TARDIO (oferta expirada) — processando mesmo assim`);
-                if (_wlDecline) {
+                if (_wlDecline && _wlLate) {
+                  // A vaga já foi para o próximo (o cron devolve quem não responde em 3 h):
+                  // um "não" agora fala de outra coisa — segue o fluxo normal (27/09).
+                  console.log(`[WaitlistReply] "não" depois da oferta vencida — não é recusa de vaga, segue o fluxo normal`);
+                } else if (_wlDecline) {
                   console.log(`[WaitlistReply] recusa detectada — devolvendo vaga à fila`);
                   classification.intent = "recusar_vaga_espera";
                 } else {
@@ -14620,6 +14748,27 @@ Deno.serve(async (req) => {
             console.log(`[CpfRecovery] error (non-blocking): ${(e as Error).message}`);
           }
         }
+
+        // === CPF PARA A LISTA DE ESPERA (27/09, Cristal) ===
+        // A Julia pediu o CPF para localizar a consulta de quem quer entrar na lista
+        // (MARCA_CPF_LISTA); o CPF que chega é para ISSO — não é remarcação nem cadastro.
+        try {
+          const _cpfLista = extractCpfFromText(finalMessage || "", { excludeDigits: phone || "" }) || "";
+          if (_cpfLista && isValidCpf(_cpfLista) && conversationId) {
+            const { data: _ultLista } = await supabase
+              .from("webhook_messages")
+              .select("message_text")
+              .eq("conversation_id", conversationId)
+              .eq("direction", "outgoing")
+              .order("created_at", { ascending: false })
+              .limit(1);
+            if (String(_ultLista?.[0]?.message_text || "").includes(MARCA_CPF_LISTA)) {
+              console.log(`[Waitlist] CPF em resposta ao pedido da lista de espera — entrar_lista_espera`);
+              classification.intent = "entrar_lista_espera";
+              classification.cpf = _cpfLista;
+            }
+          }
+        } catch { /* non-blocking */ }
 
         // === PERÍODO DA LISTA DE ESPERA (pedido 10/07) ===
         // A entrada na lista pergunta "qual período você prefere para antecipar?".
@@ -14865,11 +15014,10 @@ Deno.serve(async (req) => {
 
               if (offered.length > 0) {
                 const raw = stripAccents((finalMessage || "").toLowerCase());
-                // Extrai hora mencionada (HH:MM, HHhMM, HHh)
-                const timeM = raw.match(/\b(\d{1,2})\s*(?::|h|hs|horas?)\s*(\d{2})?\b/);
-                const askedTime = timeM
-                  ? `${String(parseInt(timeM[1], 10)).padStart(2, "0")}:${(timeM[2] || "00").padStart(2, "0")}`
-                  : null;
+                // Hora mencionada — leitor único (27/09): o regex daqui não lia "9hrs"
+                // nem "às 9" (<paciente> 25/09: "28/09 as 9hrs" casava só o dia e a
+                // lista voltava 4 vezes), lia "16:40h" como 16:00 e "14/09: 14:00" como 09:14.
+                const askedTime = horaDoTexto(finalMessage || "");
                 // Extrai dia da semana
                 const wkM = raw.match(/\b(domingo|segunda|terca|quarta|quinta|sexta|sabado)(?:[-\s]?feira)?\b/);
                 const askedWeekday = wkM ? weekdayMap[wkM[1]] : null;
@@ -15039,6 +15187,29 @@ Deno.serve(async (req) => {
           );
           classification.doctor_name = "";
           classification.subspecialty = "";
+          // A recuperação do histórico (48 h) devolvia o médico que o paciente acabou
+          // de dispensar (27/09, Manuela: "Dr Helio" voltava a cada mensagem). A
+          // especialidade continua recuperável — "outro médico" é outro da mesma área.
+          _limposDeProposito.add("doctor_name");
+        }
+
+        // "NÃO TENHO" À PERGUNTA DA PREFERÊNCIA (27/09, Manuela 24/09) — ver helpers.ts
+        if (conversationId && (classification.intent === "agendar" || classification.intent === "unknown") && finalMessage && finalMessage.length <= 40) {
+          try {
+            const { data: _ultPerg } = await supabase
+              .from("webhook_messages")
+              .select("message_text")
+              .eq("conversation_id", conversationId)
+              .eq("direction", "outgoing")
+              .order("created_at", { ascending: false })
+              .limit(1);
+            if (semPreferenciaDeMedico(finalMessage, _ultPerg?.[0]?.message_text)) {
+              console.log(`[Webhook] "sem preferência" de médico à pergunta da Julia — busca em todos da especialidade`);
+              classification.intent = "agendar";
+              classification.doctor_name = "";
+              _limposDeProposito.add("doctor_name");
+            }
+          } catch { /* non-blocking */ }
         }
 
         // === "TANTO FAZ O DIA" APAGA A DATA GRUDADA (28/08) ===
@@ -15125,9 +15296,9 @@ Deno.serve(async (req) => {
           } else if (!classification.cpf && identifiedPatient.cpf) {
             console.log(`[Webhook] CPF do cache descartado (mascarado/invalido) — vai pedir ao paciente`);
           }
-          if (!classification.patient_full_name && identifiedPatient.name) {
-            (classification as any).patient_name = firstName(identifiedPatient.name);
-            console.log(`[Webhook] Injected proactive patient name (first only): ${firstName(identifiedPatient.name)}`);
+          if (!classification.patient_full_name && _nomeTrat) {
+            (classification as any).patient_name = _nomeTrat;
+            console.log(`[Webhook] Injected proactive patient name (first only): ${_nomeTrat}`);
           }
         }
 
@@ -15237,9 +15408,18 @@ Deno.serve(async (req) => {
             .order("created_at", { ascending: false })
             .limit(15);
 
+          // MARCAÇÃO CONCLUÍDA FECHA O CONTEXTO DE AGENDA (27/09, caso Carlos 24/09):
+          // ele marcou 02/10 10:40 na terça e, na quinta, "Preciso agendar consulta
+          // com dr Luiz Gustavo" recuperou 02/10 10:40 da própria marcação — "o
+          // horário 10:40 não está disponível". Da linha com booked_event_id para
+          // trás, só identidade (CPF, nome) volta; data, hora e médico não.
+          const _camposDeAgenda = new Set(["date", "time", "doctor_name", "subspecialty", "preferred_weekday", "preferred_period", "attendance_id"]);
+          let _passouDeMarcacao = false;
           for (const msg of prevMsgs || []) {
             const ent = msg.ai_entities as Record<string, unknown>;
+            if (ent?.booked_event_id) _passouDeMarcacao = true;
             for (const key of missingKeys) {
+              if (_passouDeMarcacao && _camposDeAgenda.has(key)) continue;
               if (!classification[key] && ent?.[key]) {
                 (classification as any)[key] = String(ent[key]);
                 console.log(`[Webhook] Recovered ${key} from conversation history: ${classification[key]}`);
@@ -15331,6 +15511,19 @@ Deno.serve(async (req) => {
       // segue) e LOGA o shape exato pra localizarmos o ramo na próxima ocorrência.
       const actionResult: any =
         _actionResultRaw && typeof _actionResultRaw === "object" ? _actionResultRaw : {};
+      // MÉDICO QUE NÃO EXISTE NÃO GRUDA (27/09, Manuela 24/09): "Dr Helio" não é
+      // médico da clínica, mas ficava no ai_entities e a recuperação de 48 h o
+      // devolvia a cada mensagem — toda tentativa dava o mesmo "Não encontrei o
+      // médico" até o freio de repetição transferir. Apaga do registro desta mensagem.
+      if (String(actionResult.error || "").startsWith('Não encontrei o médico "') && messageId) {
+        try {
+          const { data: _rowMed } = await supabase.from("webhook_messages").select("ai_entities").eq("id", messageId).maybeSingle();
+          const _entMed = ((_rowMed as { ai_entities?: Record<string, unknown> } | null)?.ai_entities || {}) as Record<string, unknown>;
+          if (_entMed.doctor_name) {
+            await supabase.from("webhook_messages").update({ ai_entities: { ..._entMed, doctor_name: "" } }).eq("id", messageId);
+          }
+        } catch { /* non-blocking */ }
+      }
       if (typeof actionResult.status !== "string" || !actionResult.status) {
         console.error(
           `[Action] ⚠️ retorno SEM status (intent=${classification.intent}) — normalizando p/ needs_info. shape=${JSON.stringify(_actionResultRaw ?? null).slice(0, 300)}`,
@@ -15618,7 +15811,7 @@ Deno.serve(async (req) => {
 
         // For reset, use a direct clean message — don't call AI with old history
         if (classification.intent === "resetar_conversa") {
-          const patientFirstName = identifiedPatient?.name?.split(" ")[0] || "";
+          const patientFirstName = _nomeTrat;
           replyText = patientFirstName
             ? `Perfeito, ${patientFirstName}! Vamos começar do zero. 😊 Como posso te ajudar?`
             : `Perfeito! Vamos começar do zero. 😊 Como posso te ajudar?`;
@@ -15643,9 +15836,7 @@ Deno.serve(async (req) => {
                 // quando ele veio do CADASTRO (identifiedPatient, com CPF) ou foi dito
                 // explicitamente pelo paciente (patient_name). NUNCA usa o nome bruto do
                 // perfil do WhatsApp (`name`), que e' auto-declarado e nao confiavel.
-                caller_name: identifiedPatient
-                  ? firstName(identifiedPatient.name)
-                  : classification.patient_name || "",
+                caller_name: _nomeTrat || (identifiedPatient ? "" : classification.patient_name || ""),
                 patient_name: classification.patient_name,
                 patient_full_name: classification.patient_full_name,
                 patient_auto_identified: identifiedPatient?.cpf ? "true" : "",
@@ -15671,7 +15862,7 @@ Deno.serve(async (req) => {
                 date: classification.date,
                 time: classification.time,
                 doctor_name: classification.doctor_name,
-                patient_name: identifiedPatient ? firstName(identifiedPatient.name) : classification.patient_name,
+                patient_name: identifiedPatient ? _nomeTrat : classification.patient_name,
                 patient_full_name: classification.patient_full_name,
               },
               clinicLocationInfo,
@@ -17042,7 +17233,7 @@ Deno.serve(async (req) => {
         console.log("[Webhook] Test mode without AvanceAI: generating reply anyway");
         let replyText: string;
         if (classification.intent === "resetar_conversa") {
-          const patientFirstName = identifiedPatient?.name?.split(" ")[0] || "";
+          const patientFirstName = _nomeTrat;
           replyText = patientFirstName
             ? `Perfeito, ${patientFirstName}! Vamos começar do zero. 😊 Como posso te ajudar?`
             : `Perfeito! Vamos começar do zero. 😊 Como posso te ajudar?`;
@@ -17061,7 +17252,7 @@ Deno.serve(async (req) => {
                 date: classification.date,
                 time: classification.time,
                 doctor_name: classification.doctor_name,
-                patient_name: identifiedPatient?.name || classification.patient_name,
+                patient_name: identifiedPatient ? _nomeTrat : classification.patient_name,
                 patient_full_name: classification.patient_full_name,
               },
               conversationHistory,
@@ -17083,7 +17274,7 @@ Deno.serve(async (req) => {
                 date: classification.date,
                 time: classification.time,
                 doctor_name: classification.doctor_name,
-                patient_name: identifiedPatient?.name || classification.patient_name,
+                patient_name: identifiedPatient ? _nomeTrat : classification.patient_name,
                 patient_full_name: classification.patient_full_name,
               },
               clinicLocationInfo,
