@@ -52,6 +52,7 @@ import {
   sinalDeFrustracao,
   decodeJwtPayload,
   getPhoneVariants,
+  telefoneSemJulia,
   normalizeApiResponse,
   fetchWithTimeout,
   horaDoSlot,
@@ -11642,6 +11643,21 @@ Deno.serve(async (req) => {
 
     const messageId = msgRecord.id;
     console.log(`[Webhook] Saved message ${messageId}`);
+
+    // === NÚMEROS SEM JULIA (27/09, pedido do dono) ===
+    // O celular do dono escreve aqui para a equipe ler. Grava e para: sem
+    // transcrição, sem lote, sem resposta, sem transferência, sem resgate.
+    if (telefoneSemJulia(phone)) {
+      console.log(`[Webhook] Número sem Julia (...${phone.slice(-4)}) — mensagem só gravada`);
+      await supabase
+        .from("webhook_messages")
+        .update({ action_status: "skipped", action_error: "Número sem Julia (dono) — só a equipe responde" })
+        .eq("id", messageId);
+      return new Response(JSON.stringify({ status: "skipped", reason: "numero_sem_julia" }), {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
 
     // === IMMEDIATE AUDIO TRANSCRIPTION (before batching) ===
     // Transcribe audio RIGHT AWAY so batching consolidates real text, not placeholders

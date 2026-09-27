@@ -666,6 +666,21 @@ export function getPhoneVariants(p: string | null | undefined): string[] {
   return Array.from(set);
 }
 
+// NÚMEROS SEM JULIA (27/09, pedido do dono): o celular do dono escreve no
+// WhatsApp da clínica para a EQUIPE ler e responder (encaminha contatos, recados).
+// A Julia não responde nada que venha destes números — nem resposta, nem
+// transferência, nem resgate. A mensagem continua gravada e aparece no Z-PRO.
+export const TELEFONES_SEM_JULIA: readonly string[] = ["11983354622"];
+
+export function telefoneSemJulia(
+  telefone: string | null | undefined,
+  lista: readonly string[] = TELEFONES_SEM_JULIA,
+): boolean {
+  const variantes = new Set(getPhoneVariants(telefone));
+  if (variantes.size === 0) return false;
+  return lista.some((t) => getPhoneVariants(t).some((v) => variantes.has(v)));
+}
+
 export function normalizeApiResponse(result: { data: unknown; status: number }): unknown {
   let responseData = result.data;
   if (result.status >= 200 && result.status < 300) {
