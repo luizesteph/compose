@@ -3386,6 +3386,24 @@ async function executeAction(
         }
         const attResult = await tryFetch(`attendances/${patientId}?company_id=${companyId}`, amigoToken);
         const attData = normalizeApiResponse(attResult);
+        // SEM CONSULTA FUTURA = TEXTO PRONTO (28/09). Lista vazia ia ao modelo como "[]"
+        // e ele escrevia "Verifiquei aqui, mas não encontrei horários disponíveis para
+        // essa data" — 3 vezes na semana, para quem só perguntava da autorização
+        // (Gabrielle 28/09, Alberto 26/09), seguido de repetição até o freio. Só com
+        // consulta passada, o modelo dizia que a futura "não existe" (Rosangela 24/09 —
+        // a de 09/11 existia). Nos dois casos: diz o que achou e passa para a equipe.
+        if (attResult.status < 400 && Array.isArray(attData)) {
+          const _hojeCons = getTodayISO_SP();
+          const _futuras = (attData as Array<Record<string, unknown>>).filter((a) => {
+            const st = String(a?.status || "").toLowerCase();
+            if (st === "cancelled" || st === "cancelado" || a?.canceled === true || a?.canceled === "true") return false;
+            const dia = String(a?.start_date || a?.date || "").split(" ")[0].split("T")[0];
+            return !!dia && dia >= _hojeCons;
+          });
+          if (_futuras.length === 0) {
+            return { status: "failed", response: TEXTO_SEM_CONSULTA_FUTURA, error: "consultar: nenhuma consulta futura no CPF", bypassAiRewrite: true } as any;
+          }
+        }
         // CAUSA DE FUNDO do caso Renan (31/07): o JSON CRU ia para o LLM e ELE formatava
         // o horário. O modelo tratou "10:40" como se fosse UTC e escreveu "07:40" ao
         // paciente — 3h antes, num horário em que a clínica nem abriu. Agora cada
@@ -9949,15 +9967,16 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           }
         }
 
-        // Step 2: If not registered, request registration first
+        // Step 2 (28/09): SEM CADASTRO PELO TELEFONE TAMBÉM VAI PARA A LIDIANE. Antes a
+        // Julia abria o questionário de cadastro (CPF, nome, nascimento, endereço). Em 60
+        // dias, as 23 mensagens que caíram aqui eram de quem já estava em andamento —
+        // "Saberia dizer se as infiltrações foram autorizadas?" (Gabriel 28/09), "Segue
+        // exame para aprovação", "Posso confirmar dia 21/9 - 15h20?", "Teria na
+        // quarta-feira?" (Andréa 25/09) — e o cadastro pelo WhatsApp só atrasava (e
+        // arriscava ficha duplicada: Andréa e Kurwenlucia, 25/09). O telefone do
+        // paciente muitas vezes não é o do cadastro. Quem cuida é a Lidiane.
         if (!patientRegistered) {
-          console.log("[Webhook] solicitar_infiltracao - Patient not registered, requesting registration");
-          return {
-            status: "needs_registration",
-            response: "",
-            error:
-              "O paciente solicitou infiltração mas não está cadastrado. Primeiro peça o CPF para confirmar. Se não tiver cadastro, peça os dados (nome completo, CPF, convênio/plano, endereço, data de nascimento). Informe também que precisará enviar: 1) foto da carteirinha do convênio, 2) documento pessoal (RG ou CNH), 3) laudo da ressonância magnética. NÃO tente agendar consulta.",
-          };
+          console.log("[Webhook] solicitar_infiltracao - sem cadastro achado pelo telefone — segue para a Lidiane, sem questionário de cadastro");
         }
 
         // Step 3: Patient is registered - request documents and transfer
@@ -10082,7 +10101,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                   status: "transferred_infiltracao",
                   response: "Encaminhado para a fila de pendentes",
                   error:
-                    "O paciente solicitou infiltração e já está cadastrado. Informe que pode enviar as ressonâncias/documentos por aqui mesmo, que estamos encaminhando para a Lidiane (ou atendente) que dará continuidade. NÃO peça dados cadastrais. NÃO tente agendar consulta.",
+                    "O paciente falou de infiltração (a Lidiane cuida). Informe que pode enviar por aqui mesmo a foto da carteirinha do convênio, um documento pessoal (RG ou CNH) e o laudo da ressonância, e que estamos encaminhando para a Lidiane (ou atendente) que dará continuidade. NÃO peça dados cadastrais. NÃO tente agendar consulta.",
                 };
               }
             }
@@ -10096,7 +10115,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           status: "transferred_infiltracao",
           response: "",
           error:
-            "O paciente solicitou infiltração e já está cadastrado. Informe que pode enviar as ressonâncias/documentos por aqui mesmo, que estamos encaminhando para uma atendente que dará continuidade. NÃO peça dados cadastrais. NÃO tente agendar consulta.",
+            "O paciente falou de infiltração (a Lidiane cuida). Informe que pode enviar por aqui mesmo a foto da carteirinha do convênio, um documento pessoal (RG ou CNH) e o laudo da ressonância, e que estamos encaminhando para uma atendente que dará continuidade. NÃO peça dados cadastrais. NÃO tente agendar consulta.",
         };
       }
 
@@ -11076,7 +11095,7 @@ ${
     : actionResult.status === "needs_registration"
       ? "O paciente NÃO está cadastrado na clínica. Gere uma mensagem amigável pedindo o nome completo, convênio (e plano), endereço completo (ou CEP) e data de nascimento para realizar o cadastro. Inclua a lista de convênios disponíveis se fornecida na mensagem de erro. Informe que se não tiver convênio, pode responder 'particular'. O telefone já é capturado automaticamente, não precisa pedir."
       : actionResult.status === "transferred_infiltracao"
-        ? "O paciente solicitou INFILTRAÇÃO e já está cadastrado. Gere uma mensagem informando que pode enviar os documentos necessários (ressonâncias, etc.) por aqui mesmo, que estamos encaminhando para a atendente que dará continuidade. Seja acolhedora e profissional. NÃO peça dados cadastrais. NÃO liste documentos específicos. NÃO agende consulta."
+        ? "O paciente falou de INFILTRAÇÃO (a Lidiane cuida). Gere uma mensagem informando que pode enviar por aqui mesmo o que ainda faltar (carteirinha do convênio, documento pessoal e laudo da ressonância) e que estamos encaminhando para a atendente que dará continuidade. Se o paciente só pergunta do andamento (autorização), não peça documento: diga que a Lidiane confere e responde por aqui. Seja acolhedora e profissional. NÃO peça dados cadastrais. NÃO agende consulta."
         : actionResult.status === "needs_documents_infiltracao"
           ? "O paciente solicitou uma INFILTRAÇÃO e acabou de se cadastrar. Gere uma mensagem informando que para dar continuidade ao processo de infiltração, é necessário enviar 3 documentos: 1) Foto da carteirinha do convênio, 2) Foto de um documento pessoal (RG ou CNH), 3) Laudo da ressonância magnética. Informe que uma atendente receberá os documentos e dará continuidade ao processo. NÃO tente agendar consulta. Seja acolhedora e profissional."
           : actionResult.status === "transferred_exame"
@@ -14087,7 +14106,11 @@ Deno.serve(async (req) => {
                 .eq("direction", "outgoing")
                 .order("created_at", { ascending: false })
                 .limit(1);
-              apenasLinkDoWidget = String(ultimaSaida?.[0]?.ai_intent || "") === "widget_link_sent";
+              // …a não ser que a marcação seja pelo SITE, feita DEPOIS do link (28/09,
+              // Alessandra Moreno): o site não gera resposta da Julia, então a última
+              // saída continua sendo o link — e a trava desarmava justo aí.
+              apenasLinkDoWidget = String(ultimaSaida?.[0]?.ai_intent || "") === "widget_link_sent" &&
+                !recentSuccess.some((r: any) => String(r?.message_text || "").startsWith("Agendamento via widget"));
             } catch { /* na duvida, mantem o guard armado */ }
 
             if (apenasLinkDoWidget) {
@@ -15400,7 +15423,7 @@ Deno.serve(async (req) => {
           const cutoff48h3 = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
           const { data: prevMsgs } = await supabase
             .from("webhook_messages")
-            .select("ai_entities")
+            .select("ai_entities, message_text")
             .eq("conversation_id", conversationId)
             .eq("direction", "incoming")
             .not("ai_entities", "is", null)
@@ -15417,7 +15440,10 @@ Deno.serve(async (req) => {
           let _passouDeMarcacao = false;
           for (const msg of prevMsgs || []) {
             const ent = msg.ai_entities as Record<string, unknown>;
-            if (ent?.booked_event_id) _passouDeMarcacao = true;
+            // marcação pelo SITE também encerra (28/09, Alessandra Moreno: marcou 07/10
+            // 10h40 pelo site, escreveu "Já sou paciente" e ouviu "10:40 não está
+            // disponível" — o horário era dela)
+            if (ent?.booked_event_id || String((msg as { message_text?: string }).message_text || "").startsWith("Agendamento via widget")) _passouDeMarcacao = true;
             for (const key of missingKeys) {
               if (_passouDeMarcacao && _camposDeAgenda.has(key)) continue;
               if (!classification[key] && ent?.[key]) {

@@ -193,14 +193,19 @@ Deno.serve(async (req) => {
   // Um caso "resolveu sozinho" quando existe booking success do telefone depois do evento
   // (pelo chat: agendar/reagendar success; pelo widget: linha "Agendamento via widget").
   async function hasBookingSince(clinicId: string, phone: string, sinceIso: string, conversationId?: string | null): Promise<boolean> {
+    // Marcação pelo CADASTRO também conta (28/09): a Siomara (sábado) e a irmã da
+    // Neide (segunda) marcaram pelo cadastro — linha cadastrar/success com
+    // booked_event_id — e a Recuperação mandou "não consegui concluir seu
+    // agendamento" / "perguntou sobre valores" a quem já estava marcado.
     const isBooking = (r: any) =>
       ["agendar", "reagendar"].includes(String(r.ai_intent || "")) ||
+      !!(r.ai_entities && (r.ai_entities as Record<string, unknown>).booked_event_id) ||
       String(r.message_text || "").startsWith("Agendamento via widget");
     const variants = phoneVariants(phone);
     if (variants.length > 0) {
       const { data } = await supabase
         .from("webhook_messages")
-        .select("id, ai_intent, action_status, message_text")
+        .select("id, ai_intent, action_status, message_text, ai_entities")
         .eq("clinic_token_id", clinicId)
         .in("sender_phone", variants)
         .eq("action_status", "success")
@@ -214,7 +219,7 @@ Deno.serve(async (req) => {
     if (conversationId) {
       const { data } = await supabase
         .from("webhook_messages")
-        .select("id, ai_intent, action_status, message_text")
+        .select("id, ai_intent, action_status, message_text, ai_entities")
         .eq("conversation_id", conversationId)
         .eq("action_status", "success")
         .gte("created_at", sinceIso)
@@ -293,6 +298,10 @@ Deno.serve(async (req) => {
     for (const r of (prices || []) as Cand[]) {
       const key = `${r.conversation_id}|pergunta_preco`;
       if (!r.conversation_id || !r.sender_phone || seen.has(key)) continue;
+      // Texto longo não é pergunta de preço de paciente (28/09): uma vendedora de
+      // crédito mandou um texto de apresentação com "valor" e recebeu "Vi que você
+      // perguntou sobre valores mais cedo".
+      if (String(r.message_text || "").length > 300) continue;
       // se a MESMA conversa já é caso de falha, o caso de falha cobre (não duplicar pessoa)
       if (seen.has(`${r.conversation_id}|falha_agendamento`)) continue;
       seen.add(key);
