@@ -379,7 +379,7 @@ export function campoPedidoNoCadastro(texto: unknown): "nome" | "cpf" | "nascime
 //
 // Os dois ultimos queriam GUIA do ortopedista, para fazer fisio em outro lugar.
 // Mandar tabela de preco para quem pede receita e' vender o que ninguem pediu.
-export type IntencaoFisio = "agendar" | "pedido_medico" | "falar_com_fisio" | "sessao_em_curso" | "nota_fiscal";
+export type IntencaoFisio = "agendar" | "pedido_medico" | "falar_com_fisio" | "sessao_em_curso" | "nota_fiscal" | "trabalho";
 
 const FISIO_PEDIDO_MEDICO_RE =
   /\b(pedido\s+(m[ée]dic[oa]|do\s+m[ée]dico)|guia|solicita[çc][ãa]o\s+(m[ée]dica|do\s+m[ée]dico)|receita|encaminhamento|renova(r|[çc][ãa]o)|relat[óo]rio|laudo)\b/i;
@@ -432,16 +432,29 @@ const FISIO_SESSAO_EM_CURSO_RE = new RegExp(
   "iu",
 );
 
+// 29/09: "Podemos agendar a SEGUNDA sessão de fisioterapia ainda hoje?" (Wilson) e
+// "Esse é os horários da fisioterapia certo?" (Alyne, sessões da Beatriz já
+// marcadas) receberam a tabela de preço. Sessão com ordinal e "horários da fisio"
+// são de quem já faz. "Contratam fisio?" (GM5) é emprego, não paciente.
+const FISIO_SESSAO_ORDINAL_RE = new RegExp(
+  "\\b(?:segunda|terceira|quarta|quinta|sexta|s[ée]tima|oitava|nona|d[ée]cima|pr[óo]xima|outra|\\d{1,2}\\s*[ªºao])\\s+" + FISIO_SESSAO_NOME +
+    "|\\bhor[áa]rios?\\s+(?:da|das|de|do)\\s+(?:minha\\s+|sua\\s+)?" + FISIO_SESSAO_NOME + "(?![\\p{L}])",
+  "iu",
+);
+const FISIO_TRABALHO_RE =
+  /\b(contrat(am|a|ando|ar|em)|curr[íi]culo|vagas?\s+(de\s+)?(emprego|trabalho|est[áa]gio)|trabalhar\s+(com\s+voc[êe]s|a[íi]|na\s+cl[íi]nica)|sou\s+fisioterapeuta)\b/iu;
+
 export function classificarPedidoDeFisioterapia(texto: unknown): IntencaoFisio {
   const t = String(texto ?? "");
   if (!t) return "agendar";
+  if (FISIO_TRABALHO_RE.test(t)) return "trabalho";
   if (FISIO_NOTA_FISCAL_RE.test(t)) return "nota_fiscal";
   // O pedido vem antes da sessão em curso: "já concluí as 10 sessões, me envie um
   // novo pedido" é pedido. "remarcar minha sessão" não casa nenhum padrão de pedido.
   if (FISIO_PEDIDO_MEDICO_RE.test(t) || FISIO_MAIS_SESSOES_RE.test(t) || FISIO_PEDIR_AO_MEDICO_RE.test(t) || FISIO_PEDIDO_AMPLO_RE.test(t)) {
     return "pedido_medico";
   }
-  if (FISIO_COMPARECIMENTO_RE.test(t) || FISIO_SESSAO_MINHA_RE.test(t) || FISIO_SESSAO_EM_CURSO_RE.test(t)) return "sessao_em_curso";
+  if (FISIO_COMPARECIMENTO_RE.test(t) || FISIO_SESSAO_MINHA_RE.test(t) || FISIO_SESSAO_EM_CURSO_RE.test(t) || FISIO_SESSAO_ORDINAL_RE.test(t)) return "sessao_em_curso";
   if (FISIO_FALAR_RE.test(t)) return "falar_com_fisio";
   return "agendar";
 }
@@ -1988,3 +2001,136 @@ export function cpfDigitadoNaConversa(cpf: unknown, textos: unknown[] | null | u
   if (d.length !== 11) return false;
   return (textos || []).some((t) => String(t ?? "").replace(/\D/g, "").includes(d));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORREÇÕES DA AVALIAÇÃO DE TERÇA, 29/09
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 1. CONFIRMAR CONSULTA QUE JÁ PASSOU (Neide e "DEUS É", 29/09)
+// "Estou no aguardo da nota fiscal" (16h42) e um link do CamScanner (15h10) viraram
+// `confirmar`; o fluxo escolheu a consulta DE HOJE (14h00 e 14h20, já atendidas), o
+// Amigo recusou confirmar consulta vencida e o modelo escreveu "tivemos uma
+// instabilidade". Nas duas vezes a consulta já tinha passado. Consulta de hoje que
+// começou há mais de 30 min não é candidata a confirmação — quem chega atrasado
+// (15 min depois) continua podendo confirmar.
+export const MARGEM_CONSULTA_PASSADA_MIN = 30;
+
+export function consultaDeHojeJaPassou(
+  inicio: unknown,
+  agora: { hoje: string; hora: number; minuto: number },
+  margemMin = MARGEM_CONSULTA_PASSADA_MIN,
+): boolean {
+  const s = String(inicio ?? "").replace("T", " ");
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})/);
+  if (!m || m[1] !== agora.hoje) return false;
+  return slotJaPassou(m[1], m[2], agora, -margemMin);
+}
+
+export function textoConsultaJaPassou(hhmm: string, medico?: string): string {
+  const doc = String(medico || "").trim();
+  return (
+    `Sua consulta de hoje estava marcada para as ${hhmm}${doc ? ` com ${doc}` : ""} — esse horário já passou, então não há o que confirmar. ` +
+    `Vou passar sua mensagem para a nossa equipe, que te responde por aqui. 🙏`
+  );
+}
+
+// O PUT de confirmação recusado não é "instabilidade" (o modelo escrevia isso a
+// partir do texto de erro). Texto pronto; a rede da promessa garante a equipe.
+export const TEXTO_CONFIRMACAO_NAO_REGISTRADA =
+  "Não consegui registrar a confirmação pelo sistema. Vou passar para a nossa equipe conferir e te responder por aqui. 🙏";
+
+// 2. "SIM" À PERGUNTA "É ESSA QUE DESEJA REAGENDAR?" (Luiz Flavio, 29/09)
+// O aceite da vaga da lista de espera ("quero") leva a "Encontrei sua consulta…
+// É essa que deseja reagendar?". O "sim" dependia do modelo marcar
+// reagendar_confirmed — não marcou; veio "Confirma que deseja reagendar este
+// agendamento?", outro "sim", e a terceira resposta foi engolida como duplicata.
+// A resposta curta afirmativa a essas duas perguntas é confirmação, sem modelo.
+const _PERGUNTA_REAGENDAR_RE = /(é essa que deseja reagendar\?|confirma que deseja reagendar)/i;
+const _SIM_CURTO_RE =
+  /^(sim|s|isso|isso mesmo|essa|essa mesma|é essa|e essa|essa ai|essa aí|pode|pode ser|pode sim|confirmo|confirmado|ok|okay|exato|correto|certo|claro|quero|positivo)[\s!.,;:)👍🙏😊✅]*$/iu;
+
+export function respostaConfirmaReagendamento(mensagem: unknown, ultimaSaidaDaJulia: unknown): boolean {
+  const pergunta = String(ultimaSaidaDaJulia ?? "");
+  if (!_PERGUNTA_REAGENDAR_RE.test(pergunta)) return false;
+  const t = String(mensagem ?? "").trim();
+  if (!t || t.length > 30) return false;
+  return _SIM_CURTO_RE.test(t);
+}
+
+// 3. ANTECIPAR NÃO É IR PARA DEPOIS (Amarylis, 29/09)
+// "Tenho consulta com Dr Gustavo hoje / Será que não consigo adiantar um pouco?"
+// (consulta 14h40) recebeu "encontrei estas opções: 13/10… 20/10". Em 60 dias, 5
+// conversas pediram para antecipar e receberam data DEPOIS da consulta atual ou
+// "instabilidade". Quem quer antecipar só vê horário antes da consulta atual; sem
+// nenhum, ouve isso e a oferta da lista de espera.
+const _ANTECIPAR_RE = /\b(adiant(ar|a|o|e|ando|asse)|antecip(ar|a|o|e|ando|asse|ação|acao)|mais\s+cedo)\b/iu;
+
+export function querAntecipar(textos: unknown[] | null | undefined): boolean {
+  return (textos || []).some((x) => {
+    const t = String(x ?? "");
+    if (/antecipadamente/i.test(t) && !_ANTECIPAR_RE.test(t.replace(/antecipadamente/gi, ""))) return false;
+    return _ANTECIPAR_RE.test(t);
+  });
+}
+
+/** Horários (data ISO + HH:MM) anteriores ao início da consulta atual ("YYYY-MM-DD HH:MM"). */
+export function antesDaConsultaAtual(isoDate: string, hhmm: string, consultaAtual: string): boolean {
+  const atual = String(consultaAtual || "").replace("T", " ").slice(0, 16);
+  if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(atual)) return true; // sem referência, não corta nada
+  const h = String(hhmm || "").padStart(5, "0");
+  return `${isoDate} ${h}` < atual;
+}
+
+export function textoSemHorarioAntes(consultaAtual: string, medico: string, hojeISO: string): string {
+  const atual = String(consultaAtual || "").replace("T", " ");
+  const [d, h] = [atual.slice(0, 10), atual.slice(11, 16)];
+  const quando = d === hojeISO ? `hoje, às ${h}` : `${d.slice(8, 10)}/${d.slice(5, 7)}, às ${h}`;
+  const doc = String(medico || "").trim() || "o médico";
+  return (
+    `Procurei aqui e não há horário com ${doc} antes da sua consulta atual (${quando}) — ela continua marcada. 🙏 ` +
+    `Se quiser, posso te colocar na lista de espera: se abrir uma vaga antes, eu te aviso por aqui.`
+  );
+}
+
+// 5. PERGUNTA DE PREÇO NO MEIO DA AGENDA (Renata, 29/09)
+// "Gostaria de saber valor da consulta Dr Luís / E qual próxima data" recebeu só a
+// lista; "Qual o valor da consulta" recebeu "Esses são os horários que encontrei…".
+// Em 60 dias, 9 perguntas de preço dentro do agendar ficaram sem o valor. O valor
+// está no script da clínica ("Consulta Particular com Ortopedistas: R$ 500").
+const _PRECO_RE = /\b(valor(es)?|pre[çc]o|quanto\s+(custa|fica|[ée]|sai|cobra))\b/iu;
+
+export function perguntaDePreco(texto: unknown): boolean {
+  const t = String(texto ?? "");
+  if (!t.trim() || t.length > 300) return false;
+  if (/reembols/i.test(t)) return false; // "valor do reembolso" é outra conversa
+  return _PRECO_RE.test(t);
+}
+
+export function precoDaConsulta(notas: unknown): string | null {
+  const m = String(notas ?? "").match(/Consulta\s+Particular\s+com\s+Ortopedistas:?\**:?\s*(R\$\s*\d[\d.]*(?:,\d{2})?)/i);
+  return m ? m[1].replace(/\s+/g, " ") : null;
+}
+
+export function textoPrecoDaConsulta(preco: string): string {
+  return `A consulta particular com nossos ortopedistas é ${preco}.`;
+}
+
+// 7. AVISO DE ATRASO (Mari e Andrea, 29/09)
+// "Vou chegar às 9 😔" virou "Vou conferir os horários reais da agenda…" (bloqueio da
+// antialucinação pela hora citada), e em ~7 de 25 avisos de atraso em 30 dias o
+// modelo disse "já deixei a equipe avisada" sem avisar ninguém. Aviso de atraso sem
+// pergunta nem pedido recebe um texto pronto e verdadeiro.
+const _ATRASO_RE =
+  /\b((vou|vamos|devo|irei|vai)\s+(chegar|me\s+atrasar|atrasar)|atrasad[oa]s?|atraso|chego\s+(em|daqui|umas?|uns|às|as|j[aá])|(muito|bastante|um\s+pouco\s+de)\s+tr[aâ]nsito|(estou|est[aá]|to|tô|preso)\s+(no\s+|num\s+|muito\s+)?tr[aâ]nsito|(estou|to|tô)\s+a\s+caminho)\b/iu;
+const _ATRASO_NAO_E_AVISO_RE =
+  /\?|\b(remarc|desmarc|cancel|reagend|antecip|adiant|outro\s+hor[aá]rio|mais\s+tarde|n[aã]o\s+(vou|vamos|irei)\s+(conseguir|poder)|n[aã]o\s+conseguirei|n[aã]o\s+consigo|gostaria\s+de\s+saber|queria\s+saber|ser[aá]\s+que|caso\s+eu|me\s+atende)/iu;
+
+export function ehAvisoDeAtraso(texto: unknown): boolean {
+  const t = String(texto ?? "").trim();
+  if (!t || t.length > 200) return false;
+  if (_ATRASO_NAO_E_AVISO_RE.test(t)) return false;
+  return _ATRASO_RE.test(t);
+}
+
+export const TEXTO_AVISO_DE_ATRASO =
+  "Obrigada por avisar! 🙏 Venha com calma e com segurança — quando chegar, é só se apresentar na recepção.";

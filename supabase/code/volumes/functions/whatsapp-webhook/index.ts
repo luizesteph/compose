@@ -74,6 +74,18 @@ import {
   textoDoLimiteDeAtendimentos,
   consultaParaOutraPessoa,
   cpfDigitadoNaConversa,
+  consultaDeHojeJaPassou,
+  textoConsultaJaPassou,
+  TEXTO_CONFIRMACAO_NAO_REGISTRADA,
+  respostaConfirmaReagendamento,
+  querAntecipar,
+  antesDaConsultaAtual,
+  textoSemHorarioAntes,
+  perguntaDePreco,
+  precoDaConsulta,
+  textoPrecoDaConsulta,
+  ehAvisoDeAtraso,
+  TEXTO_AVISO_DE_ATRASO,
 } from "./helpers.ts";
 import type { JanelaDeDatas } from "./helpers.ts";
 import { tryFetch } from "./amigoApi.ts";
@@ -4910,6 +4922,26 @@ async function executeAction(
           entities.date = "";
         }
 
+        // DIA SEM VAGA COM O MÉDICO PEDIDO VIRA A LISTA DOS PRÓXIMOS (29/09, Jamile:
+        // "Dr. Hugo tem horário amanhã?" → "não tem para 30/09, quer tentar outro
+        // dia?" → "Quinta" → segunda negativa → Regra 7 transferiu; ele só tinha vaga
+        // a partir de 05/10). Sem hora escolhida, com médico pedido pelo nome e o dia
+        // vazio, a data sai e o Step 5 mostra as primeiras datas — com a janela do
+        // texto ("amanhã", "quinta") o texto já diz que ali não tem.
+        let _diaPedidoSemVaga = "";
+        if (entities.date && !entities.time && doctorId && entities.doctor_name && !/^\d{4}-\d{2}$/.test(entities.date)) {
+          try {
+            const _slotsDia = await fetchSlotsForDate(entities.date, doctorId, entities.preferred_period || undefined);
+            if (_slotsDia.length === 0) {
+              console.log(`[Webhook] ${doctorName || entities.doctor_name} sem vaga em ${entities.date} — mostrando as próximas datas em vez de perguntar outro dia`);
+              _diaPedidoSemVaga = entities.date;
+              entities.date = "";
+            }
+          } catch (e) {
+            console.log(`[Webhook] conferência do dia sem vaga falhou (non-blocking): ${(e as Error).message}`);
+          }
+        }
+
         // Step 5: If no date provided, fetch available dates WITH time slots (single calendar call)
         if (!entities.date) {
           if (doctorId) {
@@ -5114,7 +5146,11 @@ async function executeAction(
                 if (datesWithSlots.length > 0) {
                   const periodLabel =
                     periodFilter === "manha" ? " (manhã)" : periodFilter === "tarde" ? " (tarde)" : "";
-                  const header = `Horários disponíveis com ${doctorName || "o médico"}${periodLabel}:\n\n`;
+                  // Sem janela no texto, quem pediu um dia sem vaga ouve isso antes da lista (29/09).
+                  const _avisoDia = _diaPedidoSemVaga && !_jb
+                    ? `Em ${formatDateLabel(_diaPedidoSemVaga)} não há horário livre com ${doctorName || "o médico"}. `
+                    : "";
+                  const header = `${_avisoDia}Horários disponíveis com ${doctorName || "o médico"}${periodLabel}:\n\n`;
                   const body = datesWithSlots.map((p) => `${p.label}: ${p.slots.join(", ")}`).join("\n");
                   const footer = "\n\nQual data e horário prefere?";
                   const fullMsg = _jb
@@ -5139,7 +5175,7 @@ async function executeAction(
                     );
                   }
                   // níveis 2 e 3 explicam o que não tem — vão literais, sem reescrita
-                  return { status: "needs_info", response: fullMsg, error: fullMsg, verifiedSchedule: true, bypassAiRewrite: _nivel > 1 } as any;
+                  return { status: "needs_info", response: fullMsg, error: fullMsg, verifiedSchedule: true, bypassAiRewrite: _nivel > 1 || !!_avisoDia } as any;
                 } else {
                   // Dates exist but no slots found from bulk fetch — fetch individually per date
                   const top5 = filteredIso.filter((d: string) => !isWeekendISO(d)).slice(0, 5);
@@ -6770,6 +6806,8 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         let _confPatientFound = false;
         let _confAttCount = -1;
         let _confAfterFilter = -1;
+        // Consulta de HOJE que já passou (29/09, Neide e "DEUS É"): não é candidata.
+        let _confPassadaHoje: Record<string, unknown> | null = null;
         // Validate attendance_id is numeric
         if (attId && !/^\d+$/.test(attId)) {
           console.log("[Webhook] Invalid attendance_id (not numeric), falling back to CPF lookup: " + attId);
@@ -6826,6 +6864,13 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                     const startDate = String(a.start_date || a.date || "");
                     const dateOnly = startDate.split(" ")[0].split("T")[0];
                     if (dateOnly && dateOnly < todayStr) return false;
+                    // CONSULTA DE HOJE QUE JÁ PASSOU (29/09): o Amigo recusa confirmar e
+                    // o modelo virava a recusa em "instabilidade". Margem de 30 min para
+                    // quem está atrasado ainda confirmar.
+                    if (consultaDeHojeJaPassou(startDate, agoraSP())) {
+                      _confPassadaHoje = a;
+                      return false;
+                    }
                     return true;
                   })
                   .sort((a, b) => {
@@ -6869,6 +6914,20 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             confirmar_after_filter: _confAfterFilter,
             confirmar_cpf: (entities.cpf || "").replace(/\D/g, ""),
           };
+          // Só havia a consulta de hoje, que já passou: nada a confirmar. Texto pronto;
+          // a rede da promessa passa a mensagem para a equipe (29/09).
+          if (_confPassadaHoje) {
+            const _pa = _confPassadaHoje as Record<string, unknown>;
+            const _paIni = String(_pa.start_date || _pa.date || "").replace("T", " ");
+            const _paDoc = String(_pa.doctor_name || _pa.user_name || ((_pa.user as Record<string, unknown> | undefined)?.name) || "");
+            return {
+              status: "failed",
+              response: textoConsultaJaPassou(_paIni.slice(11, 16), _paDoc),
+              error: "Consulta de hoje já passou — nada a confirmar.",
+              bypassAiRewrite: true,
+              entities: { ..._confDiag, confirmar_consulta_passada: _paIni.slice(0, 16) },
+            } as any;
+          }
           // Paciente forneceu um CPF real mas o bot não localizou a consulta (bug Juarez
           // 07/07: a consulta existia no Amigo, mas o lookup/filtro falhou). NÃO dar o
           // beco sem saída "não encontrei" — transfere para uma atendente que enxerga a
@@ -7010,12 +7069,14 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             console.error(`[Webhook] confirmar - transfer pos-falha tambem falhou: ${(e as Error).message}`);
           }
         }
-        // Mensagem limpa pro LLM — sem JSON cru, sem [object Object]
+        // Texto pronto (29/09): com a resposta vazia, o modelo reescrevia o erro como
+        // "tivemos uma instabilidade". A transferência acima já foi feita.
         return {
           status: "failed",
-          response: "",
+          response: TEXTO_CONFIRMACAO_NAO_REGISTRADA,
           error: "Não consegui registrar a confirmação automaticamente no sistema. Já acionei nossa equipe pra concluir a confirmação pra você.",
-        };
+          bypassAiRewrite: true,
+        } as any;
       }
 
 
@@ -7034,6 +7095,17 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         if (entities.reagendar_confirmed && !entities.attendance_id) {
           console.log("[Webhook] reagendar - reagendar_confirmed SEM attendance_id (alucinação do classificador) — degradando para busca+confirmação");
           entities.reagendar_confirmed = false;
+        }
+        // "SIM" À PERGUNTA "É ESSA QUE DESEJA REAGENDAR?" É CONFIRMAÇÃO (29/09, Luiz
+        // Flavio). Dependia do modelo marcar reagendar_confirmed; ele não marcou, veio
+        // "Confirma que deseja reagendar este agendamento?", outro "sim", e o terceiro
+        // foi engolido como duplicata — no aceite de uma vaga da lista de espera.
+        if (!entities.reagendar_confirmed && entities.attendance_id && /^\d+$/.test(String(entities.attendance_id))) {
+          const _ultimaJulia = [...(recentMessages || [])].reverse().find((m: any) => m?.role === "assistant");
+          if (respostaConfirmaReagendamento(currentMessageText, _ultimaJulia?.content)) {
+            console.log(`[Webhook] reagendar - "${String(currentMessageText || "").slice(0, 20)}" responde "é essa?" — confirmado sem o modelo`);
+            entities.reagendar_confirmed = true;
+          }
         }
         // ── Step 1: Need CPF to identify patient ──
         if (!entities.cpf && !entities.attendance_id) {
@@ -7203,9 +7275,14 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         // CPF" → CPF: a hora veio dele, duas mensagens antes). O que não vale é a
         // hora que ele nunca disse: a da consulta velha, copiada pelo classificador.
         const _horaAlvo = entities.time ? (normalizeTimeToHHMM(entities.time) || entities.time) : "";
+        // A vaga que a lista de espera ofereceu e o paciente aceitou ("quero") vale como
+        // hora escolhida por ele (29/09): sem isso o aceite virava a lista inteira.
         const _horaCitadaPeloPaciente = !!_horaAlvo && [
           String(currentMessageText || ""),
           ...(recentMessages || []).filter((m: any) => m?.role === "user").map((m: any) => String(m?.content || "")),
+          ...(recentMessages || [])
+            .filter((m: any) => m?.role === "assistant" && /Abriu uma vaga com/.test(String(m?.content || "")))
+            .map((m: any) => String(m?.content || "")),
         ].some((t) => mensagemCitaHora(t, _horaAlvo));
         let origDoctorName = entities.doctor_name || "";
         let origStart = "";   // "YYYY-MM-DD HH:MM" da consulta que vai ser remarcada
@@ -7357,11 +7434,24 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               const datesWithSlots: Array<{ date: string; label: string; slots: string[] }> = [];
               const MAX_DATES = 4;
               const MAX_SLOTS_PER_DATE = 4;
+              // ANTECIPAR SÓ MOSTRA O QUE É ANTES (29/09, Amarylis: consulta hoje 14h40,
+              // "adiantar um pouco?" → "13/10… 20/10"). Lê as últimas mensagens dele: o
+              // pedido costuma vir antes do CPF e da hora.
+              const _msgsDoPaciente = [
+                ...(recentMessages || []).filter((m: any) => m?.role === "user").map((m: any) => String(m?.content || "")).slice(-5),
+                String(currentMessageText || ""),
+              ];
+              const _antecipar = !!origStart && querAntecipar(_msgsDoPaciente);
+              if (_antecipar) console.log(`[Webhook] reagendar - paciente quer ANTECIPAR — só horários antes de ${origStart}`);
+              const _agoraRe = agoraSP();
               for (const d of candidateDates) {
                 if (datesWithSlots.length >= MAX_DATES) break;
                 const dow = getWeekday(d);
                 if (dow === 0 || dow === 6) continue; // skip weekends
                 let slots = slotsMap.get(d) || [];
+                // horário de hoje que já passou não é oferta (o agendar já cortava; o remarcar não)
+                slots = slots.filter((t) => !slotJaPassou(d, t, _agoraRe));
+                if (_antecipar) slots = slots.filter((t) => antesDaConsultaAtual(d, t, origStart));
                 if (periodFilter === "manha") slots = slots.filter((t) => t < "12:00");
                 if (periodFilter === "tarde") slots = slots.filter((t) => t >= "12:00");
                 if (slots.length === 0) continue;
@@ -7423,6 +7513,16 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                     entities: { ...entities, attendance_id: attId, doctor_name: origDoctorName },
                   } as any;
                 }
+              } else if (_antecipar) {
+                // Nada antes da consulta atual: ela continua; oferece a lista de espera (29/09).
+                const _semAntes = textoSemHorarioAntes(origStart, origDoctorName || "o médico", getTodayISO_SP());
+                return {
+                  status: "needs_info",
+                  response: _semAntes,
+                  error: _semAntes,
+                  bypassAiRewrite: true,
+                  entities: { ...entities, attendance_id: attId, doctor_name: origDoctorName },
+                } as any;
               } else {
                 // No real slots — be honest
                 const fbMsg = `Confirmei aqui e não encontrei horários disponíveis com ${origDoctorName || "o médico"}${entities.preferred_weekday ? ` em ${entities.preferred_weekday}s` : ""}${periodFilter === "manha" ? " pela manhã" : periodFilter === "tarde" ? " à tarde" : ""}${entities.date ? ` em ${entities.date}` : " nas próximas datas"}. Quer que eu tente outra data ou outro período?`;
@@ -10159,6 +10259,9 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               // Nota fiscal e recibo (22/09): é a equipe que emite — sem tabela de
               // preço e sem "quem emite é o médico".
               ? "Nota fiscal e recibo quem emite é a nossa equipe. 🙏 Já passei seu pedido para elas te mandarem por aqui."
+            : _intFisio === "trabalho"
+              // "Contratam fisio?" (29/09) é emprego — sem tabela de preço.
+              ? "Vou passar sua mensagem para a nossa equipe, que te responde por aqui. 🙏"
             : _intFisio === "falar_com_fisio"
               ? "Vou te passar para nossa equipe, que fala direto com a fisioterapeuta e te retorna por aqui. 🙏"
             : _intFisio === "sessao_em_curso"
@@ -10367,6 +10470,10 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
 
       case "unknown":
       default:
+        // Aviso de atraso (29/09): texto pronto e verdadeiro — sem "já avisei a equipe".
+        if (intent === "unknown" && ehAvisoDeAtraso(currentMessageText || "")) {
+          return { status: "success", response: TEXTO_AVISO_DE_ATRASO, bypassAiRewrite: true } as any;
+        }
         return {
           status: "unknown_intent",
           response: "Não foi possível identificar a intenção da mensagem",
@@ -14730,6 +14837,15 @@ Deno.serve(async (req) => {
           console.log(`[WaitlistReply] check error (non-blocking): ${(e as Error).message}`);
         }
 
+        // === AVISO DE ATRASO (29/09, Mari e Andrea) ===
+        // "Vou chegar às 9 😔" virou "Vou conferir os horários reais da agenda…", e em
+        // ~7 de 25 avisos em 30 dias o modelo disse "já deixei a equipe avisada" sem
+        // avisar ninguém. Aviso sem pergunta nem pedido → texto pronto (case unknown).
+        if (["unknown", "confirmar", "consultar"].includes(String(classification.intent || "")) && ehAvisoDeAtraso(finalMessage || "")) {
+          console.log(`[Atraso] aviso de atraso ("${String(finalMessage || "").slice(0, 40)}") — texto pronto`);
+          classification.intent = "unknown";
+        }
+
         // === RECUPERAÇÃO DE CPF (Paciente Teste 06/07: CPF travava o agendamento) ===
         // A Julia reservou o slot, pediu o CPF (estado awaiting_cpf) e o paciente
         // mandou o CPF cru ("<cpf-removido>") — mas o classificador LLM devolveu
@@ -16341,11 +16457,37 @@ Deno.serve(async (req) => {
               // (22/09): a Elaine pediu outubro e ouviu que não havia nada ANTES.
               // Quem perguntou outra coisa recebe um texto que pede a data (helpers.ts).
               replyText = textoMesmaLista(_docN, pedeHorarioMaisCedo(finalMessage || ""));
+              // Quem perguntou o PREÇO recebe o preço, não "me diga a data" (29/09, Renata).
+              const _precoRep = perguntaDePreco(finalMessage || "") ? precoDaConsulta(clinicRef?.custom_notes) : null;
+              if (_precoRep && !/nutr|ana\s+paula/i.test(_docN)) {
+                replyText = `${textoPrecoDaConsulta(_precoRep)} Algum dos horários que te passei te atende?`;
+              }
               verifiedScheduleFlag = null;
             }
           }
         } catch (e) {
           console.log(`[RepeatOffer] check error (non-blocking): ${(e as Error).message}`);
+        }
+
+        // === PERGUNTA DE PREÇO NO MEIO DA AGENDA (29/09, Renata) ===
+        // "valor da consulta Dr Luís / E qual próxima data" recebia só a lista. Em 60
+        // dias, 9 perguntas de preço dentro do agendar ficaram sem o valor. O valor
+        // vem do script da clínica; sem ele no script, nada muda.
+        try {
+          if (
+            ["agendar", "reagendar", "cadastrar"].includes(String(classification.intent || "")) &&
+            perguntaDePreco(finalMessage || "") &&
+            !/R\$\s*\d/.test(replyText) &&
+            !/nutr|ana\s+paula/i.test(`${replyText} ${finalMessage || ""}`)
+          ) {
+            const _preco = precoDaConsulta(clinicRef?.custom_notes);
+            if (_preco) {
+              console.log(`[Preço] pergunta de preço no ${classification.intent} — incluindo ${_preco}`);
+              replyText = `${textoPrecoDaConsulta(_preco)}\n\n${replyText}`;
+            }
+          }
+        } catch (e) {
+          console.log(`[Preço] check error (non-blocking): ${(e as Error).message}`);
         }
 
         // === CPF-ASK DEDUP (relatorio 06/07 conversa 75, Carla) ===
