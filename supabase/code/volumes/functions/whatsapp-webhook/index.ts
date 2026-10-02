@@ -86,6 +86,8 @@ import {
   textoPrecoDaConsulta,
   ehAvisoDeAtraso,
   TEXTO_AVISO_DE_ATRASO,
+  TEXTO_CANCELAMENTO_NAO_CONCLUIDO,
+  respostaFalaDeFisioSemPedido,
 } from "./helpers.ts";
 import type { JanelaDeDatas } from "./helpers.ts";
 import { tryFetch } from "./amigoApi.ts";
@@ -3887,7 +3889,7 @@ async function executeAction(
           entities.cpf = "";
         }
         // Step 1: Check CPF - try to identify by phone first
-        if (!entities.cpf && senderPhone && supabaseClient && !_paraOutra) {
+        if (!entities.cpf && senderPhone && supabaseClient && !_paraOutra && !(entities as any).sem_cpf_pelo_telefone) {
           // PRIORITY: Check conversation history for previously provided CPF before phone lookup
           const conversationForPhone = await supabaseClient
             .from("chat_conversations")
@@ -5753,12 +5755,15 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         if (!entities.cpf) {
           // Quem é a consulta: o nome dado, "para a sua filha" (outra pessoa), ou nada.
           // Antes saía "com Dr. X seu por 3 minutos … me passa o CPF seu?".
-          const patientRef = entities.patient_full_name
+          // (02/10) "com Dr. X de Regina… me passa o CPF do(a) Regina?" para a própria
+          // Regina: o nome vinha do WhatsApp. O nome só entra quando é outra pessoa.
+          const _nomeDeOutra = _paraOutra ? entities.patient_full_name : "";
+          const patientRef = _nomeDeOutra
             ? `de ${entities.patient_full_name}`
             : _paraOutra
               ? `para ${_paraOutra.comArtigo}`
               : "";
-          const _pedidoDoCpf = entities.patient_full_name
+          const _pedidoDoCpf = _nomeDeOutra
             ? `o CPF do(a) ${entities.patient_full_name}`
             : _paraOutra
               ? `o nome completo e o CPF ${_paraOutra.pronome}`
@@ -6779,11 +6784,13 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           }
           return { status: "success", response: `Agendamento ${attId} cancelado com sucesso` };
         }
+        // Texto pronto (02/10, Alyne: "tivemos uma instabilidade" duas vezes seguidas).
         return {
           status: "failed",
-          response: "",
+          response: TEXTO_CANCELAMENTO_NAO_CONCLUIDO,
           error: "Não consegui concluir o cancelamento automaticamente. Já avisei nossa equipe pra finalizar pra você.",
-        };
+          bypassAiRewrite: true,
+        } as any;
       }
 
       case "confirmar": {
@@ -6956,7 +6963,15 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               entities: _confDiag,
             } as any;
           }
-          return { status: "failed", response: "", error: "Agendamento não encontrado para confirmar", entities: _confDiag } as any;
+          // Texto pronto (02/10, Giuliana): com a resposta vazia o modelo escreveu
+          // "tivemos uma instabilidade e não localizamos esse agendamento".
+          return {
+            status: "failed",
+            response: entities.cpf ? textoCpfNaoEncontrado(entities.cpf) : TEXTO_SEM_CONSULTA_FUTURA,
+            error: "Agendamento não encontrado para confirmar",
+            bypassAiRewrite: true,
+            entities: _confDiag,
+          } as any;
         }
 
         // ── Helper: monta bloco VERIFIED_BOOKING a partir do attendance selecionado ──
@@ -10259,6 +10274,9 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               // Nota fiscal e recibo (22/09): é a equipe que emite — sem tabela de
               // preço e sem "quem emite é o médico".
               ? "Nota fiscal e recibo quem emite é a nossa equipe. 🙏 Já passei seu pedido para elas te mandarem por aqui."
+            : _intFisio === "consulta_medica"
+              // Quer CONSULTA com o médico (retorno, encaixe, novo pedido) — 01 e 02/10
+              ? "Vou passar para a nossa equipe ver o horário da consulta com você por aqui. 🙏"
             : _intFisio === "trabalho"
               // "Contratam fisio?" (29/09) é emprego — sem tabela de preço.
               ? "Vou passar sua mensagem para a nossa equipe, que te responde por aqui. 🙏"
@@ -12583,8 +12601,17 @@ Deno.serve(async (req) => {
       // WhatsApp concorda (27/09 — "Arthur" para a Bel, "Matheus" para a Juliana). O
       // CPF e o resto da identificação não mudam; só o vocativo. Ver helpers.ts.
       const _nomeTrat = identifiedPatient ? nomeParaTratamento(identifiedPatient.name, name) : "";
+      // CADASTRO DO TELEFONE COM OUTRO NOME NÃO EMPRESTA O CPF (30/09, Cristina Amaral):
+      // o telefone dela estava no cadastro da mãe (Maria Eduarda de Amaral, falecida);
+      // a Julia marcou a consulta no cadastro da mãe sem pedir CPF e disse "verifiquei
+      // seu cadastro e está tudo certo". Nome do WhatsApp que não bate com o do
+      // cadastro = outra pessoa da família (79 de 415 conversas em 30 dias): o CPF do
+      // cadastro sai, a busca por telefone não roda e a Julia pede o CPF na reserva.
+      let _telefoneDeOutraPessoa = false;
       if (identifiedPatient && !_nomeTrat) {
-        console.log(`[Webhook] Nome do cadastro não bate com o do WhatsApp — sem vocativo (telefone pode ser da família)`);
+        console.log(`[Webhook] Nome do cadastro não bate com o do WhatsApp — sem vocativo e SEM o CPF do cadastro (telefone pode ser da família)`);
+        _telefoneDeOutraPessoa = true;
+        identifiedPatient = { name: identifiedPatient.name, cpf: "" };
       }
 
       // Check 24h inactivity — if last message was >24h ago, treat as new conversation
@@ -15621,6 +15648,8 @@ Deno.serve(async (req) => {
           reagendar_confirmed: (classification as any).reagendar_confirmed,
           // Período da lista de espera capturado deterministicamente (10/07)
           _waitlist_period_set: (classification as any)._waitlist_period_set,
+          // Telefone no cadastro de outra pessoa (30/09): não buscar CPF pelo telefone
+          sem_cpf_pelo_telefone: _telefoneDeOutraPessoa,
         } as any,
         amigoToken,
         companyId,
@@ -16356,6 +16385,15 @@ Deno.serve(async (req) => {
           // vamos ao banco buscar o histórico, para não pagar SELECT em toda
           // resposta que menciona um convênio.
           let _vConv = validarAfirmacaoDeConvenio(replyText, finalMessage || "");
+          // O PEDIDO DE CADASTRO LISTA OS CONVÊNIOS — NÃO É AFIRMAÇÃO (01/10, Tai):
+          // SulAmérica Especial 100, mandou o CPF, a Julia ia pedir os dados do
+          // cadastro ("Convênios disponíveis: Bradesco, Care Plus…") e a guarda leu
+          // "Bradesco" como cobertura afirmada: trocou por "esse plano eu preciso
+          // confirmar" e transferiu, com a reserva de horário correndo.
+          if (!_vConv.ok && String(actionResult?.status || "") === "needs_registration") {
+            console.log(`[GuardConvenio] pedido de cadastro (lista de convênios) — não é afirmação de cobertura, segue`);
+            _vConv = { ok: true } as any;
+          }
           if (!_vConv.ok && conversationId) {
             try {
               const { data: _histConv } = await supabase
@@ -16431,6 +16469,16 @@ Deno.serve(async (req) => {
           }
         }
         replyText = sanitized.cleaned;
+
+        // TABELA DA FISIOTERAPIA SEM NINGUÉM TER FALADO DE FISIOTERAPIA (30/09, Magda):
+        // "seguem resultados da ressonância para agendar a infiltração com Dr Hugo"
+        // recebeu "Nossa fisioterapia funciona pelo sistema de reembolso… R$ 180" —
+        // o modelo copiou o trecho do script. Sai o texto neutro; a rede da promessa
+        // garante a equipe.
+        if (respostaFalaDeFisioSemPedido(replyText, finalMessage || "") && classification.intent !== "solicitar_fisioterapia") {
+          console.log(`[FisioForaDeContexto] resposta com a tabela da fisioterapia sem pedido de fisio — trocando`);
+          replyText = "Recebi sua mensagem! 🙏 Vou passar para a nossa equipe, que te responde por aqui.";
+        }
 
         // === REPETIÇÃO ÚTIL (relatorio 06/07 conversa 67, Déa) ===
         // Paciente insiste ("só fim do mês?", "antes não tem?") e o fluxo re-gera a

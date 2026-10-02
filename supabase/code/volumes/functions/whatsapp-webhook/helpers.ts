@@ -379,7 +379,7 @@ export function campoPedidoNoCadastro(texto: unknown): "nome" | "cpf" | "nascime
 //
 // Os dois ultimos queriam GUIA do ortopedista, para fazer fisio em outro lugar.
 // Mandar tabela de preco para quem pede receita e' vender o que ninguem pediu.
-export type IntencaoFisio = "agendar" | "pedido_medico" | "falar_com_fisio" | "sessao_em_curso" | "nota_fiscal" | "trabalho";
+export type IntencaoFisio = "agendar" | "pedido_medico" | "falar_com_fisio" | "sessao_em_curso" | "nota_fiscal" | "trabalho" | "consulta_medica";
 
 const FISIO_PEDIDO_MEDICO_RE =
   /\b(pedido\s+(m[ée]dic[oa]|do\s+m[ée]dico)|guia|solicita[çc][ãa]o\s+(m[ée]dica|do\s+m[ée]dico)|receita|encaminhamento|renova(r|[çc][ãa]o)|relat[óo]rio|laudo)\b/i;
@@ -444,11 +444,26 @@ const FISIO_SESSAO_ORDINAL_RE = new RegExp(
 const FISIO_TRABALHO_RE =
   /\b(contrat(am|a|ando|ar|em)|curr[íi]culo|vagas?\s+(de\s+)?(emprego|trabalho|est[áa]gio)|trabalhar\s+(com\s+voc[êe]s|a[íi]|na\s+cl[íi]nica)|sou\s+fisioterapeuta)\b/iu;
 
+// 01 e 02/10: quem quer CONSULTA com o médico recebia a tabela (ou "quem emite é o
+// médico") só porque a frase tinha "fisio": "Preciso retornar no dr Guilherme para
+// avaliar a necessidade de continuar a fisioterapia" (Heloisa), "marcar consulta
+// com o Dr. Luiz para pegar novo pedido de fisio" (Débora), "Pra semana que vem não
+// tem um encaixe? Ela precisa de pedido pra fazer fisioterapia" (Flávia). E o recado
+// do fisioterapeuta ao médico (José Eduardo: "o fisioterapeuta Andrew se comprometeu
+// a perguntar para o Dr. Luiz…") é conversa com a fisio, não venda.
+const FISIO_CONSULTA_MEDICA_RE =
+  /\b(marcar|agendar|remarcar)\s+(uma\s+|um\s+|a\s+|o\s+)?(consulta|retorno)\b(?!\s+com\s+(o|a)\s+fisio)|\b(retornar|voltar|passar)\s+(n[oa]|com\s+[oa])\s+(dr\.?a?|doutora?|m[ée]dic[oa])\b|\bencaixe\b/iu;
+const FISIO_RECADO_RE =
+  /\bfisioterapeuta\s+\p{L}+[\s\S]{0,80}\b(perguntar|comprometeu|ficou\s+de|orientou|repass\w+|retorno)\b/iu;
+
 export function classificarPedidoDeFisioterapia(texto: unknown): IntencaoFisio {
   const t = String(texto ?? "");
   if (!t) return "agendar";
   if (FISIO_TRABALHO_RE.test(t)) return "trabalho";
   if (FISIO_NOTA_FISCAL_RE.test(t)) return "nota_fiscal";
+  // o recado do fisioterapeuta ao médico vem antes do resto: é conversa com a fisio
+  if (FISIO_RECADO_RE.test(t)) return "falar_com_fisio";
+  if (FISIO_CONSULTA_MEDICA_RE.test(t)) return "consulta_medica";
   // O pedido vem antes da sessão em curso: "já concluí as 10 sessões, me envie um
   // novo pedido" é pedido. "remarcar minha sessão" não casa nenhum padrão de pedido.
   if (FISIO_PEDIDO_MEDICO_RE.test(t) || FISIO_MAIS_SESSOES_RE.test(t) || FISIO_PEDIR_AO_MEDICO_RE.test(t) || FISIO_PEDIDO_AMPLO_RE.test(t)) {
@@ -2134,3 +2149,16 @@ export function ehAvisoDeAtraso(texto: unknown): boolean {
 
 export const TEXTO_AVISO_DE_ATRASO =
   "Obrigada por avisar! 🙏 Venha com calma e com segurança — quando chegar, é só se apresentar na recepção.";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORREÇÕES DA AVALIAÇÃO DA SEMANA 28/09–02/10
+// ─────────────────────────────────────────────────────────────────────────────
+export const TEXTO_CANCELAMENTO_NAO_CONCLUIDO =
+  "Não consegui concluir o cancelamento pelo sistema. Vou passar para a nossa equipe finalizar e te responder por aqui. 🙏";
+
+/** A resposta traz o script de preço da fisioterapia e o paciente não falou de fisioterapia? */
+export function respostaFalaDeFisioSemPedido(resposta: unknown, mensagemDoPaciente: unknown): boolean {
+  const r = String(resposta ?? "");
+  if (!/nossa\s+fisioterapia\s+funciona/i.test(r)) return false;
+  return !/fisio|sess[ãa]o|sess[õo]es|reabilita/i.test(String(mensagemDoPaciente ?? ""));
+}

@@ -192,6 +192,7 @@ Deno.serve(async (req) => {
 
   // Um caso "resolveu sozinho" quando existe booking success do telefone depois do evento
   // (pelo chat: agendar/reagendar success; pelo widget: linha "Agendamento via widget").
+  const JANELA_MARCACAO_ANTES_H = 6;
   async function hasBookingSince(clinicId: string, phone: string, sinceIso: string, conversationId?: string | null): Promise<boolean> {
     // Marcação pelo CADASTRO também conta (28/09): a Siomara (sábado) e a irmã da
     // Neide (segunda) marcaram pelo cadastro — linha cadastrar/success com
@@ -201,31 +202,40 @@ Deno.serve(async (req) => {
       ["agendar", "reagendar"].includes(String(r.ai_intent || "")) ||
       !!(r.ai_entities && (r.ai_entities as Record<string, unknown>).booked_event_id) ||
       String(r.message_text || "").startsWith("Agendamento via widget");
+    // MARCAÇÃO LOGO ANTES TAMBÉM CONTA (02/10): a Regina marcou às 08h02, perguntou
+    // o valor às 08h03 e às 12h10 recebeu "Vi que você perguntou sobre valores…
+    // se quiser marcar". Nas 6 h anteriores ao evento só vale marcação DE VERDADE
+    // (auditoria ou site) — o envio do link também grava agendar/success.
+    const isRealBooking = (r: any) =>
+      !!(r.ai_entities && (r.ai_entities as Record<string, unknown>).booked_event_id) ||
+      String(r.message_text || "").startsWith("Agendamento via widget");
+    const antesIso = new Date(Date.parse(sinceIso) - JANELA_MARCACAO_ANTES_H * 3600_000).toISOString();
+    const conta = (r: any) => (String(r.created_at || "") >= sinceIso ? isBooking(r) : isRealBooking(r));
     const variants = phoneVariants(phone);
     if (variants.length > 0) {
       const { data } = await supabase
         .from("webhook_messages")
-        .select("id, ai_intent, action_status, message_text, ai_entities")
+        .select("id, ai_intent, action_status, message_text, ai_entities, created_at")
         .eq("clinic_token_id", clinicId)
         .in("sender_phone", variants)
         .eq("action_status", "success")
-        .gte("created_at", sinceIso)
+        .gte("created_at", antesIso)
         .order("created_at", { ascending: false })
-        .limit(30);
-      if ((data || []).some(isBooking)) return true;
+        .limit(40);
+      if ((data || []).some(conta)) return true;
     }
     // Fallback por CONVERSA (revisão 19/07): o booking via widget pode gravar o
     // telefone formatado/diferente do cadastro Amigo — mas resolve conversation_id.
     if (conversationId) {
       const { data } = await supabase
         .from("webhook_messages")
-        .select("id, ai_intent, action_status, message_text, ai_entities")
+        .select("id, ai_intent, action_status, message_text, ai_entities, created_at")
         .eq("conversation_id", conversationId)
         .eq("action_status", "success")
-        .gte("created_at", sinceIso)
+        .gte("created_at", antesIso)
         .order("created_at", { ascending: false })
-        .limit(30);
-      if ((data || []).some(isBooking)) return true;
+        .limit(40);
+      if ((data || []).some(conta)) return true;
     }
     return false;
   }

@@ -639,6 +639,20 @@ export function decidirResgate(a: {
       t0 - Date.parse(m.created_at) < CONVERSA_RECENTE_COM_ATENDENTE_MS,
   );
   if (falouHaPouco) return { resgatar: false, motivo: "conversa_recente_com_a_atendente" };
+  // A ATENDENTE FEZ UMA PERGUNTA HOJE E O PACIENTE ESTÁ RESPONDENDO (01/10, Isabella):
+  // a Laiz ofereceu "agora de manhã? ou amanhã às 15h" às 08h56; o "Pode ser amanhã
+  // às 15h" das 17h43 foi resgatado e a Julia segurou horário e pediu CPF por cima
+  // da negociação dela. Fala assinada ("*Nome*:") de hoje com "?" = assunto dela.
+  const perguntaDaAtendenteHoje = ms.some(
+    (m) =>
+      m.direction === "outgoing" &&
+      m.ai_intent === "manual_reply" &&
+      Date.parse(m.created_at) < t0 &&
+      _diaEmSaoPaulo(Date.parse(m.created_at)) === _diaEmSaoPaulo(t0) &&
+      /^\s*\*[^*\n]{2,40}\*:/.test(String(m.message_text || "")) &&
+      String(m.message_text || "").includes("?"),
+  );
+  if (perguntaDaAtendenteHoje) return { resgatar: false, motivo: "respondendo_a_atendente" };
   const texto = presas.map((p) => String(p.message_text || "").trim()).filter(Boolean).join("\n");
   if (!exigeRespostaDaAtendente(texto, presas.some((p) => !!p.temMidia))) {
     return { resgatar: false, motivo: "nao_exige_resposta" };
