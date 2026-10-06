@@ -88,6 +88,7 @@ import {
   TEXTO_AVISO_DE_ATRASO,
   TEXTO_CANCELAMENTO_NAO_CONCLUIDO,
   respostaFalaDeFisioSemPedido,
+  textoMarcacaoEmOutroNome,
 } from "./helpers.ts";
 import type { JanelaDeDatas } from "./helpers.ts";
 import { tryFetch } from "./amigoApi.ts";
@@ -139,7 +140,7 @@ import {
   matchInsuranceGroup,
   pickPlanFromGroup,
   toInsuranceId,
-  validarAfirmacaoDeConvenio,
+  validarAfirmacaoDeConvenio, pacienteCitouConvenio,
   textoDeConvenioNaoConfirmado,
   avaliarEfetivoIV,
   textoEfetivoIV,
@@ -13922,10 +13923,13 @@ Deno.serve(async (req) => {
       // === LISTA DE ESPERA: keyword determinística (06/07) ===
       // "lista de espera" -> entrar; com sair/tirar/cancelar junto -> sair.
       // Gated pela flag da clínica; com flag off a mensagem segue o fluxo normal.
-      if (!keywordForcedIntent && WAITLIST_KEYWORD_RE.test(finalMessage || "")) {
+      // "não posso, sair da lista" (05/10, Milena) não tem "de espera" e virou unknown:
+      // o modelo prometeu "vou retirar você da lista" e ela continuou nela.
+      const _sairDaListaCurto = /\b(sair|tirar|tira|remover|retirar)\b[^.?!\n]{0,15}\blista\b/i.test(finalMessage || "");
+      if (!keywordForcedIntent && (WAITLIST_KEYWORD_RE.test(finalMessage || "") || _sairDaListaCurto)) {
         try {
           if (await isWaitlistEnabled(supabase, clinicTokenId)) {
-            const leaving = WAITLIST_LEAVE_RE.test(finalMessage || "");
+            const leaving = WAITLIST_LEAVE_RE.test(finalMessage || "") || _sairDaListaCurto;
             console.log(
               `[Webhook] ⚡ KEYWORD OVERRIDE: "lista de espera" → forcing ${leaving ? "sair_lista_espera" : "entrar_lista_espera"}`,
             );
@@ -16406,6 +16410,14 @@ Deno.serve(async (req) => {
               const _ctxConv = [finalMessage || "", ...(_histConv || []).map((r: any) => String(r.message_text || ""))]
                 .join("\n");
               _vConv = validarAfirmacaoDeConvenio(replyText, _ctxConv);
+              // A LISTA DA CLÍNICA NÃO É AFIRMAÇÃO SOBRE O PLANO DE QUEM NÃO CITOU O
+              // CONVÊNIO (05/10, Dani Campos: "vcs aceitam convênio?" → a resposta
+              // listava "Bradesco (Top Nacional)…" e virou "esse plano eu preciso
+              // confirmar" + transferência, sem ela ter dito plano nenhum).
+              if (!_vConv.ok && !pacienteCitouConvenio(_vConv.convenio, _ctxConv)) {
+                console.log(`[GuardConvenio] ${_vConv.convenio} não foi citado pelo paciente — lista informativa, segue`);
+                _vConv = { ok: true } as any;
+              }
             } catch (e) {
               // Fail-closed: sem histórico, a afirmação continua bloqueada. Mandar
               // o paciente para a equipe é o erro barato; dizer "seu convênio está
@@ -16515,6 +16527,24 @@ Deno.serve(async (req) => {
           }
         } catch (e) {
           console.log(`[RepeatOffer] check error (non-blocking): ${(e as Error).message}`);
+        }
+
+        // === NOME DE OUTRA PESSOA LOGO DEPOIS DA MARCAÇÃO (05/10, Marly) ===
+        // "consulta para uma amiga" → a Julia marcou no cadastro do telefone; em
+        // seguida "A paciente será: Maria Angelica…" virou "Perfeito! A consulta
+        // ficou agendada para Maria Angelica" — falso. Agora diz a verdade e a rede
+        // da promessa passa para a equipe trocar o cadastro da consulta.
+        try {
+          const _nomeDito = String((classification as any).patient_full_name || "").trim();
+          if (classification.intent === "identificar_por_nome" && _nomeDito && conversationId && !nomeParaTratamento(_nomeDito, name)) {
+            const _mr = await marcacaoRecenteDaConversa(supabase, conversationId);
+            if (_mr) {
+              console.log(`[MarcacaoOutroNome] marcação recente e nome de outra pessoa ("${_nomeDito.slice(0, 20)}") — avisando e passando para a equipe`);
+              replyText = textoMarcacaoEmOutroNome(_nomeDito);
+            }
+          }
+        } catch (e) {
+          console.log(`[MarcacaoOutroNome] check error (non-blocking): ${(e as Error).message}`);
         }
 
         // === PERGUNTA DE PREÇO NO MEIO DA AGENDA (29/09, Renata) ===

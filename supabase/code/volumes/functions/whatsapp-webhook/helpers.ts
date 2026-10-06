@@ -178,6 +178,9 @@ export const WAITLIST_DECLINE_RE =
 export function isClosingThanks(text: string): boolean {
   const t = String(text || "").trim();
   if (!t || t.length > 60 || t.includes("?")) return false;
+  // Só emoji ("🙏", "👍👍", "🙏🏻❤️") é despedida (05/10, ruth: "🙏" virou "tive uma
+  // dificuldade técnica, vou transferir você").
+  if (/^[\p{Extended_Pictographic}\p{Emoji_Modifier}\u200d\ufe0f\s]+$/u.test(t)) return true;
   const norm = stripAccents(t.toLowerCase());
   if (!/\b(obrigad[oa]s?|brigad[ao]u?|valeu|agradec\w*|gratidao)\b/.test(norm)) return false;
   if (/\b(mas|porem|quando|onde|como|qual|quero|queria|preciso|pode|poderia|consigo|ainda|nao|cancelar|remarcar|mudar)\b/.test(norm)) return false;
@@ -923,6 +926,9 @@ export function horaDoTexto(texto: unknown): string | null {
   // "às 9" sem o h: não vale em pergunta ("conseguiria as 13?") nem em intervalo
   // ("o almoço das 13 às 14") — ali a hora não é a escolha do paciente.
   if (t.includes("?") || /\bd[ao]s?\s+\d{1,2}\s*(?:h\w*)?\s+(?:a|as)\s+\d/.test(t)) return null;
+  // "Dia 6/10 as 16,00" (Keiko 05/10): vírgula ou ponto depois do "às" é hora
+  m = t.match(/(?:^|\s)as\s+(\d{1,2})[.,](\d{2})(?![\d/])/);
+  if (m) return ok(+m[1], +m[2]);
   m = t.match(/(?:^|\s)as\s+(\d{1,2})(?![\d/:;.,h])/);
   if (m) return ok(+m[1], 0);
   return null;
@@ -1966,14 +1972,23 @@ const _RELACOES_FEM: Record<string, string> = {
   filha: "filha", mae: "mãe", esposa: "esposa", mulher: "esposa", irma: "irmã", sogra: "sogra", neta: "neta",
   namorada: "namorada", companheira: "companheira", enteada: "enteada", sobrinha: "sobrinha", tia: "tia",
   prima: "prima", cunhada: "cunhada", nora: "nora", crianca: "criança",
+  // 05/10 (Marly: "consulta com Dr Guilherme, para uma amiga" — marcou no cadastro dela)
+  amiga: "amiga", colega: "colega", vizinha: "vizinha", conhecida: "conhecida", funcionaria: "funcionária", patroa: "patroa",
 };
 const _RELACOES_MASC: Record<string, string> = {
   filho: "filho", pai: "pai", marido: "marido", esposo: "esposo", irmao: "irmão", sogro: "sogro", neto: "neto",
   namorado: "namorado", companheiro: "companheiro", enteado: "enteado", sobrinho: "sobrinho", tio: "tio",
   primo: "primo", cunhado: "cunhado", genro: "genro", bebe: "bebê",
+  amigo: "amigo", vizinho: "vizinho", conhecido: "conhecido", funcionario: "funcionário", patrao: "patrão", chefe: "chefe",
 };
-const _REL = `(${[...Object.keys(_RELACOES_FEM), ...Object.keys(_RELACOES_MASC), "avo"].join("|")})`;
-const _PARA_OUTRA_RE = new RegExp(`\\b(?:para|pra|pro|p/)\\s+(?:o\\s+|a\\s+)?(?:meu|minha)\\s+${_REL}\\b`);
+// Papéis fora da família (amiga, colega, funcionária…) só valem em "para (a) minha/uma
+// amiga": "Meu amigo indicou vocês e queria passar na consulta" é o próprio paciente.
+const _PAPEIS_FORA_DA_FAMILIA = ["amiga", "colega", "vizinha", "conhecida", "funcionaria", "patroa", "amigo", "vizinho", "conhecido", "funcionario", "patrao", "chefe"];
+const _REL = `(${[...Object.keys(_RELACOES_FEM), ...Object.keys(_RELACOES_MASC), "avo"].filter((k) => !_PAPEIS_FORA_DA_FAMILIA.includes(k)).join("|")})`;
+const _REL_PARA = `(${[...Object.keys(_RELACOES_FEM), ...Object.keys(_RELACOES_MASC), "avo"].join("|")})`;
+// "para uma amiga" / "pra um colega" também (05/10) — só depois de "para", onde o
+// artigo indefinido é de quem vai ser atendido ("um amigo me indicou" não casa).
+const _PARA_OUTRA_RE = new RegExp(`\\b(?:para|pra|pro|p/)\\s+(?:o\\s+|a\\s+)?(?:meu|minha|uma|um)\\s+${_REL_PARA}\\b`);
 const _ACAO_PARA_OUTRA_RE = new RegExp(
   `\\b(?:atender|atendimento|consulta|horario|agendar|marcar|levar|trazer|consultar|examinar|avaliar)\\b[^.?!\\n]{0,40}?\\b(?:meu|minha)\\s+${_REL}\\b`,
 );
@@ -2161,4 +2176,14 @@ export function respostaFalaDeFisioSemPedido(resposta: unknown, mensagemDoPacien
   const r = String(resposta ?? "");
   if (!/nossa\s+fisioterapia\s+funciona/i.test(r)) return false;
   return !/fisio|sess[ãa]o|sess[õo]es|reabilita/i.test(String(mensagemDoPaciente ?? ""));
+}
+
+/** Depois de uma marcação, o paciente dá o nome de OUTRA pessoa (05/10, Marly): a consulta ficou no cadastro do telefone. */
+export function textoMarcacaoEmOutroNome(nomeDito: string): string {
+  const primeiro = String(nomeDito || "").trim().split(/\s+/)[0] || "";
+  const nome = primeiro ? primeiro.charAt(0).toUpperCase() + primeiro.slice(1).toLowerCase() : "";
+  return (
+    `A consulta que acabei de marcar ficou no cadastro deste número${nome ? `, não no nome da(o) ${nome}` : ""}. ` +
+    `Vou passar para a nossa equipe colocar a consulta no nome certo e te responder por aqui. 🙏`
+  );
 }

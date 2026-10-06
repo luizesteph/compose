@@ -446,3 +446,18 @@ export function textoEfetivoIV(v: Extract<VeredictoEfetivoIV, { plano: true }>):
     `é ele quem atende esse plano aqui na clínica. 😊 Vou verificar a agenda dele pra você.`
   );
 }
+
+/** O paciente citou este convênio em algum momento? Sem isso, a resposta é lista da clínica, não afirmação sobre o plano dele (05/10). */
+export function pacienteCitouConvenio(chave: string, textoDoPaciente: string): boolean {
+  // Largo de propósito: o paciente escreve "Porto Saúde", "Hapvida", "Intermédica".
+  // Errar para o lado de "citou" mantém a guarda ligada.
+  const LARGO: Record<string, RegExp> = {
+    Bradesco: /bradesco/i,
+    "Porto Seguro": /\bporto\b/i,
+    "Notre Dame / Hapvida": /notre|hap\s*vida|interm[eé]dica|gndi/i,
+  };
+  const t = String(textoDoPaciente || "");
+  const c = CONVENIOS_COM_PLANO.find((x) => x.chave === chave);
+  if (!c) return true; // convênio desconhecido: não solta a guarda
+  return (LARGO[chave] ? LARGO[chave].test(t) : false) || c.nomeRe.test(t);
+}
