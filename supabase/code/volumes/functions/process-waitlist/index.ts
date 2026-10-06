@@ -977,6 +977,14 @@ Deno.serve(async (req) => {
         // 20h: quem recebeu oferta recente é PULADO (se a fila só tem ele, fica em
         // silêncio até o cooldown passar).
         const OFFER_COOLDOWN_H = 20;
+        // CARÊNCIA DE QUEM ACABOU DE ENTRAR (pedido do dono, 06/10): a Milena entrou
+        // às 13h55 e às 14h00 recebeu uma vaga de 07/10 que ela tinha acabado de ver
+        // na lista e trocado por 14/10. Em 60 dias, 6 ofertas saíram na 1ª hora (1
+        // aceita, 3 recusadas, 2 vencidas); de 3 a 24 h depois, 4 de 7 aceitas. Nas
+        // primeiras horas a "vaga nova" é quase sempre a que ela já viu e recusou.
+        // Só ADIA: passada a carência, a mesma vaga ainda livre é oferecida.
+        const CARENCIA_ENTRADA_H = 3;
+        const _carenciaCut = Date.now() - CARENCIA_ENTRADA_H * 3600_000;
         const _cdCut = new Date(Date.now() - OFFER_COOLDOWN_H * 3600_000).toISOString();
         let _probes = 0;
         const MAX_TICKET_PROBES = 3;
@@ -1046,6 +1054,10 @@ Deno.serve(async (req) => {
           // Já tentamos enviar para este candidato neste ciclo e falhou — a vaga
           // segue para o próximo em vez de morrer aqui.
           if (_falharamAgora.has(String(cand.id))) continue;
+          if (Date.parse(String(cand.created_at || "")) > _carenciaCut) {
+            console.log(`[Waitlist] carência: ${cand.patient_name || cand.phone} entrou na fila há menos de ${CARENCIA_ENTRADA_H}h — pulando`);
+            continue;
+          }
           const pref = String(cand.preferred_period || "");
           // A vaga TEM que ser antes da consulta-base do paciente — a fila ANTECIPA,
           // nunca empurra a consulta pra depois (ofertar um slot >= base remarcaria
