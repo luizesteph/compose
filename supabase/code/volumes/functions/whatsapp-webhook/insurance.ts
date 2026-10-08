@@ -461,3 +461,35 @@ export function pacienteCitouConvenio(chave: string, textoDoPaciente: string): b
   if (!c) return true; // convênio desconhecido: não solta a guarda
   return (LARGO[chave] ? LARGO[chave].test(t) : false) || c.nomeRe.test(t);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BRADESCO FORA DO TOP NACIONAL: NÃO NEGAR (06–07/10, regra do dono)
+// ─────────────────────────────────────────────────────────────────────────────
+// "Atende, sim, mas pelo Bradesco apenas nos planos Top Nacional e Top Nacional Plus"
+// (06/10) e "A clínica atende os planos Top Nacional e Top Nacional Plus" (Elimar,
+// 07/10, plano Ideal I — a Glaucia confirmou que atende). Regra do dono: Top Nacional
+// e Top Nacional Plus é certeza; os outros planos do Bradesco (o Dr. Luiz Gustavo
+// provavelmente atende todos) a equipe confirma. Nunca "apenas", nunca "não atendemos".
+export const TEXTO_BRADESCO_EQUIPE_CONFIRMA =
+  "Esse plano do Bradesco eu preciso confirmar com a nossa equipe — vou passar para elas, que te respondem por aqui. 🙏";
+
+export function negaPlanoBradesco(resposta: string): boolean {
+  const r = String(resposta || "");
+  if (!/bradesco/i.test(r)) return false;
+  // a negativa tem que estar na MESMA frase do Bradesco (outra frase pode negar a Amil);
+  // o Efetivo IV tem regra própria do dono (só o Dr. Luiz) e fica de fora.
+  const NEGA = /n[ãa]o\s+(atendemos|aceitamos|cobrimos|trabalhamos\s+com|temos\s+(atendimento|cobertura))|n[ãa]o\s+(é|e|est[áa])\s+(atendido|aceito|coberto)|infelizmente[^.!?\n]{0,60}n[ãa]o/i;
+  return r
+    .split(/(?<=[.!?\n])\s+/)
+    .some((f) => /bradesco/i.test(f) && !/efetivo/i.test(f) && NEGA.test(f));
+}
+
+export function suavizarRestricaoBradesco(resposta: string): string {
+  const r = String(resposta || "");
+  if (!/bradesco/i.test(r) || !/top\s*nacional/i.test(r)) return r;
+  let s = r.replace(/\b(apenas|somente|s[óo]|exclusivamente)\s+((?:n[oa]s?|para\s+os?|o)\s+)?((?:planos?\s+)?top\s*nacional)/gi, (_m, _a, n, t) => `${n || ""}${t}`);
+  if (!/outros\s+planos|equipe\s+(confirma|verifica|precisa)|confirmar\s+com\s+a\s+(nossa\s+)?equipe/i.test(s)) {
+    s = s.replace(/(top\s*nacional\s+plus\b[^.!?\n]*)([.!?]?)/i, (_m, frase) => `${frase}. Outros planos do Bradesco a nossa equipe confirma.`);
+  }
+  return s;
+}

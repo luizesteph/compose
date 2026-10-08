@@ -89,6 +89,24 @@ import {
   TEXTO_CANCELAMENTO_NAO_CONCLUIDO,
   respostaFalaDeFisioSemPedido,
   textoMarcacaoEmOutroNome,
+  TEXTO_ACEITE_COM_ATENDENTE,
+  mensagemSoDeConvenio,
+  textoConvenioPosMarcacao,
+  perguntaSobreServico,
+  partesDaQueixa,
+  perguntaDeInclusao,
+  textoConsultaInclui,
+  textoMesmaListaNaData,
+  instrucaoDaInfiltracao,
+  recadoDoMedicoSemPedido,
+  TEXTO_RECADO_DO_MEDICO,
+  textoConsultaMantida,
+  citaConvenio,
+  TEXTO_CUMPRIMENTO_CURTO,
+  textoConfirmaPaciente,
+  ehPerguntaConfirmaPaciente,
+  respostaAPerguntaDoPaciente,
+  TEXTO_PEDE_CPF_DO_PACIENTE,
 } from "./helpers.ts";
 import type { JanelaDeDatas } from "./helpers.ts";
 import { tryFetch } from "./amigoApi.ts";
@@ -140,7 +158,7 @@ import {
   matchInsuranceGroup,
   pickPlanFromGroup,
   toInsuranceId,
-  validarAfirmacaoDeConvenio, pacienteCitouConvenio,
+  validarAfirmacaoDeConvenio, pacienteCitouConvenio, negaPlanoBradesco, suavizarRestricaoBradesco, TEXTO_BRADESCO_EQUIPE_CONFIRMA,
   textoDeConvenioNaoConfirmado,
   avaliarEfetivoIV,
   textoEfetivoIV,
@@ -3355,6 +3373,18 @@ async function executeAction(
           );
         const mentionsOwnAppointments =
           /\b(minha|minhas|meu|meus|marcad|agendad|remarcad|retorno|proxima|próxima)\b/.test(consultarMsg);
+        // PERGUNTA SOBRE SERVIÇO NÃO PEDE CPF (07/10, Lucas: "vocês realizam a terapia
+        // por onda de choque?" → "preciso do seu CPF").
+        const isServiceQuestion = perguntaSobreServico(currentMessageText || "");
+        if (isServiceQuestion && !mentionsOwnAppointments) {
+          console.log(`[Action] consultar → pergunta sobre serviço, sem CPF: "${(currentMessageText || "").slice(0, 60)}"`);
+          return {
+            status: "unknown_intent",
+            response: "",
+            internal_instruction:
+              "Pergunta INFORMATIVA sobre um serviço/procedimento/exame da clínica. NÃO peça CPF. Responda pelo script da clínica; se o script não disser se a clínica faz, diga que vai confirmar com a equipe e que elas respondem por aqui.",
+          } as any;
+        }
         if (isPriceOrInfoQuestion && !mentionsOwnAppointments) {
           console.log(
             `[Action] consultar → redirecting price/info question to unknown_intent (script answers it): "${(currentMessageText || "").slice(0, 60)}"`,
@@ -3715,10 +3745,15 @@ async function executeAction(
               // link generico "me contar qual medico voce procura" — ir direto pra
               // verificacao de agenda. Reduz friccao e evita parecer que IA "ignorou"
               // o que o paciente ja' disse.
+              // (07/10, Dra. Luciana: "consulta para minha filha 13 anos / Convênio Bradesco"
+              // recebeu só o link) — consulta para outra pessoa ou convênio citado também é
+              // contexto: segue por aqui, perguntando a região e o plano.
               const patientGaveContext = !!(
                 (entities.doctor_name && entities.doctor_name.trim().length > 1) ||
                 (entities.subspecialty && entities.subspecialty.trim().length > 1) ||
-                (entities.complaint && entities.complaint.trim().length > 3)
+                (entities.complaint && entities.complaint.trim().length > 3) ||
+                consultaParaOutraPessoa([currentMessageText || ""]) ||
+                citaConvenio(currentMessageText || "")
               );
 
               // Tema 6 (relatorio 24/06 Amostra 1): paciente confirmou "dia 25/06 as 14:00",
@@ -4277,12 +4312,30 @@ async function executeAction(
             // PRIORITY 2: If no doctor matched by name, try subspecialty
             if (entities.subspecialty && !doctorId) {
               const normalizedSearch = normalizeForMatching(entities.subspecialty);
-              const matchingBySubspecialty = schedulableDoctors.filter((d) => {
+              let matchingBySubspecialty = schedulableDoctors.filter((d) => {
                 const sub = subspecialtyMap.get(String(d.id));
                 if (!sub) return false;
                 const normalizedSub = normalizeForMatching(sub);
                 return normalizedSub.includes(normalizedSearch) || normalizedSearch.includes(normalizedSub);
               });
+              // QUEIXA COMPOSTA (07/10, Mônica: "cotovelo e punho" → "Não encontrei
+              // especialista"; 05/10, Eli: "pé/tornozelo"). Sem casamento inteiro, casa
+              // por PARTE: cada região que algum médico atende entra (cotovelo → Dr. Luiz,
+              // punho → Dr. Guilherme) e a busca segue com todos eles.
+              if (matchingBySubspecialty.length === 0) {
+                const _partes = partesDaQueixa(entities.subspecialty);
+                if (_partes.length > 1) {
+                  matchingBySubspecialty = schedulableDoctors.filter((d) => {
+                    const sub = subspecialtyMap.get(String(d.id));
+                    if (!sub) return false;
+                    const normalizedSub = normalizeForMatching(sub);
+                    return _partes.some((p) => normalizedSub.includes(normalizeForMatching(p)));
+                  });
+                  if (matchingBySubspecialty.length > 0) {
+                    console.log(`[Webhook] queixa composta "${entities.subspecialty}" → ${matchingBySubspecialty.length} médico(s) por parte`);
+                  }
+                }
+              }
               if (matchingBySubspecialty.length > 0) {
                 schedulableDoctors = matchingBySubspecialty;
                 console.log(
@@ -5861,6 +5914,18 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         const patId = patData.id || patData.patient_id;
         const patientName = String(patData.name || patData.full_name || (entities as any)._patientName || "");
         console.log(`[Webhook] Patient identified: ${patientName} (id: ${patId})`);
+        // CPF DE OUTRA PESSOA: CONFIRMAR ANTES DE MARCAR (07/10, Roberto: pediu "consulta
+        // para pé", mandou um CPF e a Julia marcou para "Sonia" sem perguntar). Nome do
+        // cadastro que não bate com o do WhatsApp → pergunta uma vez; o "sim" volta com
+        // paciente_confirmado e a marcação segue (a reserva é conferida de novo no POST).
+        {
+          const _nomeWpp = String((entities as any).nome_whatsapp || "");
+          if (_nomeWpp && patientName && !(entities as any).paciente_confirmado && !nomeParaTratamento(patientName, _nomeWpp)) {
+            console.log(`[Webhook] CPF é de "${patientName.slice(0, 20)}", WhatsApp "${_nomeWpp.slice(0, 20)}" — confirmando antes de marcar`);
+            const _perg = textoConfirmaPaciente(patientName, doctorName || entities.doctor_name || "", entities.date, entities.time);
+            return { status: "needs_info", response: _perg, error: _perg, bypassAiRewrite: true, verifiedSchedule: true } as any;
+          }
+        }
         // Save/update patient cache in local_patients
         if (supabaseClient && clinicTokenId && senderPhone) {
           try {
@@ -6548,6 +6613,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             atendimentos: _atendimentosDoPaciente,
             dataPedida: String(entities.date || ""),
             hoje: getTodayISO_SP(),
+            agora: agoraSP(),
           });
           console.log(`[Webhook] limite - situação=${_limite.tipo} transferir=${_limite.transferir}`);
 
@@ -7071,6 +7137,22 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         console.error(
           `[Webhook] confirmar FALHOU attId=${attId} — legacy=${confirmResult.status} body=${JSON.stringify(confirmResult.data).substring(0, 300)} | final=${finalResult.status} body=${JSON.stringify(finalResult.data).substring(0, 300)}`,
         );
+        // A CONSULTA EXISTE: "VOU MANTER" É CONFIRMAÇÃO SIMPLES (07/10, Vivi: "Vou hj no
+        // mesmo horário que estava marcado" → "não consegui registrar a confirmação" e
+        // transferência, com a consulta das 15h20 de pé). Achamos a consulta: a resposta
+        // diz que ela continua marcada, sem transferir (pedido do dono).
+        if (selectedAtt) {
+          const _sa = selectedAtt as Record<string, unknown>;
+          const _saIni = String(_sa.start_date || _sa.date || "").replace("T", " ");
+          const _saDoc = String(_sa.doctor_name || _sa.user_name || ((_sa.user as Record<string, unknown> | undefined)?.name) || "");
+          return {
+            status: "success",
+            response: textoConsultaMantida(_saIni, _saDoc, getTodayISO_SP()),
+            error: "PUT de confirmação recusado — consulta existe, resposta de consulta mantida (sem transferir).",
+            bypassAiRewrite: true,
+            verifiedSchedule: true,
+          } as any;
+        }
         if (avanceaiConfig && senderPhone) {
           try {
             await transferTicketToHuman({
@@ -9160,12 +9242,20 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               console.log(
                 `[CasoLongo] conversa ${conversationIdParam} já passou pela fila em ${JANELA_CASO_LONGO_DIAS}d — fica com a ${_donaLonga}, sem nova transferência`,
               );
+              // NOME SÓ DE QUEM ESTÁ COM A FICHA AGORA (07/10, Rosilene: "ficou com a
+              // Lidiane", mas a ficha estava na fila e foi a Mardila que pegou). Sem a
+              // dona com o ticket aberto, a resposta não cita nome nenhum.
+              const _donoAgora = stripAccents(String((entities as any).dona_do_ticket || "").toLowerCase());
+              const _citaNome = !!_donoAgora && _donoAgora.startsWith(stripAccents(String(_donaLonga).toLowerCase()).split(/\s+/)[0]);
+              const _quem = _citaNome ? `com a ${_donaLonga}` : "registrada com a nossa equipe";
               return {
                 status: "success",
-                response: `A mensagem ficou com a ${_donaLonga}, que já cuida deste caso (sem nova transferência).`,
+                response: `A mensagem ficou ${_quem}, que já cuida deste caso (sem nova transferência).`,
                 internal_instruction:
                   `Não diga que vai transferir, encaminhar, chamar ou avisar alguém, e não diga que o paciente está na fila. ` +
-                  `Diga que a mensagem ficou com a ${_donaLonga}, que já está cuidando do caso e responde por aqui. ` +
+                  (_citaNome
+                    ? `Diga que a mensagem ficou com a ${_donaLonga}, que já está cuidando do caso e responde por aqui. `
+                    : `Diga que a mensagem ficou registrada com a nossa equipe, que já acompanha o caso e responde por aqui. NÃO cite o nome de nenhuma atendente. `) +
                   `Se a mensagem tiver uma pergunta que você sabe responder (endereço, telefone, horário da clínica), responda. Não prometa prazo.`,
                 // A rede da promessa (TransferPromiseGuard) transferiria de novo ao ler
                 // "a Vânia te responde" sem transferência nos últimos 3 minutos.
@@ -10217,7 +10307,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                   status: "transferred_infiltracao",
                   response: "Encaminhado para a fila de pendentes",
                   error:
-                    "O paciente falou de infiltração (a Lidiane cuida). Informe que pode enviar por aqui mesmo a foto da carteirinha do convênio, um documento pessoal (RG ou CNH) e o laudo da ressonância, e que estamos encaminhando para a Lidiane (ou atendente) que dará continuidade. NÃO peça dados cadastrais. NÃO tente agendar consulta.",
+                    instrucaoDaInfiltracao(currentMessageText, "a Lidiane (ou atendente)"),
                 };
               }
             }
@@ -10231,7 +10321,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           status: "transferred_infiltracao",
           response: "",
           error:
-            "O paciente falou de infiltração (a Lidiane cuida). Informe que pode enviar por aqui mesmo a foto da carteirinha do convênio, um documento pessoal (RG ou CNH) e o laudo da ressonância, e que estamos encaminhando para uma atendente que dará continuidade. NÃO peça dados cadastrais. NÃO tente agendar consulta.",
+            instrucaoDaInfiltracao(currentMessageText, "uma atendente"),
         };
       }
 
@@ -11367,10 +11457,12 @@ Responda APENAS com o texto da mensagem, sem aspas, sem prefixos, sem explicaç�
   // Strip markdown bold/italic formatting for natural WhatsApp messages
   // corrigirLinkDoMapa: o Luna corta o último caractere do link do Maps com prompt
   // grande (7 de 12 no teste de 13/09). Aplicado aqui, cobre os dois retornos abaixo.
-  const _limpo = corrigirLinkDoMapa(
+  const _limpoBase = corrigirLinkDoMapa(
     content.trim().replace(/\*{1,2}([^*]+)\*{1,2}/g, "$1"),
     clinicLocationInfo?.google_maps_link,
   );
+  // Bradesco fora do Top Nacional: nunca "apenas"/"não atendemos" — a equipe confirma (07/10).
+  const _limpo = negaPlanoBradesco(_limpoBase) ? TEXTO_BRADESCO_EQUIPE_CONFIRMA : suavizarRestricaoBradesco(_limpoBase);
 
   // NUNCA ENTREGAR MEIA FRASE (17/08). Se o modelo bateu no teto, `finish_reason`
   // vem "length" e o texto termina no meio — foi o que o paciente Fernando leu.
@@ -13630,7 +13722,22 @@ Deno.serve(async (req) => {
           !isResetRequest &&
           clinicRef?.greeting_template
         ) {
-          const greetingTpl = String(clinicRef.greeting_template).trim();
+          let greetingTpl = String(clinicRef.greeting_template).trim();
+          // APRESENTAÇÃO SÓ UMA VEZ (07/10, Vivi: "Oi! Eu sou a Julia…" às 11h58 e de
+          // novo às 13h13). Já se apresentou nas últimas 6 h → cumprimento curto.
+          try {
+            const { count: _jaSeApresentou } = await supabase
+              .from("webhook_messages")
+              .select("id", { count: "exact", head: true })
+              .eq("conversation_id", conversationId)
+              .eq("direction", "outgoing")
+              .ilike("message_text", "%Eu sou a Julia%")
+              .gte("created_at", new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString());
+            if ((_jaSeApresentou || 0) > 0) {
+              console.log(`[Webhook] 👋 já se apresentou nas últimas 6 h — cumprimento curto`);
+              greetingTpl = TEXTO_CUMPRIMENTO_CURTO;
+            }
+          } catch { /* fica o texto oficial */ }
           if (greetingTpl.length > 10) {
             // Conversa "fresca": sem outgoing nas ultimas 12h OU estado conv idle/closed/greeting.
             // Janela 12h (reduzida de 24h) pra cobrir pacientes que voltam no dia seguinte
@@ -13879,8 +13986,39 @@ Deno.serve(async (req) => {
         }
       }
 
+      // === ACEITE DA VAGA JUNTO COM PEDIDO DE ATENDENTE (07/10, Juliana) ===
+      // "Quero / Falar com atendente" à oferta da lista de espera virou transferência
+      // por frustração e a antecipação não aconteceu. A 1ª linha aceita: processa o
+      // aceite primeiro (WaitlistReply) e, na resposta, passa para a equipe também.
+      let _aceiteDeVaga = false;
+      const _primeiraLinhaMsg = String(finalMessage || "").split(/\n|\s\/\s/)[0].trim();
+      if (
+        _primeiraLinhaMsg && _primeiraLinhaMsg.length <= 40 && !/\d/.test(_primeiraLinhaMsg) &&
+        WAITLIST_ACCEPT_RE.test(_primeiraLinhaMsg) && !WAITLIST_DECLINE_RE.test(_primeiraLinhaMsg) &&
+        String(finalMessage || "").trim() !== _primeiraLinhaMsg && phone && clinicTokenId
+      ) {
+        try {
+          const { data: _ofertaRecente } = await supabase
+            .from("webhook_messages")
+            .select("id")
+            .eq("clinic_token_id", clinicTokenId)
+            .in("sender_phone", getPhoneVariants(phone))
+            .eq("direction", "outgoing")
+            .eq("ai_intent", "waitlist_offer")
+            .gte("created_at", new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString())
+            .limit(1);
+          if (_ofertaRecente && _ofertaRecente.length > 0) {
+            _aceiteDeVaga = true;
+            keywordForcedIntent = null;
+            console.log(`[WaitlistReply] "${_primeiraLinhaMsg}" + pedido junto — aceite da vaga primeiro`);
+          }
+        } catch (e) {
+          console.log(`[WaitlistReply] checagem do aceite com pedido falhou (non-blocking): ${(e as Error).message}`);
+        }
+      }
+
       // === HARDCODED KEYWORD OVERRIDES (independent of routing_rules) ===
-      if (!keywordForcedIntent) {
+      if (!keywordForcedIntent && !_aceiteDeVaga) {
         const msgSearchHardcoded = stripAccents(msgLower);
         if (msgSearchHardcoded.includes("cirurgia")) {
           // Find target from routing rules if configured, otherwise default
@@ -14120,7 +14258,7 @@ Deno.serve(async (req) => {
       // === FRUSTRATION DETECTION: força transferência imediata ===
       // Quando o paciente sinaliza frustração explícita, a IA sai de cena imediatamente
       // e o ticket vai pra um humano sem nova rodada de classificação.
-      if (!keywordForcedIntent) {
+      if (!keywordForcedIntent && !_aceiteDeVaga) {
         // Caixa alta e "!!" SAÍRAM (14/09, caso Cristiano) — ver sinalDeFrustracao
         // em helpers.ts: 154 mensagens em 45 dias disparavam só por pontuação.
         const isFrustrated = sinalDeFrustracao(finalMessage);
@@ -14534,7 +14672,18 @@ Deno.serve(async (req) => {
             }
 
             // Confirmação externa pega → silêncio total, mesmo se houver "pergunta" nossa
-            if (externalConfirmFound && !_wlOfferPending) {
+            // A PERGUNTA DA JULIA MAIS NOVA QUE O LEMBRETE DO AMIGO VENCE (07/10): um "sim" à
+            // pergunta "A consulta é para X, certo?" ou "É essa que deseja reagendar?" era
+            // descartado como resposta ao lembrete de confirmação de dias antes.
+            const _externoMaisRecente = (recentOuts || []).find((o) =>
+              EXTERNAL_CONFIRM_RE.test((o.ai_response || o.message_text || "")),
+            );
+            const _perguntaNossaMaisNova = !!lastReal && !!_externoMaisRecente &&
+              Date.parse(String(lastReal.created_at)) > Date.parse(String(_externoMaisRecente.created_at));
+            if (_perguntaNossaMaisNova) {
+              console.log(`[Webhook] ORPHAN-ACK: pergunta da Julia é mais nova que o lembrete externo — "${ackText}" responde a ela`);
+            }
+            if (externalConfirmFound && !_wlOfferPending && !_perguntaNossaMaisNova) {
               console.log(`[Webhook] 🤐 ORPHAN-ACK GUARD v2: "${ackText}" → confirmação externa detectada nos últimos 7d → skip`);
               await supabase.from("webhook_messages").update({
                 action_status: "skipped",
@@ -14784,7 +14933,7 @@ Deno.serve(async (req) => {
         // Aceite força intent=agendar com o slot ofertado — o fluxo normal cuida
         // de CPF, tipo de consulta, convênio, auditoria e verify-booking.
         try {
-          const _wlTxt = (finalMessage || "").trim();
+          const _wlTxt = _aceiteDeVaga ? _primeiraLinhaMsg : (finalMessage || "").trim();
           // Pergunta não é recusa (27/09, Luiz Flávio: "Nao tinha confirmado sexta às 9?"
           // virou "Passei essa vaga para o próximo" com a oferta já vencida).
           const _wlDecline = WAITLIST_DECLINE_RE.test(_wlTxt) && _wlTxt.length <= 60 && !_wlTxt.includes("?");
@@ -14866,6 +15015,36 @@ Deno.serve(async (req) => {
           }
         } catch (e) {
           console.log(`[WaitlistReply] check error (non-blocking): ${(e as Error).message}`);
+        }
+
+        // === RESPOSTA À PERGUNTA "A CONSULTA É PARA X, CERTO?" (07/10, Roberto) ===
+        try {
+          if (conversationId) {
+            const { data: _ultSaida } = await supabase
+              .from("webhook_messages")
+              .select("message_text, created_at")
+              .eq("conversation_id", conversationId)
+              .eq("direction", "outgoing")
+              .order("created_at", { ascending: false })
+              .limit(1);
+            const _perguntaPaciente = String(_ultSaida?.[0]?.message_text || "");
+            const _recente = _ultSaida?.[0] && Date.now() - Date.parse(String(_ultSaida[0].created_at)) < 30 * 60_000;
+            if (_recente && ehPerguntaConfirmaPaciente(_perguntaPaciente)) {
+              const _r = respostaAPerguntaDoPaciente(finalMessage || "");
+              if (_r === "sim") {
+                console.log(`[ConfirmaPaciente] "sim" — segue a marcação para quem o CPF indica`);
+                classification.intent = "agendar";
+                (classification as any).paciente_confirmado = true;
+              } else if (_r === "nao") {
+                console.log(`[ConfirmaPaciente] "não" — pede o CPF de quem vai ser atendido`);
+                classification.intent = "unknown";
+                classification.cpf = "";
+                (classification as any).__naoEhOPaciente = true;
+              }
+            }
+          }
+        } catch (e) {
+          console.log(`[ConfirmaPaciente] check error (non-blocking): ${(e as Error).message}`);
         }
 
         // === AVISO DE ATRASO (29/09, Mari e Andrea) ===
@@ -15631,6 +15810,43 @@ Deno.serve(async (req) => {
       (globalThis as any).__currentConversationId = conversationId;
 
       // Execute action (now with supabase client and clinicTokenId for doctor_settings filtering)
+      // CONSULTA COM O MÉDICO NÃO É FISIOTERAPIA (07/10, Renilson; pedido do dono): o
+      // classificador manda para a fisio quem cita "fisio" na frase, mas "retorno",
+      // "marcar consulta", "encaixe" com o médico é agendamento.
+      if (classification.intent === "solicitar_fisioterapia" && classificarPedidoDeFisioterapia(finalMessage || "") === "consulta_medica") {
+        console.log(`[Webhook] solicitar_fisioterapia com pedido de CONSULTA — seguindo como agendar`);
+        classification.intent = "agendar";
+      }
+      // CONVÊNIO/CADASTRO DEPOIS DE MARCAR OU REMARCAR (07/10, Elimar): a Julia remarcou
+      // para 09/10 08h20, a paciente avisou que o convênio mudou, e o "Bradesco" e a
+      // data de nascimento caíram no cadastrar — que tentou MARCAR de novo ("não há
+      // horários", "já existe consulta em 09/10"). Com marcação de verdade nos últimos
+      // 30 min, cadastro e convênio não marcam nada: a data fica, a equipe atualiza.
+      let _convenioPosMarcacao: { date: string; time: string } | null = null;
+      if (
+        conversationId &&
+        ["cadastrar", "agendar", "consultar_convenios", "reagendar"].includes(String(classification.intent || "")) &&
+        mensagemSoDeConvenio(finalMessage || "")
+      ) {
+        try {
+          const _mrConv = await marcacaoRecenteDaConversa(supabase, conversationId);
+          if (_mrConv) {
+            console.log(`[ConvenioPosMarcacao] ${classification.intent} logo depois de marcar (${_mrConv.date} ${_mrConv.time}) — não marca de novo`);
+            _convenioPosMarcacao = _mrConv;
+            classification.intent = "unknown";
+          }
+        } catch (e) {
+          console.log(`[ConvenioPosMarcacao] check error (non-blocking): ${(e as Error).message}`);
+        }
+      }
+      // "O DR. LUIZ FALOU PRA DAR UM ALÔ" NÃO É PEDIDO DE HORÁRIO (07/10, Marcello): virou
+      // agendar e recebeu a lista. Sem pedido claro, a Julia pergunta o que o médico pediu.
+      let _recadoDoMedico = false;
+      if (classification.intent === "agendar" && recadoDoMedicoSemPedido(finalMessage || "")) {
+        console.log(`[Webhook] recado do médico sem pedido claro — perguntando antes de listar horários`);
+        _recadoDoMedico = true;
+        classification.intent = "unknown";
+      }
       console.log(`[Webhook] Executing action: ${classification.intent}`);
       const _actionResultRaw = await executeAction(
         classification.intent,
@@ -15654,6 +15870,11 @@ Deno.serve(async (req) => {
           _waitlist_period_set: (classification as any)._waitlist_period_set,
           // Telefone no cadastro de outra pessoa (30/09): não buscar CPF pelo telefone
           sem_cpf_pelo_telefone: _telefoneDeOutraPessoa,
+          // Nome do WhatsApp e "sim" à pergunta "A consulta é para X, certo?" (07/10, Roberto)
+          nome_whatsapp: name || "",
+          paciente_confirmado: !!(classification as any).paciente_confirmado,
+          // Quem está com a ficha no Z-PRO agora (07/10): só esse nome pode ser citado
+          dona_do_ticket: String((payload as any)?.ticket?.status || "") === "open" ? String((payload as any)?.ticket?.user?.name || "") : "",
         } as any,
         amigoToken,
         companyId,
@@ -16497,7 +16718,10 @@ Deno.serve(async (req) => {
         // MESMA lista de horários. Repetir frustra e alimenta o breaker; responder
         // curto que aqueles são os primeiros horários resolve a pergunta de verdade.
         try {
-          if (conversationId && /Horários disponíveis com/i.test(replyText)) {
+          // (07/10, Filippe) a escada da janela ("Em 16/10 não encontrei horário livre com
+          // X. Os primeiros que encontrei…") também repete — e a repetição era engolida
+          // como duplicata: "14/10" e "Outra data. 14/10" ficaram sem resposta.
+          if (conversationId && /Horários disponíveis com|não encontrei horário livre com|não há horário livre com|Os primeiros que encontrei/i.test(replyText)) {
             const _since30r = new Date(Date.now() - 30 * 60 * 1000).toISOString();
             const { data: _prevOffer } = await supabase
               .from("webhook_messages")
@@ -16510,13 +16734,17 @@ Deno.serve(async (req) => {
               .limit(1);
             const _prevTxt = String(_prevOffer?.[0]?.message_text || "");
             if (_prevTxt && nearDuplicate(replyText, _prevTxt)) {
-              const _docM = replyText.match(/Horários disponíveis com ([^\n(:]+)/i);
+              const _docM = replyText.match(/Horários disponíveis com ([^\n(:]+)/i) ||
+                replyText.match(/(?:não encontrei horário livre com|não há horário livre com|vaga com) ([^\n.(:]+)/i);
               const _docN = (_docM?.[1] || "o médico").trim();
               console.log(`[RepeatOffer] mesma lista de horários em 30min — respondendo "primeiros horários" em vez de repetir`);
               // A frase dos "primeiros horários" só para quem pediu algo mais cedo
               // (22/09): a Elaine pediu outubro e ouviu que não havia nada ANTES.
               // Quem perguntou outra coisa recebe um texto que pede a data (helpers.ts).
               replyText = textoMesmaLista(_docN, pedeHorarioMaisCedo(finalMessage || ""));
+              // Pediu um DIA que também não tem: diz isso, não "me diga a data" (07/10, Filippe).
+              const _jDia = janelaDeDatas(finalMessage || "", getTodayISO_SP());
+              if (_jDia?.datas && _jDia.datas.length === 1) replyText = textoMesmaListaNaData(_docN, _jDia.datas[0]);
               // Quem perguntou o PREÇO recebe o preço, não "me diga a data" (29/09, Renata).
               const _precoRep = perguntaDePreco(finalMessage || "") ? precoDaConsulta(clinicRef?.custom_notes) : null;
               if (_precoRep && !/nutr|ana\s+paula/i.test(_docN)) {
@@ -16527,6 +16755,18 @@ Deno.serve(async (req) => {
           }
         } catch (e) {
           console.log(`[RepeatOffer] check error (non-blocking): ${(e as Error).message}`);
+        }
+
+        if (_recadoDoMedico) replyText = TEXTO_RECADO_DO_MEDICO;
+        if ((classification as any).__naoEhOPaciente) replyText = TEXTO_PEDE_CPF_DO_PACIENTE;
+        if (_convenioPosMarcacao) {
+          replyText = textoConvenioPosMarcacao(_convenioPosMarcacao.date, _convenioPosMarcacao.time);
+        }
+
+        // Aceite da vaga + pedido de atendente (07/10, Juliana): depois do aceite, a
+        // promessa leva à equipe (a rede da promessa transfere de verdade).
+        if (_aceiteDeVaga && /atendente|atendimento|pessoa|humano/i.test(finalMessage || "") && !PROMESSA_DE_HUMANO_RE.test(replyText)) {
+          replyText = `${replyText}\n\n${TEXTO_ACEITE_COM_ATENDENTE}`;
         }
 
         // === NOME DE OUTRA PESSOA LOGO DEPOIS DA MARCAÇÃO (05/10, Marly) ===
@@ -16566,6 +16806,21 @@ Deno.serve(async (req) => {
           }
         } catch (e) {
           console.log(`[Preço] check error (non-blocking): ${(e as Error).message}`);
+        }
+
+        // === "O QUE INCLUI? RAIO-X ESTÁ INCLUSO?" (06–07/10, Milla) ===
+        // "Qual valor e o que inclui" e "Tá incluso algum exame na consulta? Raio x"
+        // receberam horários e "precisa ser confirmado pela recepção". Resposta do dono:
+        // a consulta dá direito a retorno em 30 dias; o raio-X é cobrado à parte.
+        try {
+          if (perguntaDeInclusao(finalMessage || "") && !/raio/i.test(replyText) && !/nutr|ana\s+paula/i.test(finalMessage || "")) {
+            const _incl = textoConsultaInclui(precoDaConsulta(clinicRef?.custom_notes));
+            const _naAgenda = ["agendar", "reagendar", "cadastrar"].includes(String(classification.intent || ""));
+            console.log(`[Inclusao] pergunta do que a consulta inclui — respondendo (${_naAgenda ? "antes da lista" : "no lugar da resposta"})`);
+            replyText = _naAgenda ? `${_incl}\n\n${replyText.replace(/^A consulta particular com nossos ortopedistas é R\$\s*[\d.,]+\.\s*/, "")}` : _incl;
+          }
+        } catch (e) {
+          console.log(`[Inclusao] check error (non-blocking): ${(e as Error).message}`);
         }
 
         // === CPF-ASK DEDUP (relatorio 06/07 conversa 75, Carla) ===

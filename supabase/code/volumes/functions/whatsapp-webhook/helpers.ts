@@ -390,7 +390,9 @@ const FISIO_PEDIDO_MEDICO_RE =
 // esta pedindo autorizacao, nao comprando pacote.
 const FISIO_MAIS_SESSOES_RE = /\bmais\s+(\d+\s+)?sess[õo]es?\b/i;
 // "pedir ao Dr. X", "solicitar para o doutor"
-const FISIO_PEDIR_AO_MEDICO_RE = /\b(pedir|solicitar|pede)\b[\s\S]{0,20}\b(ao|para\s+o|pro|com\s+o)\s+(dr\.?|doutor|m[ée]dic[oa])/i;
+const FISIO_PEDIR_AO_MEDICO_RE = /\b(pedir|solicitar|pede)\b[\s\S]{0,20}\b(ao|para\s+o|pro|com\s+o)\s+(dr\.?|doutor|m[ée]dic[oa])|\b(dr\.?a?|doutora?)\s+\p{L}+\s+(ficou\s+de|tinha\s+ficado\s+de|ia)\s+(me\s+)?(passar|mandar|enviar|indicar|receitar)|\bver\s+com\s+(ele|ela|o\s+dr|o\s+doutor)\b/iu;
+// ↑ 06/10 (Cleidiane: "o Doutor Hugo ficou de me passar algo pra usar no tornozelo…
+// Ver com ele e me fala") recebeu a tabela da fisio: é recado ao médico.
 // duvida sobre exercicio, ou querer falar com a propria fisioterapeuta
 const FISIO_FALAR_RE =
   /\bexerc[íi]cios?\b|\b(falar|conversar|d[úu]vida|contato)\b[\s\S]{0,45}\b(fisio\w*|fisioterapeut[ao])/i;
@@ -454,8 +456,10 @@ const FISIO_TRABALHO_RE =
 // tem um encaixe? Ela precisa de pedido pra fazer fisioterapia" (Flávia). E o recado
 // do fisioterapeuta ao médico (José Eduardo: "o fisioterapeuta Andrew se comprometeu
 // a perguntar para o Dr. Luiz…") é conversa com a fisio, não venda.
+// 07/10 (Renilson: "É um retorno depois das sessões de fisioterapia para ombro que ele
+// pediu" recebeu a tabela): "um/o/meu retorno", "retorno com o dr" também são consulta.
 const FISIO_CONSULTA_MEDICA_RE =
-  /\b(marcar|agendar|remarcar)\s+(uma\s+|um\s+|a\s+|o\s+)?(consulta|retorno)\b(?!\s+com\s+(o|a)\s+fisio)|\b(retornar|voltar|passar)\s+(n[oa]|com\s+[oa])\s+(dr\.?a?|doutora?|m[ée]dic[oa])\b|\bencaixe\b/iu;
+  /\b(marcar|agendar|remarcar)\s+(uma\s+|um\s+|a\s+|o\s+)?(consulta|retorno)\b(?!\s+com\s+(o|a)\s+fisio)|\b(um|o|meu|de|para|pra|pro)\s+retorno\b(?!\s+(d[ao]s?\s+)?(sess|fisio))|\bretorno\s+(com|no|na|ao)\s+(o\s+|a\s+)?(dr\.?a?|doutora?|m[ée]dic[oa])\b|\b(retornar|voltar|passar)\s+(n[oa]|com\s+[oa])\s+(dr\.?a?|doutora?|m[ée]dic[oa])\b|\bencaixe\b/iu;
 const FISIO_RECADO_RE =
   /\bfisioterapeuta\s+\p{L}+[\s\S]{0,80}\b(perguntar|comprometeu|ficou\s+de|orientou|repass\w+|retorno)\b/iu;
 
@@ -1892,6 +1896,8 @@ export function textoDoLimiteDeAtendimentos(a: {
   atendimentos: AtendimentoDoAmigo[] | null | undefined;
   dataPedida: string;
   hoje: string;
+  /** relógio de SP; com ele, consulta de HOJE que já passou conta como passada (07/10, Catarina) */
+  agora?: { hoje: string; hora: number; minuto: number };
 }): { tipo: "mesmo_dia" | "futura" | "recente" | "nenhuma"; transferir: boolean; texto: string } {
   const vivos = (Array.isArray(a.atendimentos) ? a.atendimentos : [])
     .map((x) => {
@@ -1908,10 +1914,14 @@ export function textoDoLimiteDeAtendimentos(a: {
     .sort((x, y) => `${x.dia} ${x.hora}`.localeCompare(`${y.dia} ${y.hora}`));
 
   type V = (typeof vivos)[number];
+  // CONSULTA DE HOJE QUE JÁ ACONTECEU NÃO É "JÁ MARCADA" (07/10, Catarina): pediu o
+  // retorno para 20/10 às 14h53 e ouviu "você já tem consulta marcada para 07/10 às
+  // 11:00" — era a consulta daquela manhã. Ela é a "recente" (o retorno pesa por ela).
+  const jaPassou = (v: V) => v.dia < a.hoje || (!!a.agora && v.dia === a.hoje && !!v.hora && consultaDeHojeJaPassou(`${v.dia} ${v.hora}`, a.agora));
   const quando = (v: V) => `*${formatDateLabel(v.dia)}*${v.hora ? ` às *${v.hora}*` : ""}`;
   const com = (v: V) => (v.medico ? ` com ${v.medico}` : "");
 
-  const mesmoDia = vivos.find((v) => v.dia === a.dataPedida);
+  const mesmoDia = vivos.find((v) => v.dia === a.dataPedida && !jaPassou(v));
   if (mesmoDia) {
     return {
       tipo: "mesmo_dia",
@@ -1921,7 +1931,7 @@ export function textoDoLimiteDeAtendimentos(a: {
         "Não precisa marcar de novo — se quiser trocar o horário, é só me dizer.",
     };
   }
-  const futura = vivos.find((v) => v.dia >= a.hoje);
+  const futura = vivos.find((v) => v.dia >= a.hoje && !jaPassou(v));
   if (futura) {
     return {
       tipo: "futura",
@@ -1933,7 +1943,7 @@ export function textoDoLimiteDeAtendimentos(a: {
     };
   }
   const limiteRecente = addDaysToISO(a.dataPedida, -30);
-  const ultima = [...vivos].reverse().find((v) => v.dia < a.hoje && v.dia >= limiteRecente);
+  const ultima = [...vivos].reverse().find((v) => jaPassou(v) && v.dia >= limiteRecente);
   if (ultima) {
     return {
       tipo: "recente",
@@ -2187,3 +2197,128 @@ export function textoMarcacaoEmOutroNome(nomeDito: string): string {
     `Vou passar para a nossa equipe colocar a consulta no nome certo e te responder por aqui. 🙏`
   );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORREÇÕES DO RELATÓRIO DE 06–07/10 (pedido do dono: "vamos em busca da nota 9")
+// ─────────────────────────────────────────────────────────────────────────────
+export const TEXTO_ACEITE_COM_ATENDENTE = "Como você pediu, vou passar para a nossa equipe também — elas te respondem por aqui. 🙏";
+
+/** Mensagem que só fala de convênio/plano (sem data, hora nem pedido de marcar). 07/10, Elimar. */
+export function mensagemSoDeConvenio(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  if (!t.trim() || t.length > 160) return false;
+  if (/\d{1,2}\s*[\/.-]\s*\d{1,2}/.test(t) || horaDoTexto(t)) return false;
+  if (/\b(marcar|agendar|remarcar|desmarcar|cancelar|antecipar|outro\s+dia|outra\s+data|horario)\b/.test(t)) return false;
+  return citaConvenio(t);
+}
+
+/** A mensagem cita convênio/plano (nome ou a palavra). */
+export function citaConvenio(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  return /\b(convenio|plano|carteirinha|bradesco|sul\s*america|sulamerica|porto|amil|unimed|notre\s*dame|hapvida|intermedica|care\s*plus|omint|gama|mediservice|prevent|medsenior|particular)\b/.test(t);
+}
+
+export function textoConvenioPosMarcacao(dataISO: string, hhmm: string): string {
+  const d = String(dataISO || "");
+  const data = /^\d{4}-\d{2}-\d{2}$/.test(d) ? `${d.slice(8, 10)}/${d.slice(5, 7)}` : d;
+  const quando = data ? ` para ${data}${hhmm ? ` às ${hhmm}` : ""}` : "";
+  return (
+    `Anotado! A consulta continua marcada${quando}. ✅ ` +
+    `A atualização do convênio no cadastro é com a nossa equipe — vou passar para elas, que te respondem por aqui. 🙏`
+  );
+}
+
+/** "Vocês fazem/realizam/têm X?" — pergunta de serviço, não de consulta marcada (07/10, Lucas). */
+export function perguntaSobreServico(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  if (!t.trim() || t.length > 300) return false;
+  return /\b(voces|vcs|vc|a\s+clinica|ai)\s+(ainda\s+)?(fazem|faz|realizam|realiza|tem|teem|oferecem|oferece|trabalham\s+com)\b|\b(fazem|realizam|oferecem)\s+(o\s+|a\s+|os\s+|as\s+)?(procedimento|exame|terapia|tratamento|cirurgia|onda|infiltra|raio|ultrassom|resson|fisio|rpg|acupuntura|pilates|densitometria|eletro)/.test(t);
+}
+
+/** "cotovelo e punho", "pé/tornozelo", "ombro, joelho" → partes com 3+ letras (07/10). */
+export function partesDaQueixa(texto: unknown): string[] {
+  return String(texto ?? "")
+    .split(/\s*(?:\/|,|;|\+|&|\be\b|\bou\b)\s*/i)
+    .map((x) => x.trim())
+    .filter((x) => x.replace(/[^\p{L}]/gu, "").length >= 3);
+}
+
+/** "o que inclui a consulta?", "raio-x está incluso?", "tem retorno?" (06–07/10, Milla). */
+export function perguntaDeInclusao(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  if (!t.trim() || t.length > 300) return false;
+  // "inclusive", "incluir na lista", "incluiu o exame" NÃO contam: só a pergunta sobre o
+  // que a consulta/valor cobre (replay de 60 dias: 21 → 3, os 3 da Milla).
+  const inclui = /\b(inclus[oa]|inclui|incluid[oa]|incluem)\b/.test(t) && /\b(consulta|valor|preco|exame|raio)\b/.test(t);
+  const raioCobrado = /\braio[\s-]*x\b[\s\S]{0,40}\b(cobra\w*|pag\w*|a\s+parte|junto|valor)\b/.test(t);
+  return (inclui || raioCobrado) && !/\blista\s+de\s+espera\b|\bpedido\b/.test(t);
+}
+
+export function textoConsultaInclui(preco: string | null): string {
+  return `A consulta particular${preco ? ` (${preco})` : ""} dá direito a retorno em até 30 dias. O raio-X e outros exames são cobrados à parte.`;
+}
+
+/** O paciente pediu um dia que também não tem vaga; a lista já foi enviada (07/10, Filippe). */
+export function textoMesmaListaNaData(medico: string, dataISO: string): string {
+  const doc = String(medico || "o médico").trim() || "o médico";
+  const d = String(dataISO || "");
+  const data = /^\d{4}-\d{2}-\d{2}$/.test(d) ? `${d.slice(8, 10)}/${d.slice(5, 7)}` : d;
+  return `Em ${data} também não há horário livre com ${doc}. 🙏 Os horários que te passei acima são os primeiros disponíveis — algum deles te atende? Se quiser, me diga outra data que eu confiro.`;
+}
+
+/** Instrução da infiltração: quem diz que JÁ está autorizado não recebe pedido de documento (06/10, Karina Yoshida). */
+export function instrucaoDaInfiltracao(texto: unknown, destino: string): string {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  const jaAutorizada = /\b(autoriz\w*|aprovad\w*|liberad\w*|guia\s+(saiu|liberada))\b/.test(t);
+  if (jaAutorizada) {
+    return `O paciente falou de infiltração e o procedimento JÁ FOI AUTORIZADO (ou ele pergunta do andamento). NÃO peça carteirinha, documento nem laudo. Diga que estamos encaminhando para ${destino}, que segue com o agendamento do procedimento por aqui. NÃO peça dados cadastrais. NÃO tente agendar consulta.`;
+  }
+  return `O paciente falou de infiltração (a Lidiane cuida). Informe que pode enviar por aqui mesmo a foto da carteirinha do convênio, um documento pessoal (RG ou CNH) e o laudo da ressonância, e que estamos encaminhando para ${destino} que dará continuidade. NÃO peça dados cadastrais. NÃO tente agendar consulta.`;
+}
+
+/** "O Dr. Luiz falou pra dar um alô pra vocês" sem dizer o que quer (07/10, Marcello). */
+export function recadoDoMedicoSemPedido(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  if (!t.trim() || t.length > 250) return false;
+  const recado = /\b(dr\.?a?|doutora?|medic[oa])\b[\s\S]{0,50}\b(falou|pediu|disse|mandou|orientou|tinha\s+falado|tinh\s+falado)\b[\s\S]{0,30}\b(dar\s+um\s+alo|entrar\s+em\s+contato|falar\s+com\s+voces|procurar\s+voces|mandar\s+(uma\s+)?mensagem|chamar\s+voces)/.test(t);
+  if (!recado) return false;
+  return !/\b(marcar|agendar|consulta|retorno|horario|exame|laudo|receita|atestado|pedido|cirurgia|infiltra|fisio|encaixe)\b/.test(t);
+}
+
+export const TEXTO_RECADO_DO_MEDICO =
+  "Que bom que você nos procurou! 😊 Me conta o que o médico pediu: marcar uma consulta ou retorno, ou é outra coisa (exame, laudo, receita)? Assim eu já te ajudo.";
+
+/** Consulta existe e o paciente vai manter: confirmação simples (07/10, Vivi). */
+export function textoConsultaMantida(inicio: string, medico: string, hojeISO: string): string {
+  const s = String(inicio || "").replace("T", " ");
+  const d = s.slice(0, 10), h = s.slice(11, 16);
+  const quando = /^\d{4}-\d{2}-\d{2}$/.test(d) ? (d === hojeISO ? "hoje" : `${d.slice(8, 10)}/${d.slice(5, 7)}`) : "";
+  const doc = String(medico || "").trim();
+  return `Combinado! ✅ Sua consulta continua marcada${quando ? ` para ${quando}` : ""}${/^\d{2}:\d{2}$/.test(h) ? ` às ${h}` : ""}${doc ? ` com ${doc}` : ""}. Te esperamos! 😊`;
+}
+
+export const TEXTO_CUMPRIMENTO_CURTO = "Oi de novo! 😊 Em que posso te ajudar?";
+
+// CPF DE OUTRA PESSOA: CONFIRMAR ANTES DE MARCAR (07/10, Roberto → "Sonia")
+export function textoConfirmaPaciente(nomeDoCadastro: string, medico: string, dataISO: string, hhmm: string): string {
+  const nome = String(nomeDoCadastro || "").trim().toLowerCase().replace(/(^|\s)\p{L}/gu, (m) => m.toUpperCase());
+  const d = String(dataISO || "");
+  const data = /^\d{4}-\d{2}-\d{2}$/.test(d) ? `${d.slice(8, 10)}/${d.slice(5, 7)}` : "";
+  const quando = data ? ` (${data}${hhmm ? ` às ${hhmm}` : ""}${medico ? `, ${medico}` : ""})` : "";
+  // termina em "?" de propósito: é o que faz o "sim" curto passar pela guarda de ACK solto
+  return `Esse CPF está no cadastro de *${nome}*. Posso confirmar a consulta${quando} para ${nome.split(" ")[0]}?`;
+}
+
+export function ehPerguntaConfirmaPaciente(texto: unknown): boolean {
+  return /Esse CPF está no cadastro de \*[^*]+\*\. Posso confirmar a consulta[\s\S]*\?\s*$/.test(String(texto ?? ""));
+}
+
+export function respostaAPerguntaDoPaciente(texto: unknown): "sim" | "nao" | null {
+  const t = String(texto ?? "").trim();
+  if (!t || t.length > 60) return null;
+  if (/^\s*(n[ãa]o|nao|n)\b/i.test(t)) return "nao";
+  if (/^\s*(sim|s|isso|isso mesmo|correto|certo|exato|[ée]\s+(sim|ela|ele|para\s+ela|para\s+ele)|pode|pode\s+confirmar|confirmo|confirma|ok|é)\b/i.test(t)) return "sim";
+  return null;
+}
+
+export const TEXTO_PEDE_CPF_DO_PACIENTE = "Tudo bem! 🙏 Me passa, por favor, o nome completo e o CPF de quem vai ser atendido.";

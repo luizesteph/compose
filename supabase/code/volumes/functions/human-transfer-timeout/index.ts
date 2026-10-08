@@ -1314,9 +1314,15 @@ Deno.serve(async (req) => {
         // honesto: diz que o caso continua na fila, sem prometer prazo.
         const _semDona = !row.assigned_attendant_name || String(row.assigned_attendant_name).trim().startsWith("(");
         const attName = String(row.assigned_attendant_name || "nossa atendente").split(/\s+/)[0];
+        // PRONTO-SOCORRO SÓ PARA QUEM FOI TRANSFERIDO POR URGÊNCIA (07/10, pedido do
+        // dono): quem pediu laudo, nota fiscal ou valor (Wilson, Juliana, Heloisa…) lia
+        // "procure um pronto-socorro". 18 de 249 linhas em 14 dias eram urgência.
+        const _ehUrgencia = String(row.intent || "") === "urgencia";
+        const _fraseDoPS = _ehUrgencia ? ` Se for uma emergência, por favor não espere por aqui: procure um pronto-socorro.` : "";
         const warnMsgDoDia = _semDona
-          ? `Oi! 👋 Só passando pra avisar que seu caso continua na fila da nossa equipe e ainda não foi respondido. ` +
-            `Se for uma emergência, por favor não espere por aqui: procure um pronto-socorro. 🙏`
+          ? (_ehUrgencia
+              ? `Oi! 👋 Só passando pra avisar que seu caso continua na fila da nossa equipe e ainda não foi respondido.${_fraseDoPS} 🙏`
+              : `Oi! 👋 Só passando pra avisar: seu pedido está com a nossa equipe e elas te respondem por aqui em breve. Obrigado pela paciência! 🙏`)
           : `Oi! 👋 Só passando pra avisar: a ${attName} está finalizando outro atendimento e já já te responde. ` +
             `Obrigado pela paciência! 🙏`;
         // FIM DO EXPEDIENTE (pedido do dono, 15/09): das 17h30 às 18h15 este aviso
@@ -1326,8 +1332,7 @@ Deno.serve(async (req) => {
         const _spAviso = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
         const warnMsg = pertoDoEncerramento({ diaDaSemana: _spAviso.getDay(), hora: _spAviso.getHours(), minuto: _spAviso.getMinutes() })
           ? (_semDona
-              ? `Oi! 👋 Só passando pra avisar que seu caso continua na fila da nossa equipe. ${FRASE_ENCERRAMENTO} ` +
-                `Se for uma emergência, por favor não espere por aqui: procure um pronto-socorro. 🙏`
+              ? `Oi! 👋 Só passando pra avisar que seu caso continua na fila da nossa equipe. ${FRASE_ENCERRAMENTO}${_fraseDoPS} 🙏`
               : `Oi! 👋 Só passando pra avisar: ${FRASE_ENCERRAMENTO.replace("Vou tentar passar para um atendente", `vou tentar passar para a ${attName}`)} ` +
                 `Obrigado pela paciência! 🙏`)
           : warnMsgDoDia;
