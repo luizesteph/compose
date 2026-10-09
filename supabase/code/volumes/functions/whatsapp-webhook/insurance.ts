@@ -488,6 +488,13 @@ export function suavizarRestricaoBradesco(resposta: string): string {
   const r = String(resposta || "");
   if (!/bradesco/i.test(r) || !/top\s*nacional/i.test(r)) return r;
   let s = r.replace(/\b(apenas|somente|s[óo]|exclusivamente)\s+((?:n[oa]s?|para\s+os?|o)\s+)?((?:planos?\s+)?top\s*nacional)/gi, (_m, _a, n, t) => `${n || ""}${t}`);
+  // "pode me informar se o plano é Top Nacional ou Top Nacional Plus?" (08/10, Elaine,
+  // "rede nacional carteirinha vermelha") soa como "só esses" — e ela desistiu. Vira a
+  // regra do dono, sem interrogatório: os dois são certos, os outros a equipe confirma.
+  s = s.replace(
+    /[^.!?\n]*\bse\s+(?:o\s+)?(?:seu\s+)?plano\s+(?:do\s+bradesco\s+)?(?:[ée]|seria)\s+(?:o\s+)?top\s*nacional\s+ou\s+(?:o\s+)?top\s*nacional\s+plus[^.!?\n]*[.!?]?/i,
+    (m) => `${/^\s*/.exec(m)?.[0] || ""}Sobre o Bradesco: o Top Nacional e o Top Nacional Plus nós atendemos; os outros planos a nossa equipe confirma — pode seguir com a escolha do horário.`,
+  );
   if (!/outros\s+planos|equipe\s+(confirma|verifica|precisa)|confirmar\s+com\s+a\s+(nossa\s+)?equipe/i.test(s)) {
     s = s.replace(/(top\s*nacional\s+plus\b[^.!?\n]*)([.!?]?)/i, (_m, frase) => `${frase}. Outros planos do Bradesco a nossa equipe confirma.`);
   }

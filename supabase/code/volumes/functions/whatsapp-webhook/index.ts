@@ -105,6 +105,18 @@ import {
   TEXTO_CUMPRIMENTO_CURTO,
   textoConfirmaPaciente,
   ehPerguntaConfirmaPaciente,
+  nomeDoCadastroFoiDigitado,
+  textoEncontreiConsulta,
+  TEXTO_NAO_E_ESSA_CONSULTA,
+  respostaNegaReagendamento,
+  procedimentoJaLiberado,
+  TEXTO_PROCEDIMENTO_LIBERADO,
+  perguntaFazRaioXNoLocal,
+  TEXTO_RAIO_X_NO_LOCAL,
+  falaDeAtraso,
+  convenioPorPalavra,
+  perguntaConvenioPortoSeguro,
+  TEXTO_PORTO_SEGURO_EQUIPE,
   respostaAPerguntaDoPaciente,
   TEXTO_PEDE_CPF_DO_PACIENTE,
 } from "./helpers.ts";
@@ -4764,6 +4776,11 @@ async function executeAction(
           date: string,
           filterDoctorId?: string,
           periodFilter?: string,
+          // 08/10 (Roberta): a CONFERÊNCIA do horário escolhido usava esta lista
+          // cortada em 10 — o 17:20 que a própria Julia ofereceu (lista da tarde)
+          // "não estava disponível" porque o dia tinha mais de 10 vagas. Quem
+          // confere passa 0 (lista inteira); quem mostra continua com 10.
+          limite = 10,
         ): Promise<string[]> => {
           try {
             const targetDoctorId = filterDoctorId || doctorId;
@@ -4855,7 +4872,7 @@ async function executeAction(
               // normalizada da linha acima — `date` pode chegar como DD/MM/YYYY.
               const _ag = agoraSP();
               unique = unique.filter((t) => !slotJaPassou(isoDate, t, _ag));
-              return unique.slice(0, 10);
+              return limite > 0 ? unique.slice(0, limite) : unique;
             }
           } catch (e) {
             console.log(`[Webhook] Could not fetch calendar for ${date}:`, e.message);
@@ -5243,7 +5260,7 @@ async function executeAction(
                     await Promise.all(
                       top5.map(async (d: string) => {
                         try {
-                          let slots = await fetchSlotsForDate(d, doctorId || undefined, undefined);
+                          let slots = await fetchSlotsForDate(d, doctorId || undefined, undefined, 0);
                           if (periodFilter2 === "manha") slots = slots.filter((t) => t < "12:00");
                           if (periodFilter2 === "tarde") slots = slots.filter((t) => t >= "12:00");
                           if (slots.length > 0) {
@@ -5569,11 +5586,14 @@ async function executeAction(
 
         // Step 6.5: VALIDATE that the requested time actually exists in calendar
         if (entities.time && doctorId) {
-          const realSlots = await fetchSlotsForDate(entities.date, doctorId);
+          const realSlots = await fetchSlotsForDate(entities.date, doctorId, undefined, 0);
           const dateLabel = formatDateLabel(entities.date);
           if (realSlots.length > 0 && !realSlots.includes(entities.time)) {
-            // Requested time doesn't exist — show real slots
-            const msg = `O horário ${entities.time} não está disponível com ${doctorName} em ${dateLabel}. Os horários disponíveis são: ${realSlots.join(", ")}.\n\nQual horário prefere?`;
+            // Requested time doesn't exist — show real slots (do mesmo período do pedido)
+            const _tarde = String(entities.time) >= "12:00";
+            const _doPeriodo = realSlots.filter((t) => (t >= "12:00") === _tarde);
+            const _mostrar = (_doPeriodo.length ? _doPeriodo : realSlots).slice(0, 10);
+            const msg = `O horário ${entities.time} não está disponível com ${doctorName} em ${dateLabel}. Os horários disponíveis são: ${_mostrar.join(", ")}.\n\nQual horário prefere?`;
             console.log(
               `[Webhook] Step 6.5: Time ${entities.time} NOT in real slots [${realSlots.join(",")}] for ${doctorName} on ${entities.date}`,
             );
@@ -5920,7 +5940,9 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         // paciente_confirmado e a marcação segue (a reserva é conferida de novo no POST).
         {
           const _nomeWpp = String((entities as any).nome_whatsapp || "");
-          if (_nomeWpp && patientName && !(entities as any).paciente_confirmado && !nomeParaTratamento(patientName, _nomeWpp)) {
+          // nome que o próprio paciente digitou (Sidy 08/10) não precisa de confirmação
+          const _nomeDigitado = nomeDoCadastroFoiDigitado(patientName, entities.patient_full_name, currentMessageText);
+          if (_nomeWpp && patientName && !(entities as any).paciente_confirmado && !_nomeDigitado && !nomeParaTratamento(patientName, _nomeWpp)) {
             console.log(`[Webhook] CPF é de "${patientName.slice(0, 20)}", WhatsApp "${_nomeWpp.slice(0, 20)}" — confirmando antes de marcar`);
             const _perg = textoConfirmaPaciente(patientName, doctorName || entities.doctor_name || "", entities.date, entities.time);
             return { status: "needs_info", response: _perg, error: _perg, bypassAiRewrite: true, verifiedSchedule: true } as any;
@@ -6157,7 +6179,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                 `[Webhook] agendar - Skipping double validation — patient already owns this slot with doctor ${doctorId}`,
               );
             } else {
-              const freshSlots = await fetchSlotsForDate(entities.date, doctorId);
+              const freshSlots = await fetchSlotsForDate(entities.date, doctorId, undefined, 0);
               if (freshSlots.length > 0 && !freshSlots.includes(entities.time)) {
                 console.log(
                   `[Webhook] agendar - DOUBLE VALIDATION FAILED: ${entities.time} no longer available. Fresh slots: [${freshSlots.join(",")}]`,
@@ -6165,7 +6187,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                 return {
                   status: "failed",
                   response: "",
-                  error: `O horário ${entities.time} não está mais disponível com ${doctorName} em ${entities.date}. Horários disponíveis AGORA: ${freshSlots.join(", ")}. Ofereça esses horários ao paciente.`,
+                  error: `O horário ${entities.time} não está mais disponível com ${doctorName} em ${entities.date}. Horários disponíveis AGORA: ${freshSlots.slice(0, 12).join(", ")}. Ofereça esses horários ao paciente.`,
                 };
               }
               console.log(`[Webhook] agendar - Double validation OK: ${entities.time} still available`);
@@ -7203,6 +7225,10 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           if (respostaConfirmaReagendamento(currentMessageText, _ultimaJulia?.content)) {
             console.log(`[Webhook] reagendar - "${String(currentMessageText || "").slice(0, 20)}" responde "é essa?" — confirmado sem o modelo`);
             entities.reagendar_confirmed = true;
+          } else if (respostaNegaReagendamento(currentMessageText, _ultimaJulia?.content)) {
+            // "não" ao "é essa?" (08/10): pergunta o que está diferente, sem repetir a pergunta
+            console.log(`[Webhook] reagendar - "${String(currentMessageText || "").slice(0, 30)}" nega "é essa?" — perguntando o que está diferente`);
+            return { status: "needs_info", response: TEXTO_NAO_E_ESSA_CONSULTA, error: TEXTO_NAO_E_ESSA_CONSULTA, bypassAiRewrite: true, entities: { ...entities, attendance_id: "" } } as any;
           }
         }
         // ── Step 1: Need CPF to identify patient ──
@@ -7303,13 +7329,13 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               const userObj = att.user as Record<string, unknown> | undefined;
               const docName = (att.doctor_name || att.user_name || userObj?.name || "médico") as string;
               const startDate = String(att.start_date || att.date || "");
-              const datePart = startDate.split(" ")[0].split("T")[0];
-              const timePart = startDate.includes(" ") ? startDate.split(" ")[1]?.substring(0, 5) : "";
-              const formattedDate = datePart.split("-").reverse().join("/");
+              // nome de quem vai ser atendido + hora (08/10, acompanhante do Antônio)
+              const _nomeDaConsulta = String(patData.name || patData.full_name || "");
 
               return {
                 status: "needs_info",
-                response: `Encontrei sua consulta com *${docName}* no dia *${formattedDate}*${timePart ? ` às *${timePart}*` : ""}. É essa que deseja reagendar?`,
+                response: textoEncontreiConsulta(_nomeDaConsulta, docName, startDate),
+                bypassAiRewrite: true,
                 entities: { ...entities, attendance_id: String(att.id) },
               };
             }
@@ -7980,6 +8006,10 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                     compactChoice.includes(compactName)
                   );
                 });
+                // ORDEM TROCADA NÃO É OUTRO CONVÊNIO (08/10, Bruno: "Notre Dame / Hapvida"
+                // não casava "HAPVIDA / NOTREDAME" e a Julia pediu 5 vezes "digite o número
+                // 5"). Casa por nome PRÓPRIO do convênio (sem "saúde", "seguro"…).
+                if (!groupMatch) groupMatch = convenioPorPalavra(entities.insurance_choice, insurances);
               }
 
               if (!groupMatch && entities.insurance_choice) {
@@ -9204,8 +9234,13 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             // não vem sai da regra — desde que a equipe esteja calada nesta conversa
             // há 2 h+ e a conversa não tenha ido à fila nas últimas 4 h (o pingue-
             // pongue que a regra evita). Na dúvida (erro de leitura), segura como antes.
+            // ATRASO A CAMINHO DA CONSULTA (08/10, Ketty: "presa no trânsito… ainda poderei
+            // ser atendida chegando às 9h40?" ouviu "ficou com a Lidiane" — a Lidiane
+            // estava nas infiltrações e ninguém respondeu). É coisa de minutos: vai para
+            // a fila (outra atendente) sem esperar a dona ficar 2 h calada.
+            const _atrasoACaminho = falaDeAtraso(currentMessageText || "");
             let _cobrancaSemResposta = false;
-            if (_jaPassou && cobraRetorno(currentMessageText || "", sinalDeFrustracao)) {
+            if (_jaPassou && (_atrasoACaminho || cobraRetorno(currentMessageText || "", sinalDeFrustracao))) {
               try {
                 const _agoraMs = Date.now();
                 const [{ data: _ultFala, error: _eFala }, { count: _idasRecentes, error: _eIdas }] = await Promise.all([
@@ -9225,7 +9260,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                 ]);
                 const _ultFalaMs = _ultFala && _ultFala[0] ? Date.parse(String(_ultFala[0].created_at)) : null;
                 const _caladaMin = _ultFalaMs == null ? Infinity : (_agoraMs - _ultFalaMs) / 60_000;
-                _cobrancaSemResposta = !_eFala && !_eIdas && (_idasRecentes || 0) === 0 && _caladaMin >= COBRANCA_DONA_CALADA_MIN;
+                _cobrancaSemResposta = !_eFala && !_eIdas && (_idasRecentes || 0) === 0 && (_atrasoACaminho || _caladaMin >= COBRANCA_DONA_CALADA_MIN);
                 console.log(
                   `[CasoLongo] cobrança de retorno — equipe calada há ${Number.isFinite(_caladaMin) ? Math.round(_caladaMin) : "∞"} min, idas nas últimas 4 h: ${_idasRecentes ?? "?"} → ${_cobrancaSemResposta ? "vai para a fila" : "fica com a dona"}`,
                 );
@@ -15028,7 +15063,9 @@ Deno.serve(async (req) => {
               .order("created_at", { ascending: false })
               .limit(1);
             const _perguntaPaciente = String(_ultSaida?.[0]?.message_text || "");
-            const _recente = _ultSaida?.[0] && Date.now() - Date.parse(String(_ultSaida[0].created_at)) < 30 * 60_000;
+            // 3 h, não 30 min: o "sim" preso na guarda de humano volta pelo resgate ~30 min
+            // depois (Sidy 08/10) e tem que continuar valendo como resposta
+            const _recente = _ultSaida?.[0] && Date.now() - Date.parse(String(_ultSaida[0].created_at)) < 3 * 60 * 60_000;
             if (_recente && ehPerguntaConfirmaPaciente(_perguntaPaciente)) {
               const _r = respostaAPerguntaDoPaciente(finalMessage || "");
               if (_r === "sim") {
@@ -15045,6 +15082,35 @@ Deno.serve(async (req) => {
           }
         } catch (e) {
           console.log(`[ConfirmaPaciente] check error (non-blocking): ${(e as Error).message}`);
+        }
+
+        // === "SIM" AO CONVITE DA LISTA DE ESPERA DO SITE (08/10, Giovanna Leite) ===
+        // A confirmação do site termina com "se quiser eu te coloco na lista de espera…
+        // É só responder lista de espera". Ela respondeu "Sim" — virou unknown, o modelo
+        // quis repetir a consulta (9h, 21/10), a guarda barrou e saiu "Vou conferir os
+        // horários reais…". "Sim" logo depois da marcação do site com convite = entrar.
+        try {
+          if (conversationId && respostaAPerguntaDoPaciente(finalMessage || "") === "sim" && classification.intent !== "entrar_lista_espera") {
+            const { data: _antes } = await supabase
+              .from("webhook_messages")
+              .select("id, direction, message_text, ai_entities, created_at")
+              .eq("conversation_id", conversationId)
+              .neq("id", messageId)
+              .order("created_at", { ascending: false })
+              .limit(1);
+            const _ult = _antes?.[0] as any;
+            if (
+              _ult && _ult.direction === "incoming" &&
+              /^Agendamento via widget:/.test(String(_ult.message_text || "")) &&
+              _ult.ai_entities?.waitlist_invite?.doctor_id &&
+              Date.now() - Date.parse(String(_ult.created_at)) < 30 * 60_000
+            ) {
+              console.log(`[Waitlist] "sim" ao convite da lista de espera do site — entrar_lista_espera`);
+              classification.intent = "entrar_lista_espera";
+            }
+          }
+        } catch (e) {
+          console.log(`[Waitlist] convite do site check error (non-blocking): ${(e as Error).message}`);
         }
 
         // === AVISO DE ATRASO (29/09, Mari e Andrea) ===
@@ -15841,6 +15907,18 @@ Deno.serve(async (req) => {
       }
       // "O DR. LUIZ FALOU PRA DAR UM ALÔ" NÃO É PEDIDO DE HORÁRIO (07/10, Marcello): virou
       // agendar e recebeu a lista. Sem pedido claro, a Julia pergunta o que o médico pediu.
+      let _raioXNoLocal = false;
+      if (["solicitar_exame", "unknown", "consultar"].includes(String(classification.intent || "")) && perguntaFazRaioXNoLocal(finalMessage || "")) {
+        console.log(`[Webhook] pergunta se fazemos raio-X no local — resposta pronta`);
+        _raioXNoLocal = true;
+        classification.intent = "unknown";
+      }
+      let _procedimentoLiberado = false;
+      if (classification.intent === "agendar" && procedimentoJaLiberado(finalMessage || "")) {
+        console.log(`[Webhook] procedimento já liberado pelo convênio — agendamento é com a equipe`);
+        _procedimentoLiberado = true;
+        classification.intent = "unknown";
+      }
       let _recadoDoMedico = false;
       if (classification.intent === "agendar" && recadoDoMedicoSemPedido(finalMessage || "")) {
         console.log(`[Webhook] recado do médico sem pedido claro — perguntando antes de listar horários`);
@@ -16758,6 +16836,13 @@ Deno.serve(async (req) => {
         }
 
         if (_recadoDoMedico) replyText = TEXTO_RECADO_DO_MEDICO;
+        if (_procedimentoLiberado) replyText = TEXTO_PROCEDIMENTO_LIBERADO;
+        if (_raioXNoLocal) replyText = TEXTO_RAIO_X_NO_LOCAL;
+        // Porto Seguro: a equipe confirma (08/10, Joel) — só na pergunta de convênio
+        if (classification.intent === "consultar_convenios" && perguntaConvenioPortoSeguro(finalMessage || "")) {
+          console.log(`[Convenio] Porto Seguro — texto pronto, a equipe confirma`);
+          replyText = TEXTO_PORTO_SEGURO_EQUIPE;
+        }
         if ((classification as any).__naoEhOPaciente) replyText = TEXTO_PEDE_CPF_DO_PACIENTE;
         if (_convenioPosMarcacao) {
           replyText = textoConvenioPosMarcacao(_convenioPosMarcacao.date, _convenioPosMarcacao.time);

@@ -599,6 +599,12 @@ function _diaEmSaoPaulo(ms: number): string {
   }).format(new Date(ms));
 }
 
+// As perguntas de marcação que a Julia faz com texto fixo (helpers.ts): a reserva
+// ("Para fechar, me passa…"), a confirmação de quem é o paciente, o "é essa?" do
+// remarcar e a escolha de horário da lista.
+export const PERGUNTA_DE_MARCACAO_DA_JULIA_RE =
+  /Posso confirmar a consulta[\s\S]*\?\s*$|Para fechar, me passa[\s\S]*\?|É essa que deseja reagendar\?|Confirma que deseja reagendar|Qual (data e )?horário prefere\?/;
+
 export function decidirResgate(a: {
   agoraMs: number;
   prazoMin: number;
@@ -654,6 +660,23 @@ export function decidirResgate(a: {
   );
   if (perguntaDaAtendenteHoje) return { resgatar: false, motivo: "respondendo_a_atendente" };
   const texto = presas.map((p) => String(p.message_text || "").trim()).filter(Boolean).join("\n");
+  // RESPOSTA CURTA À PERGUNTA DE MARCAÇÃO DA PRÓPRIA JULIA (08/10, Sidy): "Posso
+  // confirmar a consulta (19/10 às 14:40, Dr. Hugo) para Maria?" → "Sim" às 15h07,
+  // ticket aberto por uma atendente que não escreveu nada — o "Sim" ficou preso e a
+  // consulta nunca foi marcada. "Sim", CPF, "14:40" não parecem "pergunta nova", mas
+  // são a resposta que a Julia pediu: passado o prazo, ela conclui.
+  const ultimaSaida = ultimaFala >= 0 ? ms[ultimaFala] : null;
+  if (
+    ultimaSaida &&
+    ultimaSaida.ai_intent !== "manual_reply" &&
+    PERGUNTA_DE_MARCACAO_DA_JULIA_RE.test(String(ultimaSaida.message_text || "")) &&
+    t0 - Date.parse(ultimaSaida.created_at) < 30 * 60_000 &&
+    texto.length <= 120 &&
+    !_AUTORRESPOSTA_RE.test(texto) &&
+    !_NOME_DE_ATENDENTE_RE.test(texto)
+  ) {
+    return { resgatar: true, ids: presas.map((p) => p.id), texto, desde: primeira.created_at };
+  }
   if (!exigeRespostaDaAtendente(texto, presas.some((p) => !!p.temMidia))) {
     return { resgatar: false, motivo: "nao_exige_resposta" };
   }

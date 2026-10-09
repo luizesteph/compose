@@ -340,6 +340,14 @@ const URGENCIA_NEGADA_RE =
 const NAO_CONSIGO_DE_AGENDA_RE =
   /\bn[aã]o\s+consigo\b(?![\s\S]{0,24}\b(andar|caminhar|levantar|mexer|mover|dobrar|chegar|ir|sair|dormir|respirar|pisar|apoiar|sentar|deitar|esticar|firmar|ficar\s+em\s+p[ée]|colocar\s+o\s+p[ée])(?![\p{L}]))/iu;
 
+// "urgência" de PAPEL não é urgência clínica (08/10, Celio: "Por favor você encaminha
+// com urgência ao plano de saúde" — o laudo da ressonância — virou Regra 4 com
+// "procure um pronto-socorro"). A palavra "urgente/urgência" junto de convênio,
+// pedido, laudo, guia, autorização, documento… é pressa no envio. Só neutraliza o
+// padrão da PALAVRA; dor, fratura, febre seguem disparando na mesma mensagem.
+const URGENCIA_ADMINISTRATIVA_RE =
+  /\b((ao|para\s+o|pro|pra\s+o)\s+(conv[eê]nio|plano)|pedido|laudo|guia|autoriza\p{L}*|documento|relat[oó]rio|nota\s+fiscal|receita|atestado|imagens?|reembolso)(?![\p{L}])/iu;
+
 // Um único lugar decide se o padrão i realmente dispara — detectUrgency e
 // classificarUrgencia PRECISAM concordar, senão a mensagem diria uma coisa e o
 // roteamento faria outra.
@@ -347,6 +355,9 @@ function padraoDeUrgenciaDispara(p: RegExp, i: number, t: string): boolean {
   if (!p.test(t)) return false;
   // i === 0 é o padrão da palavra "urgente/urgência/emergência"
   if (i === 0 && URGENCIA_NEGADA_RE.test(t)) return false;
+  // ...a não ser que fale de dor: "bastante dor no pé… raio-X ainda hoje… um pouco de
+  // urgência… precisa de pedido médico?" (06/10) continua indo para gente na hora
+  if (i === 0 && URGENCIA_ADMINISTRATIVA_RE.test(t) && !/(?<![\p{L}])(dor|dores|doendo|d[oó]i|machuc\p{L}*|inchad\p{L}*|inchou)(?![\p{L}])/iu.test(t)) return false;
   // o padrão "não consigo/aguento" só vale com verbo clínico depois do "consigo"
   if (p.source.includes("consigo|aguento") && NAO_CONSIGO_DE_AGENDA_RE.test(t)) {
     // "não aguento" continua urgente mesmo falando de horário — é dor, não agenda
@@ -460,6 +471,12 @@ const FISIO_TRABALHO_RE =
 // pediu" recebeu a tabela): "um/o/meu retorno", "retorno com o dr" também são consulta.
 const FISIO_CONSULTA_MEDICA_RE =
   /\b(marcar|agendar|remarcar)\s+(uma\s+|um\s+|a\s+|o\s+)?(consulta|retorno)\b(?!\s+com\s+(o|a)\s+fisio)|\b(um|o|meu|de|para|pra|pro)\s+retorno\b(?!\s+(d[ao]s?\s+)?(sess|fisio))|\bretorno\s+(com|no|na|ao)\s+(o\s+|a\s+)?(dr\.?a?|doutora?|m[ée]dic[oa])\b|\b(retornar|voltar|passar)\s+(n[oa]|com\s+[oa])\s+(dr\.?a?|doutora?|m[ée]dic[oa])\b|\bencaixe\b/iu;
+// 08/10 (Omar: "Passei agora pouco com o Dr Felipe e acho que esqueceu de imprimir a
+// fisioterapia do COTOVELO DIREITO!" recebeu a tabela de preço): o médico esqueceu
+// o PEDIDO. "esqueceu/faltou/não me deu/imprimir … fisio" e "pedido para o cotovelo"
+// são pedido ao médico.
+const FISIO_PEDIDO_ESQUECIDO_RE =
+  /\b(esquec\p{L}*|imprimi\p{L}*|faltou|n[ãa]o\s+(me\s+)?(deu|entregou|passou|mandou|enviou|imprimiu|veio))(?![\p{L}])[\s\S]{0,40}\bfisio|\bpedido\s+(para|pra|pro|do|da|de)\s+(o\s+|a\s+|meu\s+|minha\s+)?(cotovelo|joelho|ombro|punho|m[ãa]o|quadril|coluna|lombar|cervical|tornozelo|p[ée]|perna|bra[çc]o|dedo)(?![\p{L}])/iu;
 const FISIO_RECADO_RE =
   /\bfisioterapeuta\s+\p{L}+[\s\S]{0,80}\b(perguntar|comprometeu|ficou\s+de|orientou|repass\w+|retorno)\b/iu;
 
@@ -473,7 +490,7 @@ export function classificarPedidoDeFisioterapia(texto: unknown): IntencaoFisio {
   if (FISIO_CONSULTA_MEDICA_RE.test(t)) return "consulta_medica";
   // O pedido vem antes da sessão em curso: "já concluí as 10 sessões, me envie um
   // novo pedido" é pedido. "remarcar minha sessão" não casa nenhum padrão de pedido.
-  if (FISIO_PEDIDO_MEDICO_RE.test(t) || FISIO_MAIS_SESSOES_RE.test(t) || FISIO_PEDIR_AO_MEDICO_RE.test(t) || FISIO_PEDIDO_AMPLO_RE.test(t)) {
+  if (FISIO_PEDIDO_MEDICO_RE.test(t) || FISIO_MAIS_SESSOES_RE.test(t) || FISIO_PEDIR_AO_MEDICO_RE.test(t) || FISIO_PEDIDO_AMPLO_RE.test(t) || FISIO_PEDIDO_ESQUECIDO_RE.test(t)) {
     return "pedido_medico";
   }
   if (FISIO_COMPARECIMENTO_RE.test(t) || FISIO_SESSAO_MINHA_RE.test(t) || FISIO_SESSAO_EM_CURSO_RE.test(t) || FISIO_SESSAO_ORDINAL_RE.test(t)) return "sessao_em_curso";
@@ -1380,9 +1397,15 @@ function listaDeDias(dias: number[], plural: boolean): string {
   return `${nomes.slice(0, -1).join(", ")} e ${nomes[nomes.length - 1]}`;
 }
 // verbo no passado logo antes da expressão: "que fiz essa semana", "marcou pra semana passada"
+// 08/10 (Roberta: "Ah era na terça dia 13.." recebeu o dia 20): "ah, era…" é
+// CORREÇÃO do que ela pediu, não passado — o "era" depois de "ah", "na verdade",
+// "desculpa", "opa", "errei", "quis dizer" não descarta a data.
 function ehPassado(t: string, indice: number): boolean {
   const antes = t.slice(Math.max(0, indice - 28), indice);
-  return /\b(fiz|feito|feita|passei|estive|realizei|tive|fui|marquei|marcou|operei|operou|foi|era)\b[^.!?]*$/.test(antes);
+  const m = /\b(fiz|feito|feita|passei|estive|realizei|tive|fui|marquei|marcou|operei|operou|foi|era)\b[^.!?]*$/.exec(antes);
+  if (!m) return false;
+  if (m[1] === "era" && /(^|[^\p{L}])(ah+|na\s+verdade|desculp\p{L}*|opa|ops|errei|quis\s+dizer|corrigindo)[\s,.!]*$/u.test(antes.slice(0, m.index))) return false;
+  return true;
 }
 // "não consigo essa semana", "estou fora de SP esta semana", "volto de férias em
 // outubro": o período está sendo EXCLUÍDO, não pedido. Olha antes e depois.
@@ -2097,6 +2120,32 @@ export function respostaConfirmaReagendamento(mensagem: unknown, ultimaSaidaDaJu
   return _SIM_CURTO_RE.test(t);
 }
 
+// "É ESSA?" DIZ DE QUEM É A CONSULTA (08/10, acompanhante do Antônio):
+// "Encontrei sua consulta com *Arnaldo Vilela dos Santos* no dia *09/10/2026*" foi
+// lido como se Arnaldo fosse o paciente ("Não é Antônio dos Santos Cruz") — e a
+// resposta seguinte, igual à anterior, foi engolida como duplicata. A pergunta
+// diz de quem é a consulta e a hora; o "não" a ela recebe uma pergunta própria.
+function _tituloDeNome(n: string): string {
+  return String(n || "").trim().toLowerCase().replace(/(^|\s)\p{L}/gu, (m) => m.toUpperCase());
+}
+export function textoEncontreiConsulta(nomePaciente: string, medico: string, inicio: string): string {
+  const s = String(inicio || "").trim();
+  const dia = s.slice(0, 10);
+  const hora = (/[ T](\d{2}:\d{2})/.exec(s) || [])[1] || "";
+  const data = /^\d{4}-\d{2}-\d{2}$/.test(dia) ? dia.split("-").reverse().join("/") : dia;
+  const nome = _tituloDeNome(nomePaciente);
+  const de = nome ? `a consulta de *${nome}*` : "sua consulta";
+  return `Encontrei ${de} com *${medico || "médico"}* no dia *${data}*${hora ? ` às *${hora}*` : ""}. É essa que deseja reagendar?`;
+}
+export const TEXTO_NAO_E_ESSA_CONSULTA =
+  "Entendi! Me conta o que está diferente: é a consulta de outra pessoa, com outro médico ou em outra data? Se for de outra pessoa, me passa o CPF dela. 😊";
+export function respostaNegaReagendamento(mensagem: unknown, ultimaSaidaDaJulia: unknown): boolean {
+  if (!_PERGUNTA_REAGENDAR_RE.test(String(ultimaSaidaDaJulia ?? ""))) return false;
+  const t = String(mensagem ?? "").trim();
+  if (!t || t.length > 80) return false;
+  return /^(n[ãa]o|nao|n)(?![\p{L}])/iu.test(t);
+}
+
 // 3. ANTECIPAR NÃO É IR PARA DEPOIS (Amarylis, 29/09)
 // "Tenho consulta com Dr Gustavo hoje / Será que não consigo adiantar um pouco?"
 // (consulta 14h40) recebeu "encontrei estas opções: 13/10… 20/10". Em 60 dias, 5
@@ -2170,6 +2219,12 @@ export function ehAvisoDeAtraso(texto: unknown): boolean {
   if (!t || t.length > 200) return false;
   if (_ATRASO_NAO_E_AVISO_RE.test(t)) return false;
   return _ATRASO_RE.test(t);
+}
+
+/** Fala de atraso/trânsito a caminho da consulta (pergunta ou aviso). 08/10, Ketty. */
+export function falaDeAtraso(texto: unknown): boolean {
+  const t = String(texto ?? "").trim();
+  return !!t && t.length <= 400 && _ATRASO_RE.test(t);
 }
 
 export const TEXTO_AVISO_DE_ATRASO =
@@ -2285,6 +2340,32 @@ export function recadoDoMedicoSemPedido(texto: unknown): boolean {
   return !/\b(marcar|agendar|consulta|retorno|horario|exame|laudo|receita|atestado|pedido|cirurgia|infiltra|fisio|encaixe)\b/.test(t);
 }
 
+// PROCEDIMENTO JÁ LIBERADO PELO CONVÊNIO NÃO É CONSULTA (08/10, Jorge Zaza: "tenho
+// uma solicitação já liberada pelo convênio médico. Gostaria de agendar" recebeu a
+// lista de consultas do Dr. Luiz). Guia autorizada é procedimento — quem agenda é a
+// equipe. Infiltração tem fluxo próprio (Lidiane) e fica de fora.
+export function procedimentoJaLiberado(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  if (!t.trim() || /\binfiltra/.test(t)) return false;
+  return /\b(solicitac[aã]o|procedimento|guia|cirurgia|autorizac[aã]o|pedido)\b[\s\S]{0,40}\b(ja\s+)?(liberad[ao]|autorizad[ao]|aprovad[ao])\b|\b(convenio|plano)\s+(ja\s+)?(liberou|autorizou|aprovou)\b/.test(t);
+}
+export const TEXTO_PROCEDIMENTO_LIBERADO =
+  "Que bom que já foi liberado! 😊 O agendamento de procedimento autorizado é com a nossa equipe — vou passar para elas, que te respondem por aqui. Se puder, mande a foto da guia/autorização por aqui. 🙏";
+
+// "VOCÊS TIRAM RAIO-X NO LOCAL?" (08/10, Thelma): virou solicitar_exame e foi para a
+// fila — a Glaucia respondeu "Tiramos sim!" 1h50 depois. Pergunta de sim/não sobre o
+// serviço tem resposta pronta; pedido, resultado e laudo de exame seguem com a equipe.
+export function perguntaFazRaioXNoLocal(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  if (!t.trim() || t.length > 200) return false;
+  if (/\b(pedido|resultado|laudo|imagens?|guia|marcar|agendar|valor|preco|quanto|custa)\b/.test(t)) return false;
+  // criança/bebê/gestante: a resposta pronta não sabe — fica com a equipe
+  if (/\b(crianc|bebe|gestant|gravid|filh)/.test(t)) return false;
+  return /\b(tira[mr]?|faz(em)?|realiza[mr]?|tem|tem\s+como\s+fazer|da\s+pra\s+fazer)\b[\s\S]{0,25}\b(rx|raio[\s-]*x|radiografia)\b/.test(t) &&
+    (/\?/.test(t) || /\b(voces|vcs|ai|no\s+local|na\s+clinica)\b/.test(t));
+}
+export const TEXTO_RAIO_X_NO_LOCAL = "Sim, fazemos raio-X aqui na clínica! 😊 Posso te ajudar com mais alguma coisa?";
+
 export const TEXTO_RECADO_DO_MEDICO =
   "Que bom que você nos procurou! 😊 Me conta o que o médico pediu: marcar uma consulta ou retorno, ou é outra coisa (exame, laudo, receita)? Assim eu já te ajudo.";
 
@@ -2309,6 +2390,27 @@ export function textoConfirmaPaciente(nomeDoCadastro: string, medico: string, da
   return `Esse CPF está no cadastro de *${nome}*. Posso confirmar a consulta${quando} para ${nome.split(" ")[0]}?`;
 }
 
+// 08/10 (Sidy: "consulta para minha Mãe" + "Maria da Conceição Ramos Prexedes, CPF…"
+// recebeu "Esse CPF está no cadastro de Maria… Posso confirmar…?" — o nome ela mesma
+// tinha digitado; a pergunta só atrasou e o "Sim" ficou preso na guarda de humano).
+// O nome do cadastro foi DIGITADO quando o primeiro E o último nome dele aparecem,
+// como palavras, num dos textos (nome que o paciente informou, mensagem atual).
+// Só o primeiro nome não basta: mãe e filha dividem "Maria".
+const _PARTICULAS_DE_NOME = new Set(["da", "de", "do", "das", "dos", "e"]);
+function _palavrasDeNome(t: string): string[] {
+  return stripAccents(String(t || "").toLowerCase()).split(/[^a-z]+/).filter((w) => w.length >= 2 && !_PARTICULAS_DE_NOME.has(w));
+}
+export function nomeDoCadastroFoiDigitado(nomeDoCadastro: unknown, ...textos: unknown[]): boolean {
+  const c = _palavrasDeNome(String(nomeDoCadastro ?? ""));
+  if (c.length < 2) return false;
+  const primeiro = c[0];
+  const ultimo = c[c.length - 1];
+  return textos.some((t) => {
+    const w = new Set(_palavrasDeNome(String(t ?? "")));
+    return w.has(primeiro) && w.has(ultimo);
+  });
+}
+
 export function ehPerguntaConfirmaPaciente(texto: unknown): boolean {
   return /Esse CPF está no cadastro de \*[^*]+\*\. Posso confirmar a consulta[\s\S]*\?\s*$/.test(String(texto ?? ""));
 }
@@ -2322,3 +2424,37 @@ export function respostaAPerguntaDoPaciente(texto: unknown): "sim" | "nao" | nul
 }
 
 export const TEXTO_PEDE_CPF_DO_PACIENTE = "Tudo bem! 🙏 Me passa, por favor, o nome completo e o CPF de quem vai ser atendido.";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORREÇÕES DO RELATÓRIO DE 08/10
+// ─────────────────────────────────────────────────────────────────────────────
+// Convênio digitado em outra ordem/grafia ("Notre Dame / Hapvida" × "HAPVIDA /
+// NOTREDAME"): casa quando um nome PRÓPRIO do grupo (4+ letras, fora das palavras
+// genéricas) aparece no que o paciente escreveu, juntando as palavras ("notre dame"
+// → "notredame"). Mais de um grupo casando = ambíguo, não escolhe.
+const _PALAVRAS_GENERICAS_DE_CONVENIO = new Set([
+  "saude", "seguro", "seguros", "plano", "planos", "medica", "medico", "assistencia", "sistema",
+  "nacional", "brasil", "servicos", "odonto", "empresa", "companhia", "grupo", "rede",
+]);
+export function convenioPorPalavra<T extends Record<string, unknown>>(escolha: unknown, grupos: T[]): T | undefined {
+  const compacta = stripAccents(String(escolha ?? "").toLowerCase()).replace(/[^a-z]/g, "");
+  if (compacta.length < 4 || !Array.isArray(grupos)) return undefined;
+  const casados = grupos.filter((g) => {
+    const palavras = stripAccents(String(g?.name ?? "").toLowerCase()).split(/[^a-z]+/)
+      .filter((w) => w.length >= 4 && !_PALAVRAS_GENERICAS_DE_CONVENIO.has(w));
+    return palavras.some((w) => compacta.includes(w));
+  });
+  return casados.length === 1 ? casados[0] : undefined;
+}
+
+// PORTO SEGURO: A EQUIPE CONFIRMA, SEM INTERROGATÓRIO (08/10, Joel: "Porto Seguro ouro
+// max copar, vcs aceitam?" ouviu três vezes "qual é a rede?" — "Não entendi, pode
+// explicar?" — e só a Glaucia respondeu "Atendemos sim"). O script manda acionar a
+// equipe; o modelo pergunta e não aciona. Pergunta de cobertura da Porto → texto
+// pronto que passa para a equipe (casa PROMESSA_DE_HUMANO_RE de propósito).
+export function perguntaConvenioPortoSeguro(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  return /\bporto\b/.test(t) && /\b(seguro|saude|plano|convenio|conv)\b/.test(t);
+}
+export const TEXTO_PORTO_SEGURO_EQUIPE =
+  "Na Porto Seguro a cobertura depende do plano, e quem confirma o seu é a nossa equipe. Vou passar para elas, que te respondem por aqui — se puder, mande uma foto da carteirinha. 🙏";
