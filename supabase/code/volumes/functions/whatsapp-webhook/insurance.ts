@@ -299,7 +299,9 @@ const CONVENIOS_COM_PLANO: Array<{
   planoAceitoRe: RegExp | null; // null = nunca afirmar (Porto Seguro)
   motivo: "plano_nao_qualificado" | "sempre_confirmar";
 }> = [
-  { chave: "Bradesco", nomeRe: /\bbradesco\b/i, planoAceitoRe: /\btop\s*nacional\b/i, motivo: "plano_nao_qualificado" },
+  // 14/10: Nacional II/III e Top Quarto também — a equipe respondeu "atendemos" em
+  // todas as vezes em 60 dias (Adriano "nacional III" foi passado para a fila à toa)
+  { chave: "Bradesco", nomeRe: /\bbradesco\b/i, planoAceitoRe: /\btop\s*nacional\b|\bnacional\s*(ii|iii|2|3|plus)\b|\btop\s+(quarto|nacional\s+quarto)\b/i, motivo: "plano_nao_qualificado" },
   {
     chave: "Notre Dame / Hapvida",
     nomeRe: /\b(notre\s*dame|notredame|hapvida)\b/i,

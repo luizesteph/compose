@@ -355,6 +355,9 @@ function padraoDeUrgenciaDispara(p: RegExp, i: number, t: string): boolean {
   if (!p.test(t)) return false;
   // i === 0 é o padrão da palavra "urgente/urgência/emergência"
   if (i === 0 && URGENCIA_NEGADA_RE.test(t)) return false;
+  // "consultando pra uma amiga que TEVE uma emergência" (13/10, Ellise): a emergência é
+  // de outra pessoa / já passou — não é a pessoa da conversa em crise agora
+  if (i === 0 && /\b(teve|tive|tivemos|tiveram|houve|passou\s+por)\s+(uma\s+|um\s+)?(emerg[eê]ncia|urg[eê]ncia)/i.test(t)) return false;
   // ...a não ser que fale de dor: "bastante dor no pé… raio-X ainda hoje… um pouco de
   // urgência… precisa de pedido médico?" (06/10) continua indo para gente na hora
   if (i === 0 && URGENCIA_ADMINISTRATIVA_RE.test(t) && !/(?<![\p{L}])(dor|dores|doendo|d[oó]i|machuc\p{L}*|inchad\p{L}*|inchou)(?![\p{L}])/iu.test(t)) return false;
@@ -393,10 +396,10 @@ export function campoPedidoNoCadastro(texto: unknown): "nome" | "cpf" | "nascime
 //
 // Os dois ultimos queriam GUIA do ortopedista, para fazer fisio em outro lugar.
 // Mandar tabela de preco para quem pede receita e' vender o que ninguem pediu.
-export type IntencaoFisio = "agendar" | "pedido_medico" | "falar_com_fisio" | "sessao_em_curso" | "nota_fiscal" | "trabalho" | "consulta_medica";
+export type IntencaoFisio = "agendar" | "pedido_medico" | "falar_com_fisio" | "sessao_em_curso" | "nota_fiscal" | "trabalho" | "consulta_medica" | "convenio";
 
 const FISIO_PEDIDO_MEDICO_RE =
-  /\b(pedido\s+(m[ée]dic[oa]|do\s+m[ée]dico)|guia|solicita[çc][ãa]o\s+(m[ée]dica|do\s+m[ée]dico)|receita|encaminhamento|renova(r|[çc][ãa]o)|relat[óo]rio|laudo)\b/i;
+  /\b(pedidos?\s+(m[ée]dic[oa]s?|do\s+m[ée]dico)|guia|solicita[çc][ãa]o\s+(m[ée]dica|do\s+m[ée]dico)|receita|encaminhamento|renova(r|[çc][ãa]o)|relat[óo]rio|laudo)\b/i;
 // "mais 10 sessões", "mais sessoes" — quem ja faz fisio e precisa de mais sessoes
 // esta pedindo autorizacao, nao comprando pacote.
 const FISIO_MAIS_SESSOES_RE = /\bmais\s+(\d+\s+)?sess[õo]es?\b/i;
@@ -458,7 +461,12 @@ const FISIO_SESSAO_ORDINAL_RE = new RegExp(
   "iu",
 );
 const FISIO_TRABALHO_RE =
-  /\b(contrat(am|a|ando|ar|em)|curr[íi]culo|vagas?\s+(de\s+)?(emprego|trabalho|est[áa]gio)|trabalhar\s+(com\s+voc[êe]s|a[íi]|na\s+cl[íi]nica)|sou\s+fisioterapeuta)\b/iu;
+  /\b(contrat(am|a|ando|ar|em)|curr[íi]culo|vagas?\s+(de\s+)?(emprego|trabalho|est[áa]gio)|trabalhar\s+(com\s+voc[êe]s|a[íi]|na\s+cl[íi]nica)|sou\s+fisioterapeuta|est[áa]gi(o|os|ar|ária|ário|árias|ários)|parceir[ao]s?|parceria)\b/iu;
+// 13/10: convênio na fisioterapia ("vocês aceitam Unimed?", "Atende fisioterapia por
+// convênio?", "Porto Seguro P470Q?") recebia a tabela sem a resposta. A fisio daqui é
+// terceirizada e não atende convênio — só reembolso (resposta da equipe, 21/09–14/10).
+const FISIO_CONVENIO_RE =
+  /\b(conv[eê]nio|pelo\s+(meu\s+)?plano|plano\s+de\s+sa[uú]de|aceit\p{L}*|atende[mr]?\s+(o\s+|a\s+)?(plano|conv|unimed|amil|bradesco|sul\s*am|porto|notre|hapvida)|unimed|amil|bradesco|sul\s*am[eé]rica|porto\s+seguro|notre\s*dame|hapvida|reembolso)/iu;
 
 // 01 e 02/10: quem quer CONSULTA com o médico recebia a tabela (ou "quem emite é o
 // médico") só porque a frase tinha "fisio": "Preciso retornar no dr Guilherme para
@@ -470,7 +478,7 @@ const FISIO_TRABALHO_RE =
 // 07/10 (Renilson: "É um retorno depois das sessões de fisioterapia para ombro que ele
 // pediu" recebeu a tabela): "um/o/meu retorno", "retorno com o dr" também são consulta.
 const FISIO_CONSULTA_MEDICA_RE =
-  /\b(marcar|agendar|remarcar)\s+(uma\s+|um\s+|a\s+|o\s+)?(consulta|retorno)\b(?!\s+com\s+(o|a)\s+fisio)|\b(um|o|meu|de|para|pra|pro)\s+retorno\b(?!\s+(d[ao]s?\s+)?(sess|fisio))|\bretorno\s+(com|no|na|ao)\s+(o\s+|a\s+)?(dr\.?a?|doutora?|m[ée]dic[oa])\b|\b(retornar|voltar|passar)\s+(n[oa]|com\s+[oa])\s+(dr\.?a?|doutora?|m[ée]dic[oa])\b|\bencaixe\b/iu;
+  /\b(marcar|agendar|remarcar)\s+(uma\s+|um\s+|a\s+|o\s+)?(consulta|retorno)\b(?!\s+com\s+(o|a)\s+fisio)|\b(um|o|meu|de|para|pra|pro)\s+retorno\b(?!\s+(d[ao]s?\s+)?(sess|fisio))|\bretorno\s+(com|no|na|ao)\s+(o\s+|a\s+)?(dr\.?a?|doutora?|m[ée]dic[oa])\b|\b(retornar|voltar|passar)\s+(n[oa]|com\s+[oa])\s+(dr\.?a?|doutora?|m[ée]dic[oa])\b|\bencaixe\b|\bpassar\s+(por|em|numa|na)\s+(uma\s+)?consulta\b|\balgum\s+m[ée]dico\s+dispon[ií]vel\b/iu;
 // 08/10 (Omar: "Passei agora pouco com o Dr Felipe e acho que esqueceu de imprimir a
 // fisioterapia do COTOVELO DIREITO!" recebeu a tabela de preço): o médico esqueceu
 // o PEDIDO. "esqueceu/faltou/não me deu/imprimir … fisio" e "pedido para o cotovelo"
@@ -494,6 +502,7 @@ export function classificarPedidoDeFisioterapia(texto: unknown): IntencaoFisio {
     return "pedido_medico";
   }
   if (FISIO_COMPARECIMENTO_RE.test(t) || FISIO_SESSAO_MINHA_RE.test(t) || FISIO_SESSAO_EM_CURSO_RE.test(t) || FISIO_SESSAO_ORDINAL_RE.test(t)) return "sessao_em_curso";
+  if (FISIO_CONVENIO_RE.test(t)) return "convenio";
   if (FISIO_FALAR_RE.test(t)) return "falar_com_fisio";
   return "agendar";
 }
@@ -2458,3 +2467,81 @@ export function perguntaConvenioPortoSeguro(texto: unknown): boolean {
 }
 export const TEXTO_PORTO_SEGURO_EQUIPE =
   "Na Porto Seguro a cobertura depende do plano, e quem confirma o seu é a nossa equipe. Vou passar para elas, que te respondem por aqui — se puder, mande uma foto da carteirinha. 🙏";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORREÇÕES DO RELATÓRIO DE 13/10
+// ─────────────────────────────────────────────────────────────────────────────
+export const TEXTO_FISIO_CONVENIO =
+  "A fisioterapia aqui não é pelo convênio: funciona por *reembolso* — você paga a sessão e pede o reembolso ao seu plano com a nota fiscal e o relatório que emitimos. " +
+  "Sessão avulsa R$ 180 ou pacote de 10 sessões por R$ 1.500 (em até 3x), e a *avaliação é gratuita*. 😊 Vou te passar para nossa equipe agendar sua avaliação!";
+
+// "ME AVISA SE TIVER DESISTÊNCIA" É LISTA DE ESPERA (13/10, Lázara: "Se tiver alguma
+// desistência a partir das 14. Me avisa" virou reagendar → "é essa?" → lista de 27/10
+// → "confirmar" → loop → atendente). Quem pede aviso de vaga quer a lista, não remarcar.
+export function pedeAvisoDeDesistencia(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  if (!t.trim() || t.length > 300) return false;
+  if (/\b(sair|tirar|remover|retirar|cancelar)\b[^.?!\n]{0,30}\blista\b/.test(t)) return false;
+  // pedido de AVISO ("se tiver… me avisa", "caso surja…"), não pergunta de agenda agora
+  // ("tem alguma desistência amanhã?" quer resposta já — segue o fluxo normal)
+  const condicional = /\b(se|caso)\s+(por\s+acaso\s+)?(tiver|houver|haja|tenha|surgir|surja|abrir|abra|liberar|libere|vagar|aparecer|alguem\s+desistir)\b[\s\S]{0,50}\b(desist\w*|vaga|horario|encaixe|antes|cedo|hoje|amanha)\b/.test(t) ||
+    /\b(se|caso)\s+(alguem\s+)?(desistir|cancelar|desmarcar)\b/.test(t) ||
+    /\b(se|caso)\s+(liberar|surgir|abrir)\s+(um\s+|uma\s+|algum\s+|alguma\s+)?(horario|vaga)\b/.test(t);
+  const pedeAviso = /\b(me\s+)?(avis\w*|chame|chama|comuni\w*|liga|ligue)\b|\beu\s+quero\b|\b(consigo|eu)\s+(ir|vou)\b|\bestou\s+(a\s+disposicao|por\s+aqui)\b/.test(t);
+  return (condicional && (pedeAviso || /\bdesist/.test(t))) || /\bme\s+avis\w*\b[\s\S]{0,40}\b(vaga|vagar|desist\w*|abrir|surgir|liberar|antes|encaixe)\b/.test(t);
+}
+
+// "Sexta-feira de manhã, demais dias à tarde" (13/10, Adriana) era gravado e dito como
+// "qualquer horário". A fila só guarda manhã/tarde/qualquer — a preferência mista fica
+// "qualquer" (para não perder vaga), mas a resposta repete o que a pessoa disse.
+export function periodoDeEsperaMisto(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  return /\bmanha\b|\bcedo\b/.test(t) && /\btarde\b/.test(t) && !/\b(qualquer|tanto\s+faz|os\s+dois|ambos|indiferente)\b/.test(t);
+}
+export function textoPeriodoDeEsperaMisto(texto: string): string {
+  const pref = String(texto || "").trim().replace(/\s+/g, " ").slice(0, 80);
+  return `Anotado! ✅ Sua preferência: "${pref}". Vou te avisar das vagas que abrirem — se o horário oferecido não servir, é só responder *não* que a vaga passa adiante e você continua na lista. 😊`;
+}
+
+// PORTO SEGURO P220 / P320 / P470: A EQUIPE NÃO ATENDE (13/10: P320Q três vezes no
+// mesmo dia; 23/09 P320; 05/10 P220; 02/09 P470 Q — todas "não atendemos"). O P420
+// teve resposta contraditória (09/09) e fica com a equipe. Resposta direta, com a
+// alternativa que a Vânia ofereceu: particular com reembolso.
+export function portoPlanoNaoAtendido(texto: unknown): string | null {
+  const t = String(texto ?? "");
+  const m = /\bp\s*-?\s*(220|320|470)\s*-?\s*(q\b|e\b)?/i.exec(t);
+  return m ? `P${m[1]}${m[2] ? m[2].toUpperCase() : ""}` : null;
+}
+export function textoPortoNaoAtendido(plano: string): string {
+  return `Esse plano da Porto Seguro (${plano}) a clínica não atende pelo convênio. 🙏 Mas você pode consultar como particular (R$ 500) e pedir o reembolso ao seu plano — a gente fornece a nota fiscal. Quer que eu veja um horário?`;
+}
+
+// TROCAR DE MÉDICO NO REMARCAR (13/10, Antonio: marcou com o Dr. Arnaldo pelo site e
+// queria um de joelho; a Julia só procurou na agenda do Arnaldo, três voltas). Trocar
+// de médico não é remarcar a mesma consulta — a equipe ajusta.
+export function querTrocarDeMedico(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  return /\b(trocar|mudar|alterar)\s+(o\s+|de\s+)?(medico|doutor|doutora|dr|dra|profissional|especialista)\b|\boutr[oa]\s+(medic[oa]|doutor[a]?|profissional|especialista)\b|\b(um|uma)\s+(medic[oa]|doutor[a]?|profissional|especialista)\s+(que|de|para)\s+(avali\w+|cuid\w+|trat\w+|joelho|ombro|coluna|quadril|mao|pe)\b/.test(t);
+}
+export const TEXTO_TROCA_DE_MEDICO =
+  "Para trocar de médico, quem ajusta a consulta é a nossa equipe — vou passar para elas, que te respondem por aqui. 🙏";
+
+// ATRASO COM A FICHA NA MÃO DE UMA ATENDENTE CALADA (13/10, João Henrique: "estou perto
+// / Será que consigo às 16h25" ficou 50 min sem resposta, consulta às 16h). É coisa de
+// minutos: a Julia responde e passa para a recepção (casa PROMESSA_DE_HUMANO_RE).
+export const TEXTO_ATRASO_PARA_RECEPCAO =
+  "Obrigada por avisar! 🙏 Vou passar agora para a recepção confirmar se dá para te atender nesse horário — elas te respondem por aqui.";
+
+export const TEXTO_PERGUNTA_CONVENIO_CADASTRO =
+  "Quase lá! 😊 Você tem convênio? Se tiver, me diga o nome do convênio e o plano (como está na carteirinha). Se não, é só responder *particular*.";
+
+// Atraso para a guarda de humano (mais estrito que falaDeAtraso): "se não houver atraso,
+// pode ser às 15h" é negociação de horário; "vou chegar no horário" não é atraso.
+export function atrasoACaminho(texto: unknown): boolean {
+  const t = String(texto ?? "");
+  // + "estou perto", "quase chegando", "imprevisto… chego" (João Henrique, 13/10)
+  const aCaminho = falaDeAtraso(t) || (t.length <= 400 && /\b(estou|to|tô|t[oô])\s+(perto|chegando|quase\s+(chegando|a[ií]))\b|\bimprevisto\b[\s\S]{0,60}\b(perto|chego|chegar)\b|\bhor[áa]rio\s+que\s+(est[áa]\s+dando\s+que\s+)?chego\b/i.test(t));
+  if (!aCaminho) return false;
+  if (/\bse\s+n[ãa]o\s+houver\s+atraso|\bno\s+hor[áa]rio\b|\b(remarc|desmarc|cancel|reagend|marcar|agendar|pode\s+ser)/i.test(t)) return false;
+  return true;
+}
