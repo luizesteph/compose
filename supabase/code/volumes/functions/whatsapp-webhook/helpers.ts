@@ -742,7 +742,10 @@ export function getPhoneVariants(p: string | null | undefined): string[] {
 // WhatsApp da clínica para a EQUIPE ler e responder (encaminha contatos, recados).
 // A Julia não responde nada que venha destes números — nem resposta, nem
 // transferência, nem resgate. A mensagem continua gravada e aparece no Z-PRO.
-export const TELEFONES_SEM_JULIA: readonly string[] = ["11983354622"];
+// 15/10: + o celular do Dr. Hugo Bitencourt Fabri — ele manda recados de paciente
+// ("Encaminha para o Wilson Piques") e a Julia respondia "não localizei atendente
+// Wilson" duas vezes; o recado se perdeu. A equipe o chama de "Dr." nesse número.
+export const TELEFONES_SEM_JULIA: readonly string[] = ["11983354622", "11981812223"];
 
 export function telefoneSemJulia(
   telefone: string | null | undefined,
@@ -1708,6 +1711,8 @@ export function textoHorariosNaJanela(args: {
   periodo?: string;
   corpo: string;
   agendaAte?: string;
+  /** a lista é dos horários DEPOIS da janela pedida (15/10) — "os próximos", não "os primeiros" */
+  depoisDoPedido?: boolean;
 }): string {
   const medico = String(args.medico || "o médico").trim() || "o médico";
   const per = args.periodo === "manha" ? " (manhã)" : args.periodo === "tarde" ? " (tarde)" : "";
@@ -1715,6 +1720,9 @@ export function textoHorariosNaJanela(args: {
   const dias = args.janela.rotuloDias || "";
   const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
   const rodape = "\n\nAlgum desses serve? Se preferir outra data ou período, é só me dizer.";
+  if (args.depoisDoPedido && rot && args.nivel > 1 && !args.agendaAte) {
+    return `${cap(rot)} não encontrei horário livre com ${medico}. Os próximos que encontrei depois disso${per}:\n\n${args.corpo}${rodape}`;
+  }
   if (args.nivel === 1) {
     return `Horários disponíveis com ${medico}${rot ? ` ${rot}` : ""}${dias ? ` ${dias}` : ""}${per}:\n\n${args.corpo}\n\nQual data e horário prefere?`;
   }
@@ -2209,8 +2217,10 @@ export function precoDaConsulta(notas: unknown): string | null {
   return m ? m[1].replace(/\s+/g, " ") : null;
 }
 
+// 15/10 (Jack perguntou valor E retorno): o valor já sai com o retorno de 30 dias
+// (resposta da equipe — a mesma de textoConsultaInclui).
 export function textoPrecoDaConsulta(preco: string): string {
-  return `A consulta particular com nossos ortopedistas é ${preco}.`;
+  return `A consulta particular com nossos ortopedistas é ${preco}, com direito a retorno em até 30 dias.`;
 }
 
 // 7. AVISO DE ATRASO (Mari e Andrea, 29/09)
@@ -2219,7 +2229,7 @@ export function textoPrecoDaConsulta(preco: string): string {
 // modelo disse "já deixei a equipe avisada" sem avisar ninguém. Aviso de atraso sem
 // pergunta nem pedido recebe um texto pronto e verdadeiro.
 const _ATRASO_RE =
-  /\b((vou|vamos|devo|irei|vai)\s+(chegar|me\s+atrasar|atrasar)|atrasad[oa]s?|atraso|chego\s+(em|daqui|umas?|uns|às|as|j[aá])|(muito|bastante|um\s+pouco\s+de)\s+tr[aâ]nsito|(estou|est[aá]|to|tô|preso)\s+(no\s+|num\s+|muito\s+)?tr[aâ]nsito|(estou|to|tô)\s+a\s+caminho)\b/iu;
+  /\b((vou|vamos|devo|irei|iremos|vai|vamos\s+nos)\s+(chegar|me\s+atrasar|atrasar)|atrasad[oa]s?|atraso|chego\s+(em|daqui|umas?|uns|às|as|j[aá])|(muito|bastante|um\s+pouco\s+de)\s+tr[aâ]nsito|(estou|est[aá]|to|tô|preso)\s+(no\s+|num\s+|muito\s+)?tr[aâ]nsito|(estou|to|tô)\s+a\s+caminho)\b/iu;
 const _ATRASO_NAO_E_AVISO_RE =
   /\?|\b(remarc|desmarc|cancel|reagend|antecip|adiant|outro\s+hor[aá]rio|mais\s+tarde|n[aã]o\s+(vou|vamos|irei)\s+(conseguir|poder)|n[aã]o\s+conseguirei|n[aã]o\s+consigo|gostaria\s+de\s+saber|queria\s+saber|ser[aá]\s+que|caso\s+eu|me\s+atende)/iu;
 
@@ -2544,4 +2554,40 @@ export function atrasoACaminho(texto: unknown): boolean {
   if (!aCaminho) return false;
   if (/\bse\s+n[ãa]o\s+houver\s+atraso|\bno\s+hor[áa]rio\b|\b(remarc|desmarc|cancel|reagend|marcar|agendar|pode\s+ser)/i.test(t)) return false;
   return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORREÇÕES DO RELATÓRIO DE 14/10 (validado pelo dono em 15/10)
+// ─────────────────────────────────────────────────────────────────────────────
+// BRADESCO EFETIVO: só o especialista em ombro e cotovelo atende pelo plano (Glaucia
+// 14/10 duas vezes, Laiz 08/09: "Efetivo IV apenas o especialista em ombro"). Para as
+// outras regiões, particular com reembolso.
+export function perguntaBradescoEfetivo(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  if (/\b(amil|unimed|porto|notre\s*dame|notredame|hapvida|sul\s*america|care\s*plus|omint|prevent)\b/.test(t)) return false;
+  return /\befetivo\b/.test(t) && (/\bbradesco\b/.test(t) || /\b(plano|convenio|atende|aceita)\w*/.test(t));
+}
+export const TEXTO_BRADESCO_EFETIVO =
+  "No Bradesco Efetivo, pelo convênio quem atende é o Dr. Luiz Gustavo Estephanelli, especialista em ombro e cotovelo. 😊 " +
+  "Para as outras regiões, dá para consultar como particular (R$ 500) e pedir o reembolso ao seu plano — a gente fornece a nota fiscal. Quer que eu veja um horário?";
+
+// CONVÊNIO ATENDIDO EM TODOS OS PLANOS, PERGUNTADO NO MEIO DA AGENDA (14/10, Jack:
+// "Se atende o plano care plus" recebeu o preço e a lista, sem resposta do convênio).
+// Só os que a tabela do script diz "todos" — o resto (Bradesco, Porto, Hapvida) tem regra própria.
+const _CONVENIOS_TODOS: Array<{ nome: string; re: RegExp }> = [
+  { nome: "SulAmérica", re: /\bsul\s*am[eé]rica\b/i },
+  { nome: "Care Plus", re: /\bcare\s*plus\b/i },
+  { nome: "Gama Saúde", re: /\bgama(\s+sa[uú]de)?\b/i },
+  { nome: "Mediservice", re: /\bmedi\s*service\b/i },
+  { nome: "Omint", re: /\bomint\b/i },
+];
+const _OUTROS_CONVENIOS_RE = /\b(amil|unimed|bradesco|porto|notre\s*dame|notredame|hapvida|prevent|golden|intermedica|interm[eé]dica|cassi|cabesp|geap|allianz|seguros\s+unimed)\b/i;
+export function convenioAtendidoPerguntado(texto: unknown): string | null {
+  const t = String(texto ?? "");
+  // PERGUNTA de cobertura ("atende/aceita…?"), não cadastro ("Convênio: Care Plus")
+  if (!/\b(atende[mr]?|aceita[mr]?)\b/i.test(t)) return null;
+  // outro convênio na mesma mensagem ("mudou de SulAmérica para Amil, atendem?") = a pergunta é sobre ele
+  if (_OUTROS_CONVENIOS_RE.test(t)) return null;
+  const achados = _CONVENIOS_TODOS.filter((c) => c.re.test(t));
+  return achados.length === 1 ? achados[0].nome : null;
 }

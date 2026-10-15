@@ -301,7 +301,10 @@ const CONVENIOS_COM_PLANO: Array<{
 }> = [
   // 14/10: Nacional II/III e Top Quarto também — a equipe respondeu "atendemos" em
   // todas as vezes em 60 dias (Adriano "nacional III" foi passado para a fila à toa)
-  { chave: "Bradesco", nomeRe: /\bbradesco\b/i, planoAceitoRe: /\btop\s*nacional\b|\bnacional\s*(ii|iii|2|3|plus)\b|\btop\s+(quarto|nacional\s+quarto)\b/i, motivo: "plano_nao_qualificado" },
+  // 15/10 (relatório validado pelo dono): "Nacional" (qualquer) e "Top"/"Saúde Top"
+  // também — a equipe responde "atendemos rede nacional" (30/09) e "Saúde top" toda vez.
+  // Top Enfermaria e Efetivo ficam de fora (equipe: "não atendemos").
+  { chave: "Bradesco", nomeRe: /\bbradesco\b/i, planoAceitoRe: /^(?![\s\S]*\befetivo\b)(?![\s\S]*\benfermaria\b)[\s\S]*\b(nacional|top)\b/i, motivo: "plano_nao_qualificado" },
   {
     chave: "Notre Dame / Hapvida",
     nomeRe: /\b(notre\s*dame|notredame|hapvida)\b/i,

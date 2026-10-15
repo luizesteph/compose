@@ -127,6 +127,9 @@ import {
   TEXTO_TROCA_DE_MEDICO,
   TEXTO_ATRASO_PARA_RECEPCAO,
   TEXTO_PERGUNTA_CONVENIO_CADASTRO,
+  perguntaBradescoEfetivo,
+  TEXTO_BRADESCO_EFETIVO,
+  convenioAtendidoPerguntado,
   atrasoACaminho,
   respostaAPerguntaDoPaciente,
   TEXTO_PEDE_CPF_DO_PACIENTE,
@@ -5217,6 +5220,23 @@ async function executeAction(
                   datesWithSlots = _montarLista(filteredIso);
                   _nivel = 3;
                 }
+                // A PARTIR DA DATA PEDIDA (14/10, Fabio: "tem dia 28/10?" e "semana do dia 26"
+                // — o Dr. Guilherme fechou aquela semana — recebeu de novo 21/10, ANTES do que
+                // ele pediu; a Glaucia achou 03/11 e 04/11). Sem vaga na janela, os próximos
+                // horários DEPOIS dela; só se não houver nenhum depois, os primeiros.
+                let _depoisDoPedido = false;
+                if (_jb && _nivel > 1) {
+                  const _datasJ = ((_jb.datas || []) as string[]).slice().sort();
+                  const _corte = _datasJ.length ? _datasJ[_datasJ.length - 1] : (_jb.fim || _jb.inicio || "");
+                  if (_corte) {
+                    const _depois = filteredIso.filter((d: string) => d.slice(0, 10) > _corte);
+                    const _listaDepois = _montarLista(_depois);
+                    if (_listaDepois.length > 0 && _listaDepois[0].date !== datesWithSlots[0]?.date) {
+                      datesWithSlots = _listaDepois;
+                      _depoisDoPedido = true;
+                    }
+                  }
+                }
                 // a agenda acaba ANTES da janela começar: ela ainda não foi aberta — mostra
                 // as últimas datas abertas, não as primeiras
                 const _ultimaAberta = [...slotsMap.keys()].filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort().pop() || "";
@@ -5245,6 +5265,7 @@ async function executeAction(
                         periodo: periodFilter,
                         corpo: body,
                         agendaAte: _agendaNaoAberta ? _ultimaAberta : undefined,
+                        depoisDoPedido: _depoisDoPedido,
                       })
                     : header + body + footer;
                   console.log(`[Webhook] Returning ${datesWithSlots.length} dates with slots${_jb ? ` (janela nível ${_nivel})` : ""}`);
@@ -6670,12 +6691,29 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                 channelId: avanceaiConfig.channelId,
               });
               console.log("[Webhook] Limite de atendimento — transfer to human attempted");
+              // A PASSAGEM FICA REGISTRADA (14/10, Eli): sem o registro, a guarda de humano
+              // não sabia da transferência e a próxima mensagem ("Ok. Já estarei com o
+              // resultado…") voltou para a Julia — mesmo texto, laço, "não estou conseguindo
+              // te ajudar". Com ele, a conversa fica com a equipe (regra dos 30 min vale).
+              await auditTransfer(supabaseClient, {
+                clinicTokenId,
+                conversationId: conversationIdParam || null,
+                phone: formattedPhone,
+                initiatedBy: "julia",
+                trigger: "teto_do_amigo",
+                reason: "consulta recente — a equipe marca (às vezes como retorno)",
+                detail: `${String(entities.date || "")} ${String(entities.time || "")}`.trim(),
+              });
             } catch (transferErr) {
               console.log(`[Webhook] Limite transfer error (non-blocking): ${(transferErr as Error).message}`);
             }
           }
           return {
-            status: "success",
+            // NÃO é marcação (14/10, Eli): "success" agendava o fechamento automático da
+            // ficha em 3 min (pending_ticket_resolutions) e armava booking_created — a
+            // ficha que a equipe precisava pegar era fechada. Quando passa para a equipe,
+            // o status diz isso; quando é a consulta do mesmo dia, segue "success".
+            status: _limite.transferir ? "transferred_limite" : "success",
             response: _limite.texto,
             error: _limite.texto,
             bypassAiRewrite: true,
@@ -10671,7 +10709,10 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
       default:
         // Aviso de atraso (29/09): texto pronto e verdadeiro — sem "já avisei a equipe".
         if (intent === "unknown" && ehAvisoDeAtraso(currentMessageText || "")) {
-          return { status: "success", response: TEXTO_AVISO_DE_ATRASO, bypassAiRewrite: true } as any;
+          // 15/10 (Roxane: o modelo mandou "avise a recepção pelo telefone"; 30 min de
+          // atraso o médico não espera): o aviso vai para a recepção — o texto promete e a
+          // rede da promessa passa para a equipe.
+          return { status: "success", response: TEXTO_ATRASO_PARA_RECEPCAO, bypassAiRewrite: true } as any;
         }
         return {
           status: "unknown_intent",
@@ -16572,6 +16613,9 @@ Deno.serve(async (req) => {
                 .eq("conversation_id", conversationId)
                 .eq("direction", "incoming")
                 .like("message_text", "Agendamento via widget:%")
+                // só a linha que o SITE gravou (booking_source é do servidor): um paciente
+                // que digitar "Agendamento via widget: …" não libera data nem hora
+                .in("booking_source", ["widget", "widget_julia"])
                 .gte("created_at", new Date(Date.now() - 30 * 60 * 1000).toISOString())
                 .order("created_at", { ascending: false })
                 .limit(1);
@@ -17006,6 +17050,30 @@ Deno.serve(async (req) => {
           console.log(`[Convenio] Porto Seguro — ${_portoNao ? `plano ${_portoNao} não atendido` : "texto pronto, a equipe confirma"}`);
           replyText = _portoNao ? textoPortoNaoAtendido(_portoNao) : TEXTO_PORTO_SEGURO_EQUIPE;
         }
+        // Bradesco Efetivo (14/10, validado pelo dono): só o especialista em ombro e
+        // cotovelo atende pelo plano; para as outras regiões, particular com reembolso
+        if (["consultar_convenios", "unknown"].includes(String(classification.intent || "")) && perguntaBradescoEfetivo(finalMessage || "")) {
+          console.log(`[Convenio] Bradesco Efetivo — texto pronto`);
+          replyText = TEXTO_BRADESCO_EFETIVO;
+        }
+        // "POSSO FINALIZAR?" DEPOIS DE JÁ MARCADO (14/10, Janaina): "Vou pagar no
+        // particular" foi respondida em paralelo à mensagem do CPF, que MARCOU 10/11 14h;
+        // 3 s depois da confirmação saiu "Posso finalizar seu agendamento para 10/11 às
+        // 14h?". Com marcação real na conversa (30 min), a pergunta sai e fica a verdade.
+        try {
+          const _perguntaFinalizar = /[^.!?\n]*\b(posso|quer que eu|deseja que eu|podemos)\s+(finalizar|confirmar|fechar|concluir|seguir\s+com)\b[^?\n]*(agendamento|consulta|hor[áa]rio)[^?\n]*\?/i;
+          if (_perguntaFinalizar.test(replyText) && conversationId && String((actionResult as any)?.status || "") !== "success") {
+            const _mrF = await marcacaoRecenteDaConversa(supabase, conversationId);
+            if (_mrF) {
+              const _dF = String(_mrF.date).slice(0, 10).split("-");
+              const _quandoF = _dF.length === 3 ? `${_dF[2]}/${_dF[1]} às ${String(_mrF.time).slice(0, 5)}` : "";
+              console.log(`[Finalizar] já há marcação real (${_quandoF}) — tirando o "posso finalizar?"`);
+              replyText = `${replyText.replace(_perguntaFinalizar, "").trim()}${_quandoF ? `\n\nSua consulta já está marcada para ${_quandoF}. ✅` : ""}`.trim();
+            }
+          }
+        } catch (e) {
+          console.log(`[Finalizar] check error (non-blocking): ${(e as Error).message}`);
+        }
         // PEDIDO COM DIA FUTURO NÃO É EMERGÊNCIA (13/10, Simeia: "dores fortes na lombar.
         // Se possível quinta às 11 hs" — o modelo trocou a lista real por "parece urgente,
         // vou avisar a equipe"; a vaga de quinta 11h existia). A regra determinística de
@@ -17076,6 +17144,19 @@ Deno.serve(async (req) => {
           console.log(`[Preço] check error (non-blocking): ${(e as Error).message}`);
         }
 
+        // === CONVÊNIO ATENDIDO PERGUNTADO NO MEIO DA AGENDA (14/10, Jack: Care Plus) ===
+        try {
+          if (["agendar", "reagendar", "cadastrar"].includes(String(classification.intent || ""))) {
+            const _convTodos = convenioAtendidoPerguntado(finalMessage || "");
+            if (_convTodos && !replyText.toLowerCase().includes(_convTodos.toLowerCase().split(" ")[0])) {
+              console.log(`[Convenio] pergunta de ${_convTodos} no ${classification.intent} — respondendo antes da lista`);
+              replyText = `Atendemos ${_convTodos}, sim. 😊\n\n${replyText}`;
+            }
+          }
+        } catch (e) {
+          console.log(`[Convenio] check error (non-blocking): ${(e as Error).message}`);
+        }
+
         // === "O QUE INCLUI? RAIO-X ESTÁ INCLUSO?" (06–07/10, Milla) ===
         // "Qual valor e o que inclui" e "Tá incluso algum exame na consulta? Raio x"
         // receberam horários e "precisa ser confirmado pela recepção". Resposta do dono:
@@ -17085,7 +17166,7 @@ Deno.serve(async (req) => {
             const _incl = textoConsultaInclui(precoDaConsulta(clinicRef?.custom_notes));
             const _naAgenda = ["agendar", "reagendar", "cadastrar"].includes(String(classification.intent || ""));
             console.log(`[Inclusao] pergunta do que a consulta inclui — respondendo (${_naAgenda ? "antes da lista" : "no lugar da resposta"})`);
-            replyText = _naAgenda ? `${_incl}\n\n${replyText.replace(/^A consulta particular com nossos ortopedistas é R\$\s*[\d.,]+\.\s*/, "")}` : _incl;
+            replyText = _naAgenda ? `${_incl}\n\n${replyText.replace(/^A consulta particular com nossos ortopedistas é R\$\s*[\d.,]+(, com direito a retorno em até 30 dias)?\.\s*/, "")}` : _incl;
           }
         } catch (e) {
           console.log(`[Inclusao] check error (non-blocking): ${(e as Error).message}`);
