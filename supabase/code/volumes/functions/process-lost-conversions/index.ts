@@ -289,7 +289,7 @@ Deno.serve(async (req) => {
     // B) Pergunta de preço
     const { data: prices } = await supabase
       .from("webhook_messages")
-      .select("conversation_id, sender_phone, sender_name, clinic_token_id, user_id, created_at, message_text")
+      .select("conversation_id, sender_phone, sender_name, clinic_token_id, user_id, created_at, message_text, action_error")
       .eq("direction", "incoming")
       .gte("created_at", lookback)
       .or("message_text.ilike.%valor%,message_text.ilike.%preço%,message_text.ilike.%preco%,message_text.ilike.%quanto custa%,message_text.ilike.%quanto sai%,message_text.ilike.%quanto fica%")
@@ -308,6 +308,11 @@ Deno.serve(async (req) => {
     for (const r of (prices || []) as Cand[]) {
       const key = `${r.conversation_id}|pergunta_preco`;
       if (!r.conversation_id || !r.sender_phone || seen.has(key)) continue;
+      // CANAL DESLIGADO (16/10): a pergunta de valor chegou pela outra linha (canal 164),
+      // onde a Julia não entra por pedido do dono — e a Recuperação mandou "Vi que você
+      // perguntou sobre valores" pelo canal principal. Mensagem pulada por canal
+      // desabilitado não vira follow-up.
+      if (/desabilitado/i.test(String((r as { action_error?: string }).action_error || ""))) continue;
       // Texto longo não é pergunta de preço de paciente (28/09): uma vendedora de
       // crédito mandou um texto de apresentação com "valor" e recebeu "Vi que você
       // perguntou sobre valores mais cedo".

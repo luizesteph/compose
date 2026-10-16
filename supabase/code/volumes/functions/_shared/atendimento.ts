@@ -605,6 +605,9 @@ function _diaEmSaoPaulo(ms: number): string {
 export const PERGUNTA_DE_MARCACAO_DA_JULIA_RE =
   /Posso confirmar a consulta[\s\S]*\?\s*$|Para fechar, me passa[\s\S]*\?|É essa que deseja reagendar\?|Confirma que deseja reagendar|Qual (data e )?horário prefere\?/;
 
+export const CONVENIO_INFORMADO_RE =
+  /(?<![\p{L}])(?:bradesco|sul\s*am[eé]rica|porto\s+seguro|porto\s+sa[uú]de|care\s*plus|omint|mediservice|gama\s+sa[uú]de|hapvida|notre\s*dame|unimed|amil|prevent\s+senior)(?![\p{L}])/iu;
+
 export function decidirResgate(a: {
   agoraMs: number;
   prazoMin: number;
@@ -675,6 +678,18 @@ export function decidirResgate(a: {
     !_AUTORRESPOSTA_RE.test(texto) &&
     !_NOME_DE_ATENDENTE_RE.test(texto)
   ) {
+    return { resgatar: true, ids: presas.map((p) => p.id), texto, desde: primeira.created_at };
+  }
+  // CONVÊNIO INFORMADO E PARADO (16/10, Adriana: marcou pelo site e mandou "Porto
+  // Seguro Saúde Prata Mais Copar RC E"; a ficha estava aberta e ninguém respondeu).
+  // Não é "pergunta", mas é dado que precisa de resposta — passado o prazo, a Julia responde.
+  // Só quando NENHUMA atendente escreveu na conversa em 24 h (a ficha foi aberta e
+  // ninguém falou): no replay de 60 dias, 314 mensagens com convênio ficaram paradas,
+  // quase todas no meio de uma conversa com a atendente — essas ficam com ela.
+  const atendenteFalouEm24h = ms.some(
+    (m) => m.ai_intent === "manual_reply" && t0 - Date.parse(m.created_at) < 24 * 60 * 60 * 1000 && Date.parse(m.created_at) < t0,
+  );
+  if (!atendenteFalouEm24h && texto.length <= 200 && CONVENIO_INFORMADO_RE.test(texto) && !_AUTORRESPOSTA_RE.test(texto) && !_NOME_DE_ATENDENTE_RE.test(texto)) {
     return { resgatar: true, ids: presas.map((p) => p.id), texto, desde: primeira.created_at };
   }
   if (!exigeRespostaDaAtendente(texto, presas.some((p) => !!p.temMidia))) {

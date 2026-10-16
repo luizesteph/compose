@@ -396,7 +396,7 @@ export function campoPedidoNoCadastro(texto: unknown): "nome" | "cpf" | "nascime
 //
 // Os dois ultimos queriam GUIA do ortopedista, para fazer fisio em outro lugar.
 // Mandar tabela de preco para quem pede receita e' vender o que ninguem pediu.
-export type IntencaoFisio = "agendar" | "pedido_medico" | "falar_com_fisio" | "sessao_em_curso" | "nota_fiscal" | "trabalho" | "consulta_medica" | "convenio";
+export type IntencaoFisio = "agendar" | "pedido_medico" | "falar_com_fisio" | "sessao_em_curso" | "nota_fiscal" | "trabalho" | "consulta_medica" | "convenio" | "pagamento";
 
 const FISIO_PEDIDO_MEDICO_RE =
   /\b(pedidos?\s+(m[ée]dic[oa]s?|do\s+m[ée]dico)|guia|solicita[çc][ãa]o\s+(m[ée]dica|do\s+m[ée]dico)|receita|encaminhamento|renova(r|[çc][ãa]o)|relat[óo]rio|laudo)\b/i;
@@ -445,7 +445,7 @@ const FISIO_SESSAO_EM_CURSO_RE = new RegExp(
   "\\b(?:(?:desmarc|remarc|cancel|alter|mud|troc)\\w*\\s+(?:a|as|o|os|minha|minhas|essa|essas|uma)?\\s*" + FISIO_SESSAO_NOME +
     "|confirm\\w*(?!\\s+se\\b)[\\s\\S]{0,60}\\b" + FISIO_SESSAO_NOME +
     "|" + FISIO_SESSAO_NOME + "[\\s\\S]{0,60}\\bconfirmad\\w*" +
-    "|(?:marquei|agendei|tenho)\\s+(?:a\\s+|uma\\s+|as\\s+|minha\\s+|minhas\\s+)?" + FISIO_SESSAO_NOME +
+    "|(?:marquei|agendei|tenho|fiz)\\s+(?:a\\s+|uma\\s+|as\\s+|minha\\s+|minhas\\s+|\\d+\\s+)?" + FISIO_SESSAO_NOME +
     "|meus\\s+hor[áa]rios|minhas\\s+sess[õo]es" +
     "|(?:terminei|encerr\\w+|conclu[ií]\\w*|acabei|finaliz\\w+|j[áa]\\s+fiz)\\b[\\s\\S]{0,30}\\b(?:" + FISIO_SESSAO_NOME + "|ciclo))(?![\\p{L}])",
   "iu",
@@ -493,6 +493,8 @@ export function classificarPedidoDeFisioterapia(texto: unknown): IntencaoFisio {
   if (!t) return "agendar";
   if (FISIO_TRABALHO_RE.test(t)) return "trabalho";
   if (FISIO_NOTA_FISCAL_RE.test(t)) return "nota_fiscal";
+  // 15/10 (Suely): pix/pagamento de sessão é cobrança, não venda de pacote
+  if (/\b(pix|chave\s+pix|boleto|comprovante|pagar\s+a\s+sess|pagamento\s+d[ao]s?\s+sess)/i.test(t)) return "pagamento";
   // o recado do fisioterapeuta ao médico vem antes do resto: é conversa com a fisio
   if (FISIO_RECADO_RE.test(t)) return "falar_com_fisio";
   if (FISIO_CONSULTA_MEDICA_RE.test(t)) return "consulta_medica";
@@ -1123,7 +1125,7 @@ export function pedeHorarioMaisCedo(texto: unknown): boolean {
 export function textoMesmaLista(nomeDoMedico: string, pediuMaisCedo: boolean): string {
   const medico = String(nomeDoMedico || "o médico").trim() || "o médico";
   if (pediuMaisCedo) {
-    return `Infelizmente esses que te passei são os primeiros horários disponíveis do(a) ${medico} — não tenho nada antes disso. 🙏 Algum deles te atende?`;
+    return `Infelizmente esses que te passei são os primeiros horários disponíveis do(a) ${medico} — não tenho nada antes disso. 🙏 Algum deles te atende? Se quiser, também te coloco na *lista de espera*: se abrir uma vaga antes, te aviso por aqui.`;
   }
   return `Esses são os horários que encontrei com ${medico} para os próximos dias. Se você quer outra data ou outro período, me diga qual (por exemplo, "05/10" ou "semana que vem à tarde") que eu confiro a agenda. 🙏`;
 }
@@ -1938,7 +1940,10 @@ export function textoDoLimiteDeAtendimentos(a: {
   hoje: string;
   /** relógio de SP; com ele, consulta de HOJE que já passou conta como passada (07/10, Catarina) */
   agora?: { hoje: string; hora: number; minuto: number };
-}): { tipo: "mesmo_dia" | "futura" | "recente" | "nenhuma"; transferir: boolean; texto: string } {
+  /** 16/10: o médico e a hora que o paciente escolheu — vão no texto para a equipe marcar exatamente isso */
+  medicoPedido?: string;
+  horaPedida?: string;
+}): { tipo: "mesmo_dia" | "mesmo_dia_outro_medico" | "futura" | "recente" | "nenhuma"; transferir: boolean; texto: string } {
   const vivos = (Array.isArray(a.atendimentos) ? a.atendimentos : [])
     .map((x) => {
       const st = String(x?.status ?? "").toLowerCase();
@@ -1961,7 +1966,22 @@ export function textoDoLimiteDeAtendimentos(a: {
   const quando = (v: V) => `*${formatDateLabel(v.dia)}*${v.hora ? ` às *${v.hora}*` : ""}`;
   const com = (v: V) => (v.medico ? ` com ${v.medico}` : "");
 
+  const escolhido = /^\d{4}-\d{2}-\d{2}$/.test(a.dataPedida)
+    ? `: ${formatDateLabel(a.dataPedida)}${/^\d{2}:\d{2}$/.test(String(a.horaPedida || "")) ? ` às ${a.horaPedida}` : ""}`
+    : "";
   const mesmoDia = vivos.find((v) => v.dia === a.dataPedida && !jaPassou(v));
+  // SEGUNDO MÉDICO NO MESMO DIA (15/10, Luiz Felipe: consulta 21/10 16h20 com o Dr.
+  // Guilherme e queria também o Dr. Lucas às 15h40 — ouviu "Não precisa marcar de
+  // novo" três vezes e entrou em laço). Com outro médico, é marcação nova: a equipe.
+  if (mesmoDia && a.medicoPedido && mesmoDia.medico && !medicoParecido(a.medicoPedido, mesmoDia.medico)) {
+    return {
+      tipo: "mesmo_dia_outro_medico",
+      transferir: true,
+      texto:
+        `Você já tem consulta em ${quando(mesmoDia)}${com(mesmoDia)}. Uma segunda consulta no mesmo dia, com ${/[a-z]/.test(String(a.medicoPedido)) ? String(a.medicoPedido).trim() : _tituloDeNome(String(a.medicoPedido))}, ` +
+        `quem marca é a nossa equipe. Já passei para elas o horário que você escolheu${escolhido} — elas te confirmam por aqui. 🙏`,
+    };
+  }
   if (mesmoDia) {
     return {
       tipo: "mesmo_dia",
@@ -1988,10 +2008,11 @@ export function textoDoLimiteDeAtendimentos(a: {
     return {
       tipo: "recente",
       transferir: true,
+      // 16/10 (Adriana Willets, Ivan): o texto diz o horário escolhido — a equipe
+      // marca exatamente esse — e não soa como falha do sistema
       texto:
-        `Não consegui marcar pelo sistema: você teve consulta em ${quando(ultima)}${com(ultima)}, e uma nova consulta ` +
-        "tão perto da anterior precisa ser marcada pela nossa equipe (às vezes entra como retorno). " +
-        "Já chamei uma atendente para te ajudar. 🙏",
+        `Como você teve consulta em ${quando(ultima)}${com(ultima)}, essa nova entra como *retorno* — e retorno quem marca é a nossa equipe. ` +
+        `Já passei para elas o horário que você escolheu${escolhido} — elas te confirmam por aqui. 🙏`,
     };
   }
   return {
@@ -2590,4 +2611,122 @@ export function convenioAtendidoPerguntado(texto: unknown): string | null {
   if (_OUTROS_CONVENIOS_RE.test(t)) return null;
   const achados = _CONVENIOS_TODOS.filter((c) => c.re.test(t));
   return achados.length === 1 ? achados[0].nome : null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORREÇÕES DO RELATÓRIO DE 15/10 (16/10)
+// ─────────────────────────────────────────────────────────────────────────────
+// palavras que aparecem depois de "Dr." e não são nome ("o Dr. não conseguirá
+// comparecer", "o doutor escolhido trata pé", "Dr Gustavo hoje") — replay de 60 dias
+const _NAO_E_NOME_DE_MEDICO = new Set([
+  "vilela", "santos", "silva", "para", "hoje", "amanha", "escolhido", "escolhida", "conseguira", "conseguiu", "consegue",
+  "pediu", "falou", "disse", "mandou", "esta", "estava", "tambem", "mesmo", "mesma", "responsavel", "medico", "medica",
+  "atende", "atendeu", "trata", "cuida", "quer", "queria", "seria", "pode", "podia", "vai", "vem", "nao", "dele", "dela",
+]);
+function _tokensDeMedico(nome: string): string[] {
+  return stripAccents(String(nome || "").toLowerCase()).replace(/\b(dr|dra|doutor|doutora)\b\.?/g, " ")
+    .split(/[^a-z]+/).filter((w) => w.length >= 4 && !_NAO_E_NOME_DE_MEDICO.has(w));
+}
+/** Mesmo médico? Basta um nome próprio (5 primeiras letras) em comum — "Cristina" ≈ "Cristian", "Stephanelli" ≈ "Estephanelli". */
+export function medicoParecido(a: string, b: string): boolean {
+  const ta = _tokensDeMedico(a);
+  const tb = _tokensDeMedico(b);
+  if (!ta.length || !tb.length) return true; // sem nome para comparar: não acusa troca
+  const pref = (w: string) => w.slice(0, 5);
+  return ta.some((x) => tb.some((y) => pref(x) === pref(y) || y.includes(x) || x.includes(y)));
+}
+// "Na verdade é com o Dr. Arnaldo" (15/10, Mariana: a Julia marcou com o Dr. Cristian
+// e ela queria o Dr. Arnaldo; o remarcar seguiu na agenda do Cristian e o modelo
+// disse que o Arnaldo "não tinha horário" sem olhar a agenda dele). O médico citado
+// na mensagem, quando não é o da consulta encontrada, é troca de médico.
+export function medicoCitadoNoTexto(texto: unknown): string {
+  const m = /\b(?:dr|dra|doutor|doutora)\.?\s+([\p{L}]{3,}(?:\s+[\p{L}]{3,})?)/iu.exec(String(texto ?? ""));
+  return m ? m[1].trim() : "";
+}
+export function medicoCitadoDiferente(texto: unknown, medicoDaConsulta: string): string {
+  const citado = medicoCitadoNoTexto(texto);
+  if (!citado || !medicoDaConsulta || _tokensDeMedico(citado).length === 0) return "";
+  return medicoParecido(citado, medicoDaConsulta) ? "" : citado;
+}
+
+// "NÃO CONSEGUI" LOGO DEPOIS DE UM SUCESSO DE VERDADE (15/10, Flavia e Mariana): duas
+// mensagens processadas em paralelo — uma marcou (ou confirmou), a outra falhou por já
+// estar feito — e a paciente leu "confirmado" e, no mesmo minuto, "não consegui".
+export const RESPOSTA_DE_FALHA_RE =
+  /\bn[ãa]o\s+consegui\s+(confirmar|marcar|registrar|concluir|finalizar|agendar|fazer)\b|\binstabilidade\b/i;
+export function textoConsultaJaFeita(dataISO: string, hhmm: string, confirmacao: boolean): string {
+  const d = String(dataISO || "").slice(0, 10).split("-");
+  const quando = d.length === 3 ? ` para ${d[2]}/${d[1]}${/^\d{2}:\d{2}/.test(String(hhmm || "")) ? ` às ${String(hhmm).slice(0, 5)}` : ""}` : "";
+  return confirmacao
+    ? `Tudo certo: sua consulta${quando} já está confirmada. ✅`
+    : `Tudo certo: sua consulta${quando} já está marcada. ✅`;
+}
+
+// HORÁRIO QUE A JULIA OFERECEU E SUMIU (15/10, André Dias: escolheu 26/10 9h40 uma hora
+// depois da lista e ouviu "não tem horário" e, depois, "me confundi"). Foi preenchido
+// nesse meio tempo — o texto diz isso e mostra o que há.
+export function textoHorarioPreenchido(dataLabel: string, hhmm: string, medico: string, linhas: string): string {
+  return `O horário de ${dataLabel}${hhmm ? ` às ${hhmm}` : ""} que te passei foi preenchido nesse meio tempo 😕 — as vagas mudam rápido. ` +
+    `Estas são as próximas datas que ${medico || "o médico"} tem:\n${linhas}\n\nAlguma delas te atende?`;
+}
+
+// PROPOSTA COMERCIAL NÃO É PACIENTE (15/10, Groohub foi para a fila de pacientes).
+// Exige dois sinais de venda, para não pegar paciente que menciona "parceria" de plano.
+const _VENDA_RE = [
+  /\bparceir[ao]\s+oficial\b/i, /\bnossa\s+(empresa|solu[çc][ãa]o|plataforma)\b/i, /\b(aumentar|aumento\s+de)\s+(o\s+)?faturamento\b/i,
+  /\bcapta[çc][ãa]o\s+de\s+pacientes\b/i, /\bn[ãa]o\s+sou\s+paciente\b/i, /\b(parte|setor|[áa]rea)\s+comercial\b/i,
+  /\bproposta\s+(comercial|de\s+parceria)\b/i, /\b(representante|consultor[ae]?)\s+(comercial|de\s+vendas)\b/i,
+  /\bmarketing\s+(m[ée]dico|para\s+cl[íi]nicas)\b/i, /\b(gostar[íi]amos|queremos)\s+de\s+(apresentar|oferecer)\b/i,
+];
+export function propostaComercial(texto: unknown): boolean {
+  const t = String(texto ?? "");
+  return _VENDA_RE.filter((r) => r.test(t)).length >= 2;
+}
+export const TEXTO_PROPOSTA_COMERCIAL =
+  "Obrigada pelo contato! 😊 Este WhatsApp é o atendimento de pacientes da clínica. Deixei sua mensagem registrada aqui para a administração avaliar — se houver interesse, entram em contato.";
+
+// "VOCÊS TÊM ATENDIMENTO DE URGÊNCIA HOJE?" (15/10, Rosana): a palavra "urgência"
+// disparou a Regra 4 com pronto-socorro; a resposta que a Laiz deu 1h26 depois foi
+// "não trabalhamos com pronto atendimento, só hora marcada". Pergunta sobre o serviço.
+export function perguntaSobreProntoAtendimento(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  if (!t.trim() || t.length > 250) return false;
+  const servico = /\b(tem|tem\s+algum|existe|voces\s+tem|vcs\s+tem|fazem|atendem|atende|teria|ha)\b[\s\S]{0,30}\b(atendimento\s+(de|na|em)\s+(urgencia|emergencia)|pronto[\s-]*(atendimento|socorro)|plantao|urgencia|emergencia)\b/.test(t);
+  return servico && (/\?/.test(t) || /\b(gostaria\s+de\s+saber|queria\s+saber|saber\s+se)\b/.test(t));
+}
+export const TEXTO_SEM_PRONTO_ATENDIMENTO =
+  "A clínica não tem pronto atendimento: atendemos só com hora marcada. 🙏 Se for uma emergência, procure um pronto-socorro. " +
+  "Se quiser, me conta a região (joelho, coluna, ombro…) que eu procuro o primeiro horário disponível para você.";
+
+// "EU FIZ A RESSONÂNCIA" NÃO É PEDIDO DE CONSULTA (15/10, Tania: era para autorizar a
+// infiltração e recebeu horários de dois médicos). Aviso de exame feito, sem verbo de
+// marcar, recebe uma pergunta — não uma lista.
+export function avisaExameFeito(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  if (!t.trim() || t.length > 200) return false;
+  if (/\b(marcar|agendar|consulta|horario|retorno|vaga|encaixe|disponivel|disponibilidade|quando)\b/.test(t)) return false;
+  // exame que AINDA vai fazer ("tenho que fazer dia 19 ressonância") não é exame feito
+  if (/\b(tenho\s+que|vou|preciso|irei)\s+(fazer|realizar)\b/.test(t)) return false;
+  return /\b(fiz|ja\s+fiz|realizei|saiu|sairam|ficou\s+pronto|ficaram\s+prontos|estou\s+com|tenho)\b[\s\S]{0,25}\b(a\s+|o\s+|os\s+|as\s+|meu\s+|minha\s+)?(ressonancia|exame|exames|raio[\s-]*x|ultrassom|tomografia|resultado|laudo)/.test(t);
+}
+export const TEXTO_EXAME_FEITO =
+  "Que bom! 😊 Você quer marcar uma consulta para o médico ver o resultado, ou é para enviar o exame para a nossa equipe (por exemplo, para a autorização de uma infiltração)? Se for só enviar, pode mandar por aqui.";
+
+// FISIOTERAPIA: PIX / PAGAMENTO DE SESSÃO FEITA (15/10, Suely: "fiz uma sessão…
+// poderia enviar pix e valor?" recebeu a tabela de preço).
+export const TEXTO_FISIO_PAGAMENTO =
+  "Já passei para a nossa equipe, que cuida da fisioterapia, te mandar o valor e o pix por aqui. 🙏";
+
+// CONVÊNIO NO CADASTRO, COM O HORÁRIO ESCOLHIDO (15/10, Márcio Cal: a pergunta saiu
+// sem lembrar o horário, ele parou e o horário ficou solto até a equipe marcar).
+export function textoPerguntaConvenioCadastro(dataISO?: string, hhmm?: string, medico?: string): string {
+  const d = String(dataISO || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return TEXTO_PERGUNTA_CONVENIO_CADASTRO;
+  const quando = `${formatDateLabel(d)}${/^\d{2}:\d{2}/.test(String(hhmm || "")) ? ` às ${String(hhmm).slice(0, 5)}` : ""}${medico ? ` com ${medico}` : ""}`;
+  return `Quase lá! 😊 Falta só o convênio para eu marcar ${quando}. Você tem convênio? Se tiver, me diga o nome do convênio e o plano (como está na carteirinha). Se não, é só responder *particular*.`;
+}
+
+/** CPF sem cadastro ao cancelar/confirmar (15/10, Matias): conferir — ou a consulta é de outra pessoa. */
+export function textoCpfNaoEncontradoConsulta(cpf?: unknown): string {
+  return `${textoCpfNaoEncontrado(cpf)} Se a consulta estiver no nome de outra pessoa (filho, cônjuge…), me passa o CPF dela.`;
 }
