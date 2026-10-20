@@ -284,6 +284,32 @@ export function relogioDaGuarda(s: {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// A RESPOSTA À PERGUNTA DA PRÓPRIA JULIA (relatório de 16–17/10, Ale e Ligia)
+// ─────────────────────────────────────────────────────────────────────────────
+// Sáb 17/10: 09:00 o ticket da Ale voltou para a fila (devolução por inatividade),
+// 09:10 o resgate fez a Julia pedir o CPF para remarcar, 09:13 o CPF chegou — e o
+// sinal 5 (handoff nas últimas 24 h) calou a resposta. O handoff era ANTERIOR à
+// pergunta: quem estava conversando era a Julia. Ligia (16/10) igual: fila 12:32,
+// pergunta 12:52, CPF 13:03 calado. Em 60 dias: 4 casos (Nicky, Denize, Ligia, Ale),
+// todos depois de um resgate. Texto de transferência ("Esse plano eu preciso
+// confirmar com a equipe… Já estou chamando alguém") NÃO conta — promete gente.
+export const INTENCOES_COM_PERGUNTA_DE_AGENDA = ["agendar", "reagendar", "cancelar", "consultar", "confirmar", "cadastrar"];
+
+export function juliaPerguntouDepoisDoHandoff(s: {
+  agoraMs: number;
+  handoffMs: number;
+  ultimaSaida: { ms: number; intent: string; status: string; manual: boolean; prometeGente: boolean } | null;
+  falaHumanaDepoisDoHandoff: boolean;
+}): boolean {
+  const u = s.ultimaSaida;
+  if (!u || u.manual || u.prometeGente || s.falaHumanaDepoisDoHandoff) return false;
+  if (!INTENCOES_COM_PERGUNTA_DE_AGENDA.includes(String(u.intent || ""))) return false;
+  if (!["needs_info", "needs_registration"].includes(String(u.status || ""))) return false;
+  if (!(u.ms > s.handoffMs)) return false;
+  return s.agoraMs - u.ms <= 30 * 60 * 1000;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // VARREDURA DA FICHA — tirar o nome de quem foi embora (pedido do dono, 12/09)
 // ─────────────────────────────────────────────────────────────────────────────
 // A devolução por inatividade acima resolve UM caso: o paciente perguntou e
@@ -506,6 +532,15 @@ export function fraseForaDoExpediente(
     return `Vou deixar seu caso com ${alvo} — ${nome ? "ela te responde" : "te respondem"} hoje de manhã, quando o atendimento começar.`;
   }
   return `Vou deixar seu caso com ${alvo} — o atendimento de hoje já encerrou, então ${nome ? "ela te responde" : "te respondem"} amanhã de manhã.`;
+}
+
+/** Quando a equipe volta a responder (fora do expediente); `null` com o atendimento aberto. 19/10, Daniella. */
+export function quandoAEquipeResponde(agora: { diaDaSemana: number; hora: number; minuto: number }): string | null {
+  if (expedienteAberto(agora)) return null;
+  const m = agora.hora * 60 + agora.minuto;
+  const fimDeSemana = agora.diaDaSemana === 0 || agora.diaDaSemana === 6 || (agora.diaDaSemana === 5 && m >= 18 * 60 + 15);
+  if (fimDeSemana) return "na segunda-feira de manhã";
+  return m < 7 * 60 + 30 ? "hoje de manhã" : "amanhã de manhã";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

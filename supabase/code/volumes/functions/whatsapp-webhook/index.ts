@@ -79,6 +79,15 @@ import {
   TEXTO_CONFIRMACAO_NAO_REGISTRADA,
   respostaConfirmaReagendamento,
   querAntecipar,
+  querAdiar,
+  cirurgiaoDaRegiao,
+  perguntaAtendimentoDomiciliar,
+  TEXTO_SEM_ATENDIMENTO_DOMICILIAR,
+  perguntaRegraDoRetorno,
+  TEXTO_REGRA_DO_RETORNO,
+  perguntaPrecoNutrologa,
+  precoDaNutrologa,
+  textoPrecoNutrologa,
   antesDaConsultaAtual,
   textoSemHorarioAntes,
   perguntaDePreco,
@@ -118,6 +127,10 @@ import {
   perguntaConvenioPortoSeguro,
   TEXTO_PORTO_SEGURO_EQUIPE,
   TEXTO_FISIO_CONVENIO,
+  TEXTO_FISIO_CONVENIO_PERGUNTA,
+  TEXTO_FISIO_AVALIACAO_ACEITA,
+  TEXTO_FISIO_EXAME,
+  aceitaAvaliacaoDaFisio,
   pedeAvisoDeDesistencia,
   periodoDeEsperaMisto,
   textoPeriodoDeEsperaMisto,
@@ -159,6 +172,8 @@ import {
   desdeJanelaCasoLongo,
   FILTRO_GATILHOS_SEM_MOVIMENTO,
   JANELA_CASO_LONGO_DIAS,
+  juliaPerguntouDepoisDoHandoff,
+  quandoAEquipeResponde,
   relogioDaGuarda,
 } from "../_shared/atendimento.ts";
 import { LLM_MODEL, LLM_MODEL_FALLBACK, LLM_MODEL_RESPOSTA, LLM_GATEWAY, ehErroDeModeloDesconhecido, llmApiKey, llmHeaders, LLM_USAGE_INCLUDE, custoDaChamada } from "../_shared/llm.ts";
@@ -7695,6 +7710,9 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               ];
               const _antecipar = !!origStart && querAntecipar(_msgsDoPaciente);
               if (_antecipar) console.log(`[Webhook] reagendar - paciente quer ANTECIPAR — só horários antes de ${origStart}`);
+              // ADIAR (19/10, Fabio): só horários DEPOIS da consulta atual
+              const _adiar = !!origStart && !_antecipar && querAdiar(_msgsDoPaciente);
+              if (_adiar) console.log(`[Webhook] reagendar - paciente quer ADIAR — só horários depois de ${origStart}`);
               const _agoraRe = agoraSP();
               for (const d of candidateDates) {
                 if (datesWithSlots.length >= MAX_DATES) break;
@@ -7704,6 +7722,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                 // horário de hoje que já passou não é oferta (o agendar já cortava; o remarcar não)
                 slots = slots.filter((t) => !slotJaPassou(d, t, _agoraRe));
                 if (_antecipar) slots = slots.filter((t) => antesDaConsultaAtual(d, t, origStart));
+                if (_adiar) slots = slots.filter((t) => !antesDaConsultaAtual(d, t, origStart) && `${d} ${t}` !== String(origStart).replace("T", " ").slice(0, 16));
                 if (periodFilter === "manha") slots = slots.filter((t) => t < "12:00");
                 if (periodFilter === "tarde") slots = slots.filter((t) => t >= "12:00");
                 if (slots.length === 0) continue;
@@ -10555,8 +10574,38 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         // o que ninguém pediu — e some com o pedido real no meio do texto.
         const _intFisio = classificarPedidoDeFisioterapia(currentMessageText || "");
         console.log(`[Webhook] solicitar_fisioterapia - intenção=${_intFisio}`);
+        // CONVÊNIO NÃO VAI PARA A FILA (19/10, Thalita): responde e pergunta se quer
+        // agendar a avaliação; o "sim/quero" depois é que transfere.
+        if (_intFisio === "convenio") {
+          console.log(`[Fisio] pergunta de convênio — resposta e pergunta, sem transferir`);
+          return { status: "fisio_convenio", response: TEXTO_FISIO_CONVENIO_PERGUNTA, error: TEXTO_FISIO_CONVENIO_PERGUNTA, bypassAiRewrite: true } as any;
+        }
+        // "sim/quero" à pergunta da avaliação (19/10): sem repetir a tabela
+        let _aceitouAvaliacao = false;
+        if (_intFisio === "agendar" && aceitaAvaliacaoDaFisio(currentMessageText || "")) {
+          const _convIdAv = conversationIdParam || ((globalThis as any).__currentConversationId as string | undefined) || null;
+          if (_convIdAv && supabaseClient) {
+            try {
+              const { data: _ultAv } = await supabaseClient
+                .from("webhook_messages")
+                .select("action_status, created_at")
+                .eq("conversation_id", _convIdAv)
+                .eq("direction", "outgoing")
+                .order("created_at", { ascending: false })
+                .limit(1)
+                .maybeSingle();
+              _aceitouAvaliacao = !!_ultAv && _ultAv.action_status === "fisio_convenio" &&
+                Date.now() - Date.parse(String(_ultAv.created_at)) < 2 * 60 * 60_000;
+            } catch (_e) { /* non-blocking */ }
+          }
+        }
         const fisioScript =
-          _intFisio === "pedido_medico"
+          _aceitouAvaliacao
+            ? TEXTO_FISIO_AVALIACAO_ACEITA
+            : _intFisio === "exame"
+              // 19/10 (Antônio): imagens/resultado de exame — a equipe envia
+              ? TEXTO_FISIO_EXAME
+            : _intFisio === "pedido_medico"
             ? "Pedido, guia ou renovação de sessões quem emite é o médico. 🙏 Vou te passar para nossa equipe verificar isso com o doutor."
             : _intFisio === "nota_fiscal"
               // Nota fiscal e recibo (22/09): é a equipe que emite — sem tabela de
@@ -11133,10 +11182,52 @@ async function isHumanActive(
           `[isHumanActive] handoff registrado, mas ninguém fala há mais de ${_prazo}min — devolvendo a conversa para a Julia`,
         );
       } else if (handoff) {
-        return {
-          blocked: true,
-          reason: `handoff_ativo(${String(handoff.reason || "transferido")},<${horas}h)`,
-        };
+        // A PERGUNTA DA JULIA VEIO DEPOIS DO HANDOFF (19/10, Ale e Ligia): o resgate
+        // fez a Julia pedir o CPF 10 min depois de o ticket voltar à fila, e o CPF foi
+        // calado por esse handoff mais antigo. Quem estava conversando era a Julia.
+        let _respondeAJulia = false;
+        try {
+          const { data: _ultSaida } = await supabaseClient
+            .from("webhook_messages")
+            .select("created_at, ai_intent, action_status, message_text")
+            .eq("conversation_id", conversationId)
+            .eq("direction", "outgoing")
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          if (_ultSaida) {
+            const { count: _falasDepois } = await supabaseClient
+              .from("webhook_messages")
+              .select("id", { count: "exact", head: true })
+              .eq("conversation_id", conversationId)
+              .eq("direction", "outgoing")
+              .eq("ai_intent", "manual_reply")
+              .gt("created_at", handoff.created_at);
+            _respondeAJulia = juliaPerguntouDepoisDoHandoff({
+              agoraMs: Date.now(),
+              handoffMs: Date.parse(String(handoff.created_at)),
+              ultimaSaida: {
+                ms: Date.parse(String(_ultSaida.created_at)),
+                intent: String(_ultSaida.ai_intent || ""),
+                status: String(_ultSaida.action_status || ""),
+                manual: String(_ultSaida.ai_intent || "") === "manual_reply",
+                prometeGente: PROMESSA_DE_HUMANO_RE.test(String(_ultSaida.message_text || "")),
+              },
+              falaHumanaDepoisDoHandoff: (_falasDepois || 0) > 0,
+            });
+          }
+        } catch (_) {
+          /* non-blocking: na dúvida, o handoff vale */
+        }
+        if (_respondeAJulia) {
+          // não cala por este sinal; o showticket ao vivo (sinal 4) continua valendo
+          console.log(`[isHumanActive] handoff registrado, mas o paciente responde à pergunta da Julia feita depois dele — a Julia segue`);
+        } else {
+          return {
+            blocked: true,
+            reason: `handoff_ativo(${String(handoff.reason || "transferido")},<${horas}h)`,
+          };
+        }
       }
     } catch (_) {
       /* non-blocking: os outros sinais continuam valendo */
@@ -15358,9 +15449,11 @@ Deno.serve(async (req) => {
               .limit(1);
             const _ult = _antes?.[0] as any;
             if (
-              _ult && _ult.direction === "incoming" &&
-              /^Agendamento via widget:/.test(String(_ult.message_text || "")) &&
-              _ult.ai_entities?.waitlist_invite?.doctor_id &&
+              _ult && (
+                (_ult.direction === "incoming" && /^Agendamento via widget:/.test(String(_ult.message_text || "")) && _ult.ai_entities?.waitlist_invite?.doctor_id) ||
+                // 19/10 (Andrea): o convite da própria Julia depois de marcar pelo WhatsApp
+                (_ult && _ult.direction === "outgoing" && _ult.ai_entities?.waitlist_invite?.doctor_id)
+              ) &&
               Date.now() - Date.parse(String(_ult.created_at)) < 30 * 60_000
             ) {
               console.log(`[Waitlist] "sim" ao convite da lista de espera do site — entrar_lista_espera`);
@@ -15369,6 +15462,28 @@ Deno.serve(async (req) => {
           }
         } catch (e) {
           console.log(`[Waitlist] convite do site check error (non-blocking): ${(e as Error).message}`);
+        }
+
+        // === "SIM" À PERGUNTA DA AVALIAÇÃO DA FISIO (19/10) ===
+        // A pergunta de convênio da fisio termina em "Quer agendar a avaliação?" sem
+        // transferir. O "sim/quero" é o pedido — vai para a fisio, que passa para a equipe.
+        try {
+          if (conversationId && classification.intent !== "solicitar_fisioterapia" && aceitaAvaliacaoDaFisio(finalMessage || "")) {
+            const { data: _ultFis } = await supabase
+              .from("webhook_messages")
+              .select("action_status, created_at")
+              .eq("conversation_id", conversationId)
+              .eq("direction", "outgoing")
+              .order("created_at", { ascending: false })
+              .limit(1)
+              .maybeSingle();
+            if (_ultFis && _ultFis.action_status === "fisio_convenio" && Date.now() - Date.parse(String(_ultFis.created_at)) < 2 * 60 * 60_000) {
+              console.log(`[Fisio] "sim" à pergunta da avaliação — solicitar_fisioterapia`);
+              classification.intent = "solicitar_fisioterapia";
+            }
+          }
+        } catch (e) {
+          console.log(`[Fisio] aceite da avaliação check error (non-blocking): ${(e as Error).message}`);
         }
 
         // === AVISO DE ATRASO (29/09, Mari e Andrea) ===
@@ -16160,7 +16275,7 @@ Deno.serve(async (req) => {
         mensagemSoDeConvenio(finalMessage || "")
       ) {
         try {
-          const _mrConv = await marcacaoRecenteDaConversa(supabase, conversationId);
+          const _mrConv = await marcacaoRecenteDaConversa(supabase, conversationId, { incluirSite: true });
           if (_mrConv) {
             console.log(`[ConvenioPosMarcacao] ${classification.intent} logo depois de marcar (${_mrConv.date} ${_mrConv.time}) — não marca de novo`);
             _convenioPosMarcacao = _mrConv;
@@ -16228,6 +16343,25 @@ Deno.serve(async (req) => {
       if (classification.intent === "agendar" && recadoDoMedicoSemPedido(finalMessage || "")) {
         console.log(`[Webhook] recado do médico sem pedido claro — perguntando antes de listar horários`);
         _recadoDoMedico = true;
+        classification.intent = "unknown";
+      }
+      // "CIRURGIÃO DE COLUNA" É PEDIDO DE CONSULTA (19/10, Laura): virou falar_com_atendente
+      // e foi para a fila; o agendar já sabe ir da região ao médico (Dr. Lucas, coluna).
+      const _regiaoCirurgiao = classification.intent === "falar_com_atendente" ? cirurgiaoDaRegiao(finalMessage || "") : null;
+      if (_regiaoCirurgiao) {
+        console.log(`[Webhook] "cirurgião de ${_regiaoCirurgiao}" — consulta com a especialidade, não atendente`);
+        classification.intent = "agendar";
+        classification.subspecialty = _regiaoCirurgiao;
+      }
+      // PERGUNTAS COM RESPOSTA PRONTA (19/10): domicílio (Angélica) e regra do retorno
+      // (Ligia) iam para a equipe ou pediam CPF. Urgência clínica vem antes.
+      const _semUrgClinica = classificarUrgencia(finalMessage || "") !== "clinica";
+      const _domiciliar = _semUrgClinica && perguntaAtendimentoDomiciliar(finalMessage || "") &&
+        ["consultar", "falar_com_atendente", "unknown", "agendar", "listar_medicos"].includes(String(classification.intent || ""));
+      const _regraRetorno = !_domiciliar && _semUrgClinica && perguntaRegraDoRetorno(finalMessage || "") &&
+        ["consultar", "falar_com_atendente", "unknown", "agendar"].includes(String(classification.intent || ""));
+      if (_domiciliar || _regraRetorno) {
+        console.log(`[Webhook] pergunta com resposta pronta (${_domiciliar ? "domicílio" : "regra do retorno"})`);
         classification.intent = "unknown";
       }
       console.log(`[Webhook] Executing action: ${classification.intent}`);
@@ -17121,7 +17255,16 @@ Deno.serve(async (req) => {
         // recebeu "Nossa fisioterapia funciona pelo sistema de reembolso… R$ 180" —
         // o modelo copiou o trecho do script. Sai o texto neutro; a rede da promessa
         // garante a equipe.
-        if (respostaFalaDeFisioSemPedido(replyText, finalMessage || "") && classification.intent !== "solicitar_fisioterapia") {
+        // 19/10 (Andrea): "Preciso marcar uma consulta… preciso de fisioterapia mais 10
+        // sessões" — 6 min depois o CPF MARCOU 27/10 15:20, a resposta citou a fisio e foi
+        // trocada pelo texto neutro: a confirmação sumiu. O pedido de fisio vale nas
+        // últimas mensagens do paciente, e marcação feita agora nunca é trocada.
+        const _textoRecenteFisio = [
+          ...((conversationHistory || []) as any[]).filter((m: any) => m?.role === "user").slice(-6).map((m: any) => String(m?.content || "")),
+          String(finalMessage || ""),
+        ].join("\n");
+        const _marcouAgora = String((actionResult as any)?.status || "") === "success" && !!(actionResult as any)?.entities?.booked_event_id;
+        if (respostaFalaDeFisioSemPedido(replyText, _textoRecenteFisio) && classification.intent !== "solicitar_fisioterapia" && !_marcouAgora) {
           console.log(`[FisioForaDeContexto] resposta com a tabela da fisioterapia sem pedido de fisio — trocando`);
           replyText = "Recebi sua mensagem! 🙏 Vou passar para a nossa equipe, que te responde por aqui.";
         }
@@ -17180,6 +17323,31 @@ Deno.serve(async (req) => {
         if (_procedimentoLiberado) replyText = TEXTO_PROCEDIMENTO_LIBERADO;
         if (_raioXNoLocal) replyText = TEXTO_RAIO_X_NO_LOCAL;
         if (_atrasoSobAtendente) replyText = TEXTO_ATRASO_PARA_RECEPCAO;
+        if (_domiciliar) replyText = TEXTO_SEM_ATENDIMENTO_DOMICILIAR;
+        if (_regraRetorno) replyText = TEXTO_REGRA_DO_RETORNO;
+        // VALOR DA NUTRÓLOGA (19/10, Enzo): a pergunta vinha junto com outra (nota da
+        // aplicação → Lidiane) e o valor, que está no script, ficou de fora.
+        try {
+          const _precoNut = perguntaPrecoNutrologa(finalMessage || "") ? precoDaNutrologa(clinicRef?.custom_notes) : null;
+          if (_precoNut && !replyText.includes(_precoNut.replace(/\s+/g, " ")) && !/R\$\s*700/.test(replyText)) {
+            console.log(`[Nutrologa] valor perguntado e fora da resposta — acrescentando`);
+            replyText = `${replyText.trim()}\n\n${textoPrecoNutrologa(_precoNut)}`.trim();
+          }
+        } catch (e) {
+          console.log(`[Nutrologa] check error (non-blocking): ${(e as Error).message}`);
+        }
+        // CASO LONGO FORA DO EXPEDIENTE (19/10, Daniella, sábado 10h14): "fica registrada
+        // com a nossa equipe, que responde por aqui" — sem dizer que é na segunda.
+        try {
+          const _spCL = getNowSPParts();
+          const _quandoCL = quandoAEquipeResponde({ diaDaSemana: _spCL.weekday, hora: _spCL.hour, minuto: _spCL.minute });
+          if ((actionResult as any)?.casoLongoSemNovaTransferencia && _quandoCL && !/segunda|amanh[ãa]|de manh[ãa]/i.test(replyText)) {
+            console.log(`[CasoLongo] fora do expediente — dizendo quando a equipe responde (${_quandoCL})`);
+            replyText = `${replyText.trim()} Como o atendimento está fechado agora, a equipe te responde ${_quandoCL}. 🙏`;
+          }
+        } catch (e) {
+          console.log(`[CasoLongo] quando check error (non-blocking): ${(e as Error).message}`);
+        }
         // Porto Seguro: a equipe confirma (08/10, Joel) — só na pergunta de convênio
         if (["consultar_convenios", "unknown"].includes(String(classification.intent || "")) && perguntaConvenioPortoSeguro(finalMessage || "")) {
           // P220/P320/P470 (13/10, P320Q três vezes): a equipe sempre respondeu "não
@@ -17199,9 +17367,9 @@ Deno.serve(async (req) => {
         // 3 s depois da confirmação saiu "Posso finalizar seu agendamento para 10/11 às
         // 14h?". Com marcação real na conversa (30 min), a pergunta sai e fica a verdade.
         try {
-          const _perguntaFinalizar = /[^.!?\n]*\b(posso|quer que eu|deseja que eu|podemos)\s+(finalizar|confirmar|fechar|concluir|seguir\s+com)\b[^?\n]*(agendamento|consulta|hor[áa]rio)[^?\n]*\?/i;
+          const _perguntaFinalizar = /[^.!?\n]*\b(posso|quer que eu|deseja que eu|podemos)\s+(finalizar|confirmar|fechar|concluir|seguir\s+com|siga\s+com|prosseguir\s+com|prossiga\s+com|continuar\s+com|continue\s+com)\b[^?\n]*(agendamento|consulta|hor[áa]rio)[^?\n]*\?/i;
           if (_perguntaFinalizar.test(replyText) && conversationId && String((actionResult as any)?.status || "") !== "success") {
-            const _mrF = await marcacaoRecenteDaConversa(supabase, conversationId);
+            const _mrF = await marcacaoRecenteDaConversa(supabase, conversationId, { incluirSite: true });
             if (_mrF) {
               const _dF = String(_mrF.date).slice(0, 10).split("-");
               const _quandoF = _dF.length === 3 ? `${_dF[2]}/${_dF[1]} às ${String(_mrF.time).slice(0, 5)}` : "";

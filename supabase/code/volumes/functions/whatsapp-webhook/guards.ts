@@ -525,13 +525,18 @@ export function repeteMarcacaoRecente(
 export async function marcacaoRecenteDaConversa(
   supabase: any,
   conversationId: string | null | undefined,
+  // 19/10 (Rodrigo): marcou pelo site, mandou o plano, e a Julia perguntou "Quer que
+  // eu siga com o agendamento?". Com `incluirSite`, a linha "Agendamento via widget:
+  // … em AAAA-MM-DD HH:MM" conta — só com a origem gravada pelo servidor (booking_source),
+  // nunca pelo texto, que o paciente pode digitar.
+  opts?: { incluirSite?: boolean },
 ): Promise<{ date: string; time: string } | null> {
   if (!supabase || !conversationId) return null;
   try {
     const desde = new Date(Date.now() - 30 * 60 * 1000).toISOString();
     const { data } = await supabase
       .from("webhook_messages")
-      .select("ai_intent, action_status, ai_entities, created_at")
+      .select("ai_intent, action_status, ai_entities, created_at, message_text, booking_source")
       .eq("conversation_id", conversationId)
       .eq("direction", "incoming")
       .eq("action_status", "success")
@@ -541,6 +546,10 @@ export async function marcacaoRecenteDaConversa(
       .limit(10);
     for (const linha of (data || []) as Array<Record<string, unknown>>) {
       const e = (linha.ai_entities && typeof linha.ai_entities === "object" ? linha.ai_entities : {}) as Record<string, unknown>;
+      if (opts?.incluirSite && ["widget", "widget_julia"].includes(String(linha.booking_source || ""))) {
+        const site = /^Agendamento via widget:.*\bem\s+(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})/.exec(String(linha.message_text || ""));
+        if (site) return { date: site[1], time: site[2] };
+      }
       const marcou = Boolean(e.booked_event_id) || String(linha.ai_intent || "") === "reagendar";
       if (!marcou) continue;
       const date = String(e.date || "").trim();

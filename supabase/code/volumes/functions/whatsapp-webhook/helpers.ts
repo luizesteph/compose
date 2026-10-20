@@ -396,7 +396,16 @@ export function campoPedidoNoCadastro(texto: unknown): "nome" | "cpf" | "nascime
 //
 // Os dois ultimos queriam GUIA do ortopedista, para fazer fisio em outro lugar.
 // Mandar tabela de preco para quem pede receita e' vender o que ninguem pediu.
-export type IntencaoFisio = "agendar" | "pedido_medico" | "falar_com_fisio" | "sessao_em_curso" | "nota_fiscal" | "trabalho" | "consulta_medica" | "convenio" | "pagamento";
+export type IntencaoFisio = "agendar" | "pedido_medico" | "falar_com_fisio" | "sessao_em_curso" | "nota_fiscal" | "trabalho" | "consulta_medica" | "convenio" | "pagamento" | "exame";
+
+// 19/10 (Antônio): "tem como passar as imagens do RX que realizei ontem? O
+// fisioterapeuta pediu para ver" recebeu a tabela de preço. Imagem/resultado/laudo de
+// exame feito é pedido de DOCUMENTO para a equipe enviar.
+const FISIO_EXAME_RE =
+  /\b(imagens?|resultados?|laudos?|cd|filmes?|chapas?)\s+(d[oa]s?\s+|de\s+|da\s+minha\s+|do\s+meu\s+)?(rx|raio[\s-]*x|resson[âa]ncia|tomografia|ultrassom|ultrassonografia|exames?|densitometria|eletroneuromiografia)(?![\p{L}])|\b(rx|raio[\s-]*x|resson[âa]ncia|tomografia|ultrassom|exame)\b[\s\S]{0,40}\b(j[áa]\s+saiu|ficou\s+pronto|est[áa]\s+pronto)/iu;
+
+export const TEXTO_FISIO_EXAME =
+  "Vou passar para a nossa equipe te enviar as imagens/o resultado do exame por aqui. 🙏";
 
 const FISIO_PEDIDO_MEDICO_RE =
   /\b(pedidos?\s+(m[ée]dic[oa]s?|do\s+m[ée]dico)|guia|solicita[çc][ãa]o\s+(m[ée]dica|do\s+m[ée]dico)|receita|encaminhamento|renova(r|[çc][ãa]o)|relat[óo]rio|laudo)\b/i;
@@ -495,6 +504,7 @@ export function classificarPedidoDeFisioterapia(texto: unknown): IntencaoFisio {
   if (FISIO_NOTA_FISCAL_RE.test(t)) return "nota_fiscal";
   // 15/10 (Suely): pix/pagamento de sessão é cobrança, não venda de pacote
   if (/\b(pix|chave\s+pix|boleto|comprovante|pagar\s+a\s+sess|pagamento\s+d[ao]s?\s+sess)/i.test(t)) return "pagamento";
+  if (FISIO_EXAME_RE.test(t)) return "exame";
   // o recado do fisioterapeuta ao médico vem antes do resto: é conversa com a fisio
   if (FISIO_RECADO_RE.test(t)) return "falar_com_fisio";
   if (FISIO_CONSULTA_MEDICA_RE.test(t)) return "consulta_medica";
@@ -1593,6 +1603,22 @@ export function janelaDeDatas(texto: unknown, hoje: string): JanelaDeDatas | nul
         if (iso) datas.add(iso);
       }
     }
+    // "nesta próxima quarta", "próxima terça", "essa sexta" (19/10, Ketty: na sexta 16/10
+    // "nesta proxima quarta" virou 28/10). É a data, não "às quartas": a equipe lê assim
+    // (sex 09/10 "próxima quinta" → 15/10; qua 07/10 "próxima sexta" → "sexta agora 09/10").
+    // "Próxima" no próprio dia da semana é a da semana seguinte; "esta/essa" é hoje.
+    // Só sem data explícita (que manda) e sem "semana que vem" (que é semana).
+    if (datas.size === 0 && !/\b(semana\s+que\s+vem|semana\s+q\s+vem|proxima\s+semana)\b/.test(t)) {
+      const proxDia = new RegExp(`\\b((?:n?est|n?ess|dest|dess)a(?:\\s+proxim[ao])?|proxim[ao])\\s+${DIA_RE}`, "giu");
+      for (const m of t.matchAll(proxDia)) {
+        if (ehPassado(t, m.index!) || ehNegado(t, m.index!, m[0].length) || ehAConsultaAtual(t, m.index!)) continue;
+        const alvo = DIAS_NOMES.indexOf(m[2]);
+        if (alvo < 0) continue;
+        let delta = (alvo - diaDaSemanaISO(hoje) + 7) % 7;
+        if (delta === 0 && /proxim/.test(m[1])) delta = 7;
+        datas.add(somaDias(hoje, delta));
+      }
+    }
     for (const d of [...datas]) if (d < hoje) datas.delete(d); // "fiz a cirurgia dia 18/09" não é destino
     if (datas.size > 0) {
       j.datas = [...datas].sort();
@@ -2190,13 +2216,30 @@ export function respostaNegaReagendamento(mensagem: unknown, ultimaSaidaDaJulia:
 // conversas pediram para antecipar e receberam data DEPOIS da consulta atual ou
 // "instabilidade". Quem quer antecipar só vê horário antes da consulta atual; sem
 // nenhum, ouve isso e a oferta da lista de espera.
-const _ANTECIPAR_RE = /\b(adiant(ar|a|o|e|ando|asse)|antecip(ar|a|o|e|ando|asse|ação|acao)|mais\s+cedo)\b/iu;
+// 19/10 (Fabio): "precisamos jogar a consulta mais adiante" casava "adiant+e" e ouviu
+// "não há horário antes da sua consulta". "Adiante" é PARA DEPOIS — só conta como
+// antecipar no imperativo com objeto ("adiante a consulta").
+const _ANTECIPAR_RE = /\b(adiant(ar|a|o|ando|asse)|adiante\s+(a|o|minha|meu|essa|esta)\s+(consulta|hor[aá]rio|retorno)|antecip(ar|a|o|e|ando|asse|ação|acao)|mais\s+cedo)\b/iu;
 
 export function querAntecipar(textos: unknown[] | null | undefined): boolean {
   return (textos || []).some((x) => {
     const t = String(x ?? "");
     if (/antecipadamente/i.test(t) && !_ANTECIPAR_RE.test(t.replace(/antecipadamente/gi, ""))) return false;
     return _ANTECIPAR_RE.test(t);
+  });
+}
+
+// ADIAR (19/10, Fabio): "jogar a consulta mais adiante", "tem que ser depois dessa
+// data", "adiar". O remarcar só mostra horário DEPOIS da consulta atual.
+// "daqui pra frente" é "de agora em diante", não adiar.
+const _ADIAR_RE =
+  /\b(adiar|adie|adiasse|adiando|adiamos|postergar|prorrogar|mais\s+adiante|(?<!daqui\s)(?:mais\s+)?(?:pra|para)\s+frente|(?:jogar|deixar|passar|empurrar|levar)\s+(?:a\s+|minha\s+|essa\s+)?consulta\s+(?:mais\s+)?(?:adiante|pra\s+frente|para\s+frente|para\s+depois|pra\s+depois)|depois\s+dess[ae]\s+data)\b/iu;
+
+export function querAdiar(textos: unknown[] | null | undefined): boolean {
+  return (textos || []).some((x) => {
+    const t = String(x ?? "");
+    if (/\bdaqui\s+(?:pra|para)\s+frente\b/i.test(t) && !_ADIAR_RE.test(t.replace(/\bdaqui\s+(?:pra|para)\s+frente\b/gi, ""))) return false;
+    return _ADIAR_RE.test(t);
   });
 }
 
@@ -2506,6 +2549,26 @@ export const TEXTO_FISIO_CONVENIO =
   "A fisioterapia aqui não é pelo convênio: funciona por *reembolso* — você paga a sessão e pede o reembolso ao seu plano com a nota fiscal e o relatório que emitimos. " +
   "Sessão avulsa R$ 180 ou pacote de 10 sessões por R$ 1.500 (em até 3x), e a *avaliação é gratuita*. 😊 Vou te passar para nossa equipe agendar sua avaliação!";
 
+// 19/10 (Thalita: "Vcs atendem o convênio Central Nacional Unimed, para
+// fisioterapia?"): a resposta estava certa, mas o texto terminava em "Vou te passar
+// para nossa equipe agendar sua avaliação!" e a conversa ia para a fila sem ela ter
+// pedido para agendar — e ficou lá. Quem só pergunta do convênio recebe a resposta e
+// a pergunta; o "sim/quero" depois é que passa para a equipe.
+export const TEXTO_FISIO_CONVENIO_PERGUNTA =
+  "A fisioterapia aqui não é pelo convênio: funciona por *reembolso* — você paga a sessão e pede o reembolso ao seu plano com a nota fiscal e o relatório que emitimos. " +
+  "Sessão avulsa R$ 180 ou pacote de 10 sessões por R$ 1.500 (em até 3x), e a *avaliação é gratuita*. 😊 Quer agendar a avaliação?";
+
+export const TEXTO_FISIO_AVALIACAO_ACEITA =
+  "Combinado! Vou passar para a nossa equipe agendar sua avaliação gratuita — elas te respondem por aqui. 🙏";
+
+/** "Sim", "quero", "pode", "quero agendar" — curto, sem negação nem outra pergunta. */
+export function aceitaAvaliacaoDaFisio(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase()).trim();
+  if (!t || t.length > 60 || /\?/.test(t)) return false;
+  if (/\b(nao|n|agora\s+nao|depois)\b/.test(t)) return false;
+  return /^(sim|s|quero|pode|pode\s+ser|gostaria|claro|ok|vamos|bora|isso|por\s+favor)\b|\b(quero|gostaria\s+de|pode)\s+(agendar|marcar)\b/.test(t);
+}
+
 // "ME AVISA SE TIVER DESISTÊNCIA" É LISTA DE ESPERA (13/10, Lázara: "Se tiver alguma
 // desistência a partir das 14. Me avisa" virou reagendar → "é essa?" → lista de 27/10
 // → "confirmar" → loop → atendente). Quem pede aviso de vaga quer a lista, não remarcar.
@@ -2515,10 +2578,11 @@ export function pedeAvisoDeDesistencia(texto: unknown): boolean {
   if (/\b(sair|tirar|remover|retirar|cancelar)\b[^.?!\n]{0,30}\blista\b/.test(t)) return false;
   // pedido de AVISO ("se tiver… me avisa", "caso surja…"), não pergunta de agenda agora
   // ("tem alguma desistência amanhã?" quer resposta já — segue o fluxo normal)
-  const condicional = /\b(se|caso)\s+(por\s+acaso\s+)?(tiver|houver|haja|tenha|surgir|surja|abrir|abra|liberar|libere|vagar|aparecer|alguem\s+desistir)\b[\s\S]{0,50}\b(desist\w*|vaga|horario|encaixe|antes|cedo|hoje|amanha)\b/.test(t) ||
+  // 19/10 (Andrea): "Se você tiver alguma desistência me coloca" — o "você" no meio
+  const condicional = /\b(se|caso)\s+(por\s+acaso\s+)?(?:(?:voce|voces|vc|vcs)\s+)?(tiver|houver|haja|tenha|surgir|surja|abrir|abra|liberar|libere|vagar|aparecer|alguem\s+desistir)\b[\s\S]{0,50}\b(desist\w*|vaga|horario|encaixe|antes|cedo|hoje|amanha)\b/.test(t) ||
     /\b(se|caso)\s+(alguem\s+)?(desistir|cancelar|desmarcar)\b/.test(t) ||
     /\b(se|caso)\s+(liberar|surgir|abrir)\s+(um\s+|uma\s+|algum\s+|alguma\s+)?(horario|vaga)\b/.test(t);
-  const pedeAviso = /\b(me\s+)?(avis\w*|chame|chama|comuni\w*|liga|ligue)\b|\beu\s+quero\b|\b(consigo|eu)\s+(ir|vou)\b|\bestou\s+(a\s+disposicao|por\s+aqui)\b/.test(t);
+  const pedeAviso = /\b(me\s+)?(avis\w*|chame|chama|comuni\w*|liga|ligue)\b|\bme\s+(coloca|coloque|poe|ponha|inclui|inclua|encaixa|encaixe)\b|\beu\s+quero\b|\b(consigo|eu)\s+(ir|vou)\b|\bestou\s+(a\s+disposicao|por\s+aqui)\b/.test(t);
   return (condicional && (pedeAviso || /\bdesist/.test(t))) || /\bme\s+avis\w*\b[\s\S]{0,40}\b(vaga|vagar|desist\w*|abrir|surgir|liberar|antes|encaixe)\b/.test(t);
 }
 
@@ -2729,4 +2793,69 @@ export function textoPerguntaConvenioCadastro(dataISO?: string, hhmm?: string, m
 /** CPF sem cadastro ao cancelar/confirmar (15/10, Matias): conferir — ou a consulta é de outra pessoa. */
 export function textoCpfNaoEncontradoConsulta(cpf?: unknown): string {
   return `${textoCpfNaoEncontrado(cpf)} Se a consulta estiver no nome de outra pessoa (filho, cônjuge…), me passa o CPF dela.`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORREÇÕES DO RELATÓRIO DE 16–17/10 (recebido em 19/10)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const _REGIOES_DO_CIRURGIAO: Array<[RegExp, string]> = [
+  [/^coluna$/, "coluna"], [/^lombar$/, "lombar"], [/^cervical$/, "cervical"], [/^joelhos?$/, "joelho"],
+  [/^ombros?$/, "ombro"], [/^quadril$|^quadris$/, "quadril"], [/^pes?$/, "pé"], [/^tornozelos?$/, "tornozelo"],
+  [/^maos?$/, "mão"], [/^punhos?$/, "punho"], [/^cotovelos?$/, "cotovelo"],
+];
+
+/**
+ * "Cirurgião de coluna" (16/10, Laura) virou falar_com_atendente e foi transferida —
+ * a Glaucia respondeu com o Dr. Lucas. Em 60 dias "especialista/ortopedista de X"
+ * sempre foi para o agendar; só "cirurgião de X" ia para a fila (2 casos, os 2
+ * pedidos de consulta). Devolve a região, ou null. "Cirurgia de X" (o procedimento)
+ * e pedido de atendente ficam como estão.
+ */
+export function cirurgiaoDaRegiao(texto: unknown): string | null {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  if (!t.trim() || t.length > 120) return null;
+  if (/\b(atendente|humano|pessoa|falar\s+com|recepcao|vania|lidiane|glaucia|laiz|mardila)\b/.test(t)) return null;
+  const m = /\bcirurgi(?:ao|oes|a)\s+(?:de|da|do|em|para|pra)\s+(\p{L}+)/u.exec(t);
+  if (!m || !/cirurgi(ao|oes)/.test(m[0])) return null;
+  for (const [re, nome] of _REGIOES_DO_CIRURGIAO) if (re.test(m[1])) return nome;
+  return null;
+}
+
+/** "Dr. Guilherme atende em domicílio?", "Precisava de um médico que viesse aqui" (16/10, Angélica). */
+export function perguntaAtendimentoDomiciliar(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  if (!t.trim() || t.length > 400) return false;
+  if (/\b(parceir\w*|convidar|proposta|nossa\s+empresa)\b/.test(t)) return false;
+  return /\b(atend\w*|consulta\w*|visita\w*)\s+(em\s+|a\s+)?domicili\w*|\bdomiciliar\b|\bhome\s*care\b|\b(medico|doutora?|dr\.?a?)\s+que\s+(viesse|venha|possa\s+vir)\b|\b(vir|venha|viesse)\s+(aqui\s+)?(em|na)\s+(casa|minha\s+casa)\b/.test(t);
+}
+
+export const TEXTO_SEM_ATENDIMENTO_DOMICILIAR =
+  "Não temos atendimento domiciliar — as consultas são aqui na clínica (Rua Pascal, 697 - Campo Belo). Se quiser, eu vejo um horário para você. 😊";
+
+/** "a próxima consulta daqui a um mês é considerada retorno ou outra consulta?" (16/10, Ligia). */
+export function perguntaRegraDoRetorno(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  if (!t.trim() || t.length > 300) return false;
+  return /\bconsiderad[ao]\s+(como\s+)?retorno\b|\be\s+retorno\s+ou\b|\bretorno\s+ou\s+(outra|nova)\b|\bconta\s+como\s+retorno\b|\bprazo\s+(do|de|para\s+o)\s+retorno\b|\bquantos\s+dias\s+(tenho\s+|e\s+|para\s+|pro\s+|o\s+)?(o\s+)?retorno\b|\bainda\s+(e|conta\s+como|vale\s+como|seria)\s+retorno\b|\bainda\s+tenho\s+(direito\s+a[o]?\s+)?retorno\b/.test(t);
+}
+
+export const TEXTO_REGRA_DO_RETORNO =
+  "O retorno vale por até 30 dias depois da consulta: dentro desse prazo conta como retorno; depois disso, é uma nova consulta. 😊";
+
+/** Pergunta de preço/plano da nutróloga (16/10, Enzo: a Julia transferiu e não respondeu o valor). */
+export function perguntaPrecoNutrologa(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  if (!t.trim() || t.length > 500) return false;
+  // "Ana Paula Franklin / … / Sul America Plano" é cadastro de paciente: só "nutróloga" ou "Dra. Ana Paula"
+  return /\bnutr(o|i)log\w*|\bdra\.?\s+ana\s+paula\b/.test(t) && /\b(valor|preco|quanto|plano|convenio|particular)\b/.test(t);
+}
+
+export function precoDaNutrologa(notas: unknown): string | null {
+  const m = String(notas ?? "").match(/Consulta\s+Particular\s+com\s+Nutr[óo]loga:?\**:?\s*(R\$\s*\d[\d.]*(?:,\d{2})?)/i);
+  return m ? m[1].replace(/\s+/g, " ") : null;
+}
+
+export function textoPrecoNutrologa(preco: string): string {
+  return `A Dra. Ana Paula (nutróloga) atende somente particular — a consulta é ${preco}.`;
 }
