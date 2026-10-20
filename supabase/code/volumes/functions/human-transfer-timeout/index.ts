@@ -20,6 +20,9 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import {
   exigeRespostaDaAtendente,
   prazoDeRespostaEmMinutos,
+  prazoDaDevolucao,
+  menorPrazoDaDevolucao,
+  JANELA_CONVERSA_ATIVA_MIN,
   decideLiberarFicha,
   expedienteAberto,
   minutosParado,
@@ -287,7 +290,7 @@ async function devolverInativosAFila(
     // depois do showticket. Cortar aqui pelo menor prazo evita bater na API de
     // 2 em 2 minutos para conversa que ainda nem venceu o prazo mais curto.
     const esperandoMin = (Date.now() - new Date(ultimaDoPaciente.created_at).getTime()) / 60000;
-    if (esperandoMin < Math.min(prazoPadrao, prazoEstendido)) { pulou("dentro_do_prazo"); continue; }
+    if (esperandoMin < menorPrazoDaDevolucao(prazoPadrao)) { pulou("dentro_do_prazo"); continue; }
 
     // CASO LONGO já decidido para ESTA mensagem (15/09): fica com a Vânia/Lidiane
     // até o paciente escrever de novo. Sem a marca, cada rodada gastaria um
@@ -381,8 +384,16 @@ async function devolverInativosAFila(
     } catch { pulou("showticket_erro"); continue; }
     if (!ticketId) { pulou("sem_ticket_id"); continue; }
 
-    // Agora sim o prazo da dona de verdade.
-    const prazoMin = prazoDeRespostaEmMinutos(nome, prazoPadrao, prazoEstendido);
+    // Agora sim o prazo da dona de verdade. CONVERSA ATIVA (20/10, Mardila e Laiz: "a
+    // gente está digitando e o ticket some"): a atendente falou com o paciente nos 30
+    // min antes da mensagem dele — ela está no meio do atendimento, o prazo é maior.
+    const _tPac = new Date(ultimaDoPaciente.created_at).getTime();
+    const conversaAtiva = msgs.some((m: any) =>
+      m.direction === "outgoing" && m.ai_intent === "manual_reply" &&
+      new Date(m.created_at).getTime() <= _tPac &&
+      _tPac - new Date(m.created_at).getTime() <= JANELA_CONVERSA_ATIVA_MIN * 60000
+    );
+    const prazoMin = prazoDaDevolucao({ nomeAtendente: nome, conversaAtiva, prazoPadrao, prazoEstendido });
     if (esperandoMin < prazoMin) { pulou("dentro_do_prazo_da_dona"); continue; }
 
     // CASO LONGO (pedido do dono, 15/09): a Vânia e a Lidiane perdem o paciente
@@ -880,7 +891,7 @@ async function varrerFichasParadas(
     const idadeDias = (agoraMs - ultimaMsgMs) / 86400000;
     out.avaliados++;
 
-    const d = decideLiberarFicha({ temDona: true, ociosoMin, idadeDias, expedienteAberto: aberto }, limites);
+    const d = decideLiberarFicha({ temDona: true, ociosoMin, idadeDias, expedienteAberto: aberto, casoLongo: !!atendenteDeCasoLongo(donaNome) }, limites);
     if (!d.liberar) { pulou(d.motivo); continue; }
 
     // CASO LONGO (pedido do dono, 15/09): ticket da Vânia ou da Lidiane sai da

@@ -191,6 +191,7 @@ import {
   FILTRO_GATILHOS_SEM_MOVIMENTO,
   JANELA_CASO_LONGO_DIAS,
   juliaPerguntouDepoisDoHandoff,
+  respondeAoLembreteDeConfirmacao,
   quandoAEquipeResponde,
   relogioDaGuarda,
 } from "../_shared/atendimento.ts";
@@ -12491,6 +12492,42 @@ Deno.serve(async (req) => {
       // mais abaixo). Te-lo aqui causava TDZ "Cannot access 'avanceaiBaseUrl' before
       // initialization" → fallback de "instabilidade tecnica" em todo audio falho.
       // Veja "AUDIO TRANSCRIPTION FAILED — notify patient" apos o dispatch.
+    }
+
+    // === RESPOSTA À CONFIRMAÇÃO DA CONSULTA (20/10, pedido do dono) ===
+    // A clínica manda "você tem um atendimento agendado… Responda somente: SIM… NÃO…".
+    // Quem responde a isso fala com a equipe — a Julia não entra. Só urgência clínica
+    // segue o fluxo. O resgate da mensagem parada também não pega estas (decidirResgate).
+    if (conversationId && !(payload as any)?.__resgate) {
+      try {
+        const { data: _ultSaidaConf } = await supabase
+          .from("webhook_messages")
+          .select("message_text, created_at")
+          .eq("conversation_id", conversationId)
+          .eq("direction", "outgoing")
+          .lt("created_at", (msgRecord as any).created_at)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        const _ehRespConf = respondeAoLembreteDeConfirmacao({
+          ultimaSaida: _ultSaidaConf ? { texto: String(_ultSaidaConf.message_text || ""), ms: Date.parse(String(_ultSaidaConf.created_at)) } : null,
+          agoraMs: Date.now(),
+          hojeISO: getTodayISO_SP(),
+        });
+        if (_ehRespConf && classificarUrgencia(String(messageStr || "")) !== "clinica") {
+          console.log(`[Confirmacao] resposta ao lembrete de confirmação da consulta — a equipe responde`);
+          await supabase
+            .from("webhook_messages")
+            .update({ action_status: "skipped", action_error: "Resposta à confirmação da consulta — a equipe responde" })
+            .eq("id", messageId);
+          return new Response(JSON.stringify({ status: "skipped", reason: "resposta_a_confirmacao" }), {
+            status: 200,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+      } catch (e) {
+        console.log(`[Confirmacao] check error (non-blocking): ${(e as Error).message}`);
+      }
     }
 
     // === BATCHING: Rolling 15s silence timer with polling ===

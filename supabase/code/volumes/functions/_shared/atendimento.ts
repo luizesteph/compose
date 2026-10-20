@@ -122,6 +122,38 @@ export function prazoDeRespostaEmMinutos(
   return nomesEstendidos.includes(primeiro) ? prazoEstendido : prazoPadrao;
 }
 
+// PRAZO DA DEVOLUÇÃO (20/10, reclamação da Mardila e da Laiz: "elas estão digitando e
+// você transfere"). Em 14 dias, das 270 devoluções das atendentes de prazo padrão, 46
+// tiveram resposta da equipe antes dos 20 min da mensagem do paciente, e 117 eram
+// conversa ATIVA (a atendente tinha falado com o paciente nos 30 min anteriores). Com 20
+// min — e 30 quando a conversa está ativa — 65 deixam de acontecer; as 80 em que ninguém
+// respondeu em 6 h continuam voltando, 10–20 min depois. Vânia e Lidiane (caso longo):
+// 2 h — das 15 devoluções delas, 5 tinham resposta dela até 2 h. A variável de ambiente
+// (DEVOLVER_FILA_MINUTOS/_ESTENDIDO) só vale se for MAIOR.
+export const PRAZO_DEVOLUCAO_MIN = 20;
+export const PRAZO_DEVOLUCAO_CONVERSA_ATIVA_MIN = 30;
+export const PRAZO_DEVOLUCAO_CASO_LONGO_MIN = 120;
+export const JANELA_CONVERSA_ATIVA_MIN = 30;
+
+export function prazoDaDevolucao(a: {
+  nomeAtendente: unknown;
+  /** a atendente falou com o paciente nos 30 min antes da mensagem dele */
+  conversaAtiva: boolean;
+  prazoPadrao?: number;
+  prazoEstendido?: number;
+}): number {
+  const padrao = Math.max(Number(a.prazoPadrao) || 0, PRAZO_DEVOLUCAO_MIN);
+  const estendido = Math.max(Number(a.prazoEstendido) || 0, PRAZO_DEVOLUCAO_CASO_LONGO_MIN);
+  const base = prazoDeRespostaEmMinutos(a.nomeAtendente, padrao, estendido);
+  if (base === estendido) return estendido;
+  return a.conversaAtiva ? Math.max(base, PRAZO_DEVOLUCAO_CONVERSA_ATIVA_MIN) : base;
+}
+
+/** O menor prazo possível — o pré-filtro da devolução corta por ele antes do showticket. */
+export function menorPrazoDaDevolucao(prazoPadrao?: number): number {
+  return Math.max(Number(prazoPadrao) || 0, PRAZO_DEVOLUCAO_MIN);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CASO LONGO — Vânia e Lidiane vão para pendentes UMA vez (pedido do dono, 15/09)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -451,6 +483,12 @@ export function decideLiberarFicha(
     /** dias desde a última MENSAGEM (idade da conversa, não do ticket). */
     idadeDias: number;
     expedienteAberto: boolean;
+    /**
+     * a dona é a Vânia ou a Lidiane (20/10, pedido do dono): no expediente a ficha
+     * delas não sai por ociosidade — 31 das 33 liberações delas em 14 dias eram caso
+     * que elas resolviam fora do chat (autorização, hospital, convênio).
+     */
+    casoLongo?: boolean;
   },
   lim: LimitesDaFicha = LIMITES_PADRAO_DA_FICHA,
 ): { liberar: boolean; motivo: string } {
@@ -467,6 +505,7 @@ export function decideLiberarFicha(
     return { liberar: true, motivo: "fora_de_expediente" };
   }
   if (f.ociosoMin >= lim.ocioso) {
+    if (f.casoLongo && f.expedienteAberto) return { liberar: false, motivo: "caso_longo_no_expediente" };
     return { liberar: true, motivo: "ocioso" };
   }
   return { liberar: false, motivo: "dentro_do_prazo" };
@@ -643,6 +682,28 @@ export const PERGUNTA_DE_MARCACAO_DA_JULIA_RE =
 export const CONVENIO_INFORMADO_RE =
   /(?<![\p{L}])(?:bradesco|sul\s*am[eé]rica|porto\s+seguro|porto\s+sa[uú]de|care\s*plus|omint|mediservice|gama\s+sa[uú]de|hapvida|notre\s*dame|unimed|amil|prevent\s+senior)(?![\p{L}])/iu;
 
+// RESPOSTA À CONFIRMAÇÃO DA CONSULTA (20/10, pedido do dono): a clínica manda "Olá, X,
+// você tem um atendimento agendado… Responda somente: *SIM*… ou *NÃO*…". Quem responde
+// a isso fala com a equipe — a Julia não entra (em 14 dias entrou em 15: "Remarcar",
+// "Não conseguirei ir à consulta", "oi"…, todas depois do prazo da guarda ou pelo resgate).
+export const LEMBRETE_DE_CONFIRMACAO_RE = /voc[êe] tem um atendimento agendado[\s\S]*Responda somente/i;
+
+export function respondeAoLembreteDeConfirmacao(a: {
+  /** a ÚLTIMA mensagem enviada na conversa antes desta */
+  ultimaSaida: { texto: string; ms: number } | null;
+  agoraMs: number;
+  /** hoje em São Paulo, AAAA-MM-DD */
+  hojeISO: string;
+}): boolean {
+  const u = a.ultimaSaida;
+  if (!u || !LEMBRETE_DE_CONFIRMACAO_RE.test(String(u.texto || ""))) return false;
+  if (!(a.agoraMs - u.ms <= 4 * 24 * 60 * 60 * 1000)) return false;
+  // a consulta do lembrete já passou: a resposta não é mais confirmação
+  const d = /Dia:\s*(\d{2})\/(\d{2})\/(\d{4})/.exec(String(u.texto));
+  if (d && `${d[3]}-${d[2]}-${d[1]}` < String(a.hojeISO || "")) return false;
+  return true;
+}
+
 export function decidirResgate(a: {
   agoraMs: number;
   prazoMin: number;
@@ -660,6 +721,10 @@ export function decidirResgate(a: {
   });
   const presas = ms.slice(ultimaFala + 1).filter((m) => m.direction === "incoming");
   if (!presas.length) return { resgatar: false, motivo: "sem_mensagem_parada" };
+  // resposta ao lembrete de confirmação da consulta é com a equipe (20/10)
+  if (ultimaFala >= 0 && LEMBRETE_DE_CONFIRMACAO_RE.test(String((ms[ultimaFala] as { message_text?: string | null }).message_text || ""))) {
+    return { resgatar: false, motivo: "resposta_a_confirmacao" };
+  }
   for (const p of presas) {
     const st = String(p.action_status || "");
     if (st !== "skipped" && st !== "batched") return { resgatar: false, motivo: "julia_ja_processou" };
