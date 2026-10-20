@@ -195,6 +195,8 @@ import {
   quandoAEquipeResponde,
   relogioDaGuarda,
 } from "../_shared/atendimento.ts";
+import { chaveDoTelefone, ehSimDeConfirmacao, textoConfirmado, HORAS_VALIDADE_DO_SIM } from "../_shared/confirmacao.ts";
+import { canalVivo, enviarTexto } from "../_shared/zpro.ts";
 import { LLM_MODEL, LLM_MODEL_FALLBACK, LLM_MODEL_RESPOSTA, LLM_GATEWAY, ehErroDeModeloDesconhecido, llmApiKey, llmHeaders, LLM_USAGE_INCLUDE, custoDaChamada } from "../_shared/llm.ts";
 import { STT_ENDPOINT, STT_MODEL, STT_LANGUAGE, STT_RESPONSE_FORMAT, sttApiKey } from "../_shared/stt.ts";
 import {
@@ -12492,6 +12494,107 @@ Deno.serve(async (req) => {
       // mais abaixo). Te-lo aqui causava TDZ "Cannot access 'avanceaiBaseUrl' before
       // initialization" → fallback de "instabilidade tecnica" em todo audio falho.
       // Veja "AUDIO TRANSCRIPTION FAILED — notify patient" apos o dispatch.
+    }
+
+    // === INSISTÊNCIA DA CONFIRMAÇÃO: "SIM" CONFIRMA NO AMIGO (20/10, pedido do dono) ===
+    // O cron confirmacao-insistencia manda, das 16h às 18h, a 2ª mensagem a quem não
+    // confirmou a consulta do próximo dia (_shared/confirmacao.ts). "SIM" a ela =
+    // PUT /attendances/confirmed e resposta pronta; qualquer outra resposta cai no
+    // bloco de baixo (o texto da insistência casa o lembrete) e fica com a equipe.
+    // Só vale se ninguém falou na conversa depois do envio e a mensagem chegou pelo
+    // canal vivo (a insistência sai por ele).
+    if (conversationId && !(payload as any)?.__resgate && clinicTokenId) {
+      try {
+        const _chaveIns = chaveDoTelefone(phone);
+        const _simIns = _chaveIns ? ehSimDeConfirmacao(String(messageStr || "")) : false;
+        if (_chaveIns && _simIns && classificarUrgencia(String(messageStr || "")) !== "clinica") {
+          const { data: _ins } = await supabase
+            .from("confirmacao_insistencia")
+            .select("id, attendance_id, patient_id, data_consulta, hora, medico_nome, enviada_em")
+            .eq("clinic_token_id", clinicTokenId)
+            .eq("telefone_chave", _chaveIns)
+            .eq("status", "enviada")
+            .gte("enviada_em", new Date(Date.now() - HORAS_VALIDADE_DO_SIM * 3600000).toISOString())
+            .gte("data_consulta", getTodayISO_SP());
+          if (Array.isArray(_ins) && _ins.length > 0) {
+            const _envioMs = Math.max(..._ins.map((r: any) => Date.parse(String(r.enviada_em))));
+            const { data: _falaDepois } = await supabase
+              .from("webhook_messages")
+              .select("id")
+              .eq("conversation_id", conversationId)
+              .eq("direction", "outgoing")
+              .gt("created_at", new Date(_envioMs + 120000).toISOString())
+              .lt("created_at", (msgRecord as any).created_at)
+              .limit(1);
+            const { data: _cl } = await supabase
+              .from("clinic_tokens")
+              .select("token, avanceai_base_url, avanceai_api_id, avanceai_bearer_token, avanceai_active_channel")
+              .eq("id", clinicTokenId)
+              .maybeSingle();
+            const _canalIns = canalVivo(_cl as any);
+            const _canalOk = !!_canalIns && (!resolvedChannelId || !_canalIns.channelId || String(_canalIns.channelId) === String(resolvedChannelId));
+            if (!(_falaDepois && _falaDepois.length) && _canalOk && _cl?.token) {
+              // trava (enviada → confirmando): dois "SIM" seguidos não confirmam duas vezes
+              const { data: _meus } = await supabase
+                .from("confirmacao_insistencia")
+                .update({ status: "confirmando" })
+                .in("id", _ins.map((r: any) => r.id))
+                .eq("status", "enviada")
+                .select("id, attendance_id, patient_id, data_consulta, hora, medico_nome");
+              if (Array.isArray(_meus) && _meus.length > 0) {
+                const _cid = String(decodeJwtPayload(String(_cl.token)).company_id ?? "");
+                const _ok: any[] = [];
+                const _falhou: any[] = [];
+                for (const r of _meus) {
+                  const res = await tryFetch(
+                    `attendances/confirmed?company_id=${_cid}`,
+                    String(_cl.token),
+                    "PUT",
+                    { patient_id: Number(r.patient_id), attendance_id: Number(r.attendance_id) },
+                    true,
+                  );
+                  console.log(`[Insistencia] PUT confirmed att=${r.attendance_id} -> ${res.status}`);
+                  (res.status >= 200 && res.status < 300 ? _ok : _falhou).push(r);
+                }
+                const _agoraIso = new Date().toISOString();
+                if (_ok.length) {
+                  await supabase.from("confirmacao_insistencia")
+                    .update({ status: "confirmada", confirmada_em: _agoraIso, motivo: null })
+                    .in("id", _ok.map((r) => r.id));
+                }
+                if (_falhou.length) {
+                  await supabase.from("confirmacao_insistencia")
+                    .update({ status: "falhou_confirmar", motivo: "PUT confirmed recusado — equipe confirma" })
+                    .in("id", _falhou.map((r) => r.id));
+                }
+                if (_ok.length && !_falhou.length) {
+                  const _txt = textoConfirmado(_ok, getTodayISO_SP());
+                  // grava ANTES de enviar: o eco do Z-PRO cai na deduplicação de 30 s
+                  await supabase.from("webhook_messages").insert({
+                    user_id: userId, clinic_token_id: clinicTokenId, conversation_id: conversationId,
+                    sender_phone: phone, sender_name: name, message_text: _txt, direction: "outgoing",
+                    ai_intent: "confirmacao_insistencia_ok", action_status: "success", verified_schedule: true,
+                  } as any);
+                  const _env = await enviarTexto(_canalIns!, phone, _txt);
+                  if (!_env.ok) console.error(`[Insistencia] resposta de confirmação não enviada: ${_env.detalhe}`);
+                  await supabase.from("webhook_messages").update({
+                    ai_intent: "confirmar", action_status: "success", ai_response: _txt,
+                    ai_entities: { via: "confirmacao_insistencia", attendance_ids: _ok.map((r) => Number(r.attendance_id)) },
+                  }).eq("id", messageId);
+                  return new Response(JSON.stringify({ status: "success", reason: "confirmacao_insistencia" }), {
+                    status: 200,
+                    headers: { ...corsHeaders, "Content-Type": "application/json" },
+                  });
+                }
+                // alguma falhou: a equipe confirma (cai no bloco de baixo e fica com ela)
+                console.error(`[Insistencia] ${_falhou.length} confirmação(ões) recusada(s) pelo Amigo — fica com a equipe`);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.log(`[Insistencia] check error (non-blocking): ${(e as Error).message}`);
+      }
     }
 
     // === RESPOSTA À CONFIRMAÇÃO DA CONSULTA (20/10, pedido do dono) ===
