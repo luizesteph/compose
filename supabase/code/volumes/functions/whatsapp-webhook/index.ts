@@ -80,6 +80,24 @@ import {
   respostaConfirmaReagendamento,
   querAntecipar,
   querAdiar,
+  pareceNomeCompleto,
+  textoCadastroPeloNome,
+  TEXTO_CPF_NAO_ACHADO_DE_NOVO,
+  tipoDeRaioXEspecifico,
+  textoRaioXTipoEquipe,
+  convenioSoReembolsoPerguntado,
+  textoConvenioReembolsoPosMarcacao,
+  siteDeuErro,
+  pedeMarcarProcedimento,
+  TEXTO_PROCEDIMENTO_COM_EQUIPE,
+  perguntaEspecialidadeDoMedico,
+  falaDeCarteirinhaEnviada,
+  TEXTO_CARTEIRINHA_SEM_LEITURA,
+  horaDaConsultaDeHoje,
+  minutosDeAtraso,
+  textoAtrasoPodeVir,
+  TEXTO_DOR_COM_HORARIOS,
+  horaContradizPeriodo,
   cirurgiaoDaRegiao,
   perguntaAtendimentoDomiciliar,
   TEXTO_SEM_ATENDIMENTO_DOMICILIAR,
@@ -194,6 +212,7 @@ import {
   validateScheduleTerms,
   validateBookingDate,
   isDuplicateReply,
+  ehCorrida,
   nearDuplicate,
   respostaFoiFalha,
   corrigirLinkDoMapa,
@@ -3555,6 +3574,16 @@ async function executeAction(
           }
         }
 
+        // HORA HERDADA QUE CONTRADIZ O PERÍODO PEDIDO AGORA (20/10, Fabi: "Ele tem pela
+        // manhã?" com 27/10 17:20 da mensagem anterior → a lista da tarde de novo, engolida
+        // como duplicata). Sem hora nesta mensagem, a hora velha sai e o dia lista a manhã.
+        if (entities.time && entities.preferred_period && !horaDoTexto(currentMessageText || "") &&
+          /\b(manh[ãa]|tarde|cedo)\b/i.test(currentMessageText || "") &&
+          horaContradizPeriodo(normalizeTimeToHHMM(entities.time) || entities.time, entities.preferred_period)) {
+          console.log(`[Periodo] hora herdada ${entities.time} contradiz "${entities.preferred_period}" pedido agora — tirando a hora`);
+          entities.time = "";
+        }
+
         // REDE DE SEGURANÇA da regra "infiltração nunca é agendada pelo robô": o
         // redirecionamento acontece ANTES, logo após a classificação (busca por
         // "GUARD INFILTRAÇÃO"), onde vira solicitar_infiltracao e a transferência
@@ -3809,6 +3838,8 @@ async function executeAction(
                 (entities.complaint && entities.complaint.trim().length > 3) ||
                 consultaParaOutraPessoa([currentMessageText || ""]) ||
                 citaConvenio(currentMessageText || "") ||
+                // 20/10 (M7sato: "Estou tentando agendar mas dá erro" recebeu o link do site)
+                siteDeuErro(currentMessageText || "") ||
                 // 15/10 (Emerson: "Tem consulta disponível para hoje?" recebeu o link): o dia
                 // pedido é contexto — segue por aqui procurando a agenda
                 !!(janelaDeDatas(currentMessageText || "", getTodayISO_SP())?.datas?.length)
@@ -7630,6 +7661,46 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                   if (times.length > 0) slotsMap.set(dayDate, [...new Set(times)].sort());
                 }
               }
+              // AGENDA VAZIA COM O TIPO DA CONSULTA (20/10, Nathalia): consulta marcada pela
+              // equipe com um tipo que a API do robô não expõe (484489, 478248…) devolve a
+              // agenda VAZIA — e a Julia dizia "não encontrei horários" com a agenda cheia
+              // (27 negativas em 19 conversas desde 24/08). Os horários livres vêm da agenda
+              // da CONSULTA do mesmo médico; o PUT de remarcar só manda a data nova, então o
+              // tipo da consulta original não muda.
+              if (slotsMap.size === 0 && origEventId) {
+                try {
+                  const _evRes = await tryFetch(`events?company_id=${companyId}`, amigoToken);
+                  const _evs = normalizeApiResponse(_evRes) as Array<Record<string, unknown>>;
+                  const _cons = Array.isArray(_evs) && _evs.length > 0 ? pickEventForBooking(_evs, { newPatient: false }) : null;
+                  const _consId = _cons ? String((_cons as any).id || "") : "";
+                  if (_consId && _consId !== origEventId) {
+                    console.log(`[Webhook] reagendar - agenda vazia com o tipo da consulta (${origEventId}) — usando a agenda da CONSULTA (${_consId}) do mesmo médico`);
+                    const _calRes2 = await tryFetch(`calendar?place_id=${origPlaceId}&event_id=${_consId}&user_id=${origDoctorId}&company_id=${companyId}`, amigoToken);
+                    const _cal2 = normalizeApiResponse(_calRes2) as Array<Record<string, unknown>>;
+                    if (Array.isArray(_cal2)) {
+                      for (const dayObj of _cal2) {
+                        const dayDate = String(dayObj.date || dayObj.day || dayObj.data || "");
+                        if (!dayDate) continue;
+                        const sbu = (dayObj.slotsByUser || dayObj.slots_by_user || (dayObj as any).SlotsByUser) as Array<Record<string, unknown>> | undefined;
+                        const times: string[] = [];
+                        for (const userSlots of Array.isArray(sbu) ? sbu : []) {
+                          const u = (userSlots.user || (userSlots as any).User) as Record<string, unknown> | undefined;
+                          const uid = u?.id || (userSlots as any).user_id;
+                          if (uid && String(uid) !== String(origDoctorId)) continue;
+                          if (!uid && (sbu || []).length > 1) continue;
+                          for (const sl of ((userSlots.slots || (userSlots as any).Slots) as Array<Record<string, unknown>> | undefined) || []) {
+                            const mm = String(sl.start_time || sl.startTime || sl.start || sl.time || "").match(/(\d{2}:\d{2})/);
+                            if (mm) times.push(mm[1]);
+                          }
+                        }
+                        if (times.length > 0) slotsMap.set(dayDate, [...new Set(times)].sort());
+                      }
+                    }
+                  }
+                } catch (e) {
+                  console.log(`[Webhook] reagendar - agenda da CONSULTA (fallback) falhou (non-blocking): ${(e as Error).message}`);
+                }
+              }
               console.log(`[Webhook] reagendar slot-search — slotsMap size=${slotsMap.size}`);
 
               // 4) Determine candidate dates
@@ -7714,10 +7785,9 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               const _adiar = !!origStart && !_antecipar && querAdiar(_msgsDoPaciente);
               if (_adiar) console.log(`[Webhook] reagendar - paciente quer ADIAR — só horários depois de ${origStart}`);
               const _agoraRe = agoraSP();
-              for (const d of candidateDates) {
-                if (datesWithSlots.length >= MAX_DATES) break;
+              const _tentarData = (d: string): void => {
                 const dow = getWeekday(d);
-                if (dow === 0 || dow === 6) continue; // skip weekends
+                if (dow === 0 || dow === 6) return; // skip weekends
                 let slots = slotsMap.get(d) || [];
                 // horário de hoje que já passou não é oferta (o agendar já cortava; o remarcar não)
                 slots = slots.filter((t) => !slotJaPassou(d, t, _agoraRe));
@@ -7725,12 +7795,29 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                 if (_adiar) slots = slots.filter((t) => !antesDaConsultaAtual(d, t, origStart) && `${d} ${t}` !== String(origStart).replace("T", " ").slice(0, 16));
                 if (periodFilter === "manha") slots = slots.filter((t) => t < "12:00");
                 if (periodFilter === "tarde") slots = slots.filter((t) => t >= "12:00");
-                if (slots.length === 0) continue;
+                if (slots.length === 0) return;
                 datesWithSlots.push({
                   date: d,
                   label: formatDateLabel(d),
                   slots: slots.slice(0, MAX_SLOTS_PER_DATE),
                 });
+              };
+              for (const d of candidateDates) {
+                if (datesWithSlots.length >= MAX_DATES) break;
+                _tentarData(d);
+              }
+              // NADA NAS DATAS PEDIDAS (20/10, Nathalia: "dia 19 ou 23" → "não encontrei horários
+              // nas próximas datas" e a Regra 7): mostra os próximos, dizendo que não eram os pedidos.
+              let _semVagaNoPedido = false;
+              if (datesWithSlots.length === 0 && candidateDates !== _todasAsDatas && !_antecipar && !_ehAConsultaAtual) {
+                for (const d of _todasAsDatas) {
+                  if (datesWithSlots.length >= MAX_DATES) break;
+                  _tentarData(d);
+                }
+                if (datesWithSlots.length > 0) {
+                  console.log(`[Webhook] reagendar - nada nas datas pedidas — mostrando os próximos`);
+                  _semVagaNoPedido = true;
+                }
               }
 
               if (datesWithSlots.length > 0) {
@@ -7769,7 +7856,9 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                     periodFilter === "manha" ? " (manhã)" : periodFilter === "tarde" ? " (tarde)" : "";
                   const header = _ehAConsultaAtual
                     ? `Essa é a data e o horário da sua consulta atual com ${origDoctorName || "o médico"}. Para mudar, estes são os horários reais disponíveis${periodLabel}:\n\n`
-                    : `Confirmei aqui na agenda do ${origDoctorName || "médico"}${periodLabel}. Estes são os horários reais para reagendar:\n\n`;
+                    : _semVagaNoPedido
+                      ? `Nas datas que você pediu não há horário livre com ${origDoctorName || "o médico"}${periodLabel}. Os próximos são:\n\n`
+                      : `Confirmei aqui na agenda do ${origDoctorName || "médico"}${periodLabel}. Estes são os horários reais para reagendar:\n\n`;
                   const body = datesWithSlots.map((p) => `${p.label}: ${p.slots.join(", ")}`).join("\n");
                   const footer = "\n\nQual data e horário prefere?";
                   const fullMsg = header + body + footer;
@@ -7796,7 +7885,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                 } as any;
               } else {
                 // No real slots — be honest
-                const fbMsg = `Confirmei aqui e não encontrei horários disponíveis com ${origDoctorName || "o médico"}${entities.preferred_weekday ? ` em ${entities.preferred_weekday}s` : ""}${periodFilter === "manha" ? " pela manhã" : periodFilter === "tarde" ? " à tarde" : ""}${entities.date ? ` em ${entities.date}` : " nas próximas datas"}. Quer que eu tente outra data ou outro período?`;
+                const fbMsg = `Confirmei aqui e não encontrei horários disponíveis com ${origDoctorName || "o médico"}${entities.preferred_weekday ? ` em ${entities.preferred_weekday}s` : ""}${periodFilter === "manha" ? " pela manhã" : periodFilter === "tarde" ? " à tarde" : ""}${entities.date ? ` em ${entities.date}` : " nas próximas datas"}. Quer que eu tente outra data ou outro período? Se quiser, te coloco na *lista de espera*: se abrir uma vaga, te aviso por aqui.`;
                 return {
                   status: "needs_info",
                   response: fbMsg,
@@ -10836,6 +10925,32 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           // 15/10 (Roxane: o modelo mandou "avise a recepção pelo telefone"; 30 min de
           // atraso o médico não espera): o aviso vai para a recepção — o texto promete e a
           // rede da promessa passa para a equipe.
+          // ATÉ 20 MIN, "PODE VIR" (20/10, regra da equipe; Vitor: consulta 09:20, "vou chegar
+          // 09h13" foi para a recepção e ninguém respondeu). A hora da consulta vem do lembrete
+          // do Amigo gravado na conversa; sem ela, só "N minutos" explícito conta.
+          try {
+            const _convAt = conversationIdParam || ((globalThis as any).__currentConversationId as string | undefined) || null;
+            let _horaCons: string | null = null;
+            if (_convAt && supabaseClient) {
+              const { data: _lemb } = await supabaseClient
+                .from("webhook_messages")
+                .select("message_text")
+                .eq("conversation_id", _convAt)
+                .eq("direction", "outgoing")
+                .like("message_text", "%Horário:%")
+                .gte("created_at", new Date(Date.now() - 8 * 24 * 60 * 60_000).toISOString())
+                .order("created_at", { ascending: true })
+                .limit(20);
+              _horaCons = horaDaConsultaDeHoje((_lemb || []).map((r: any) => r.message_text), getTodayISO_SP());
+            }
+            const _min = minutosDeAtraso(currentMessageText || "", _horaCons);
+            if (_min !== null && _min <= 20) {
+              console.log(`[Atraso] ${_min} min (consulta ${_horaCons || "?"}) — pode vir`);
+              return { status: "success", response: textoAtrasoPodeVir(_horaCons, _min), bypassAiRewrite: true } as any;
+            }
+          } catch (e) {
+            console.log(`[Atraso] cálculo falhou (non-blocking): ${(e as Error).message}`);
+          }
           return { status: "success", response: TEXTO_ATRASO_PARA_RECEPCAO, bypassAiRewrite: true } as any;
         }
         return {
@@ -16269,6 +16384,7 @@ Deno.serve(async (req) => {
       // horários", "já existe consulta em 09/10"). Com marcação de verdade nos últimos
       // 30 min, cadastro e convênio não marcam nada: a data fica, a equipe atualiza.
       let _convenioPosMarcacao: { date: string; time: string } | null = null;
+      let _reembolsoPosMarcacao: { convenio: string; date: string; time: string } | null = null;
       if (
         conversationId &&
         ["cadastrar", "agendar", "consultar_convenios", "reagendar"].includes(String(classification.intent || "")) &&
@@ -16276,7 +16392,15 @@ Deno.serve(async (req) => {
       ) {
         try {
           const _mrConv = await marcacaoRecenteDaConversa(supabase, conversationId, { incluirSite: true });
-          if (_mrConv) {
+          // 20/10 (Sergio: "aceita AMIL ?" logo depois de marcar ouviu "a atualização do
+          // convênio é com a equipe", esperou 40 min e desmarcou): PERGUNTA sobre convênio de
+          // reembolso tem resposta pronta — reembolso, e "quer manter?".
+          const _reembolsoPosMarc = convenioSoReembolsoPerguntado(finalMessage || "");
+          if (_mrConv && _reembolsoPosMarc) {
+            console.log(`[ConvenioPosMarcacao] pergunta sobre ${_reembolsoPosMarc} (reembolso) — resposta pronta`);
+            _reembolsoPosMarcacao = { convenio: _reembolsoPosMarc, date: _mrConv.date, time: _mrConv.time };
+            classification.intent = "unknown";
+          } else if (_mrConv) {
             console.log(`[ConvenioPosMarcacao] ${classification.intent} logo depois de marcar (${_mrConv.date} ${_mrConv.time}) — não marca de novo`);
             _convenioPosMarcacao = _mrConv;
             classification.intent = "unknown";
@@ -16326,6 +16450,35 @@ Deno.serve(async (req) => {
         console.log(`[Webhook] proposta comercial — resposta pronta, sem fila`);
         _propostaComercial = true;
         classification.intent = "unknown";
+      } else if (conversationId) {
+        // CONVERSA DE VENDEDOR (20/10, Groohub voltou com "A pessoa responsável conseguiu
+        // dar uma olhada?" e foi para a fila): já recebeu o texto da proposta em 14 dias.
+        try {
+          const { data: _vend } = await supabase
+            .from("webhook_messages")
+            .select("id")
+            .eq("conversation_id", conversationId)
+            .eq("direction", "outgoing")
+            .like("message_text", "Obrigada pelo contato! 😊 Este WhatsApp é o atendimento de pacientes%")
+            .gte("created_at", new Date(Date.now() - 14 * 24 * 60 * 60_000).toISOString())
+            .limit(1);
+          if (_vend && _vend.length > 0 && classificarUrgencia(finalMessage || "") !== "clinica") {
+            console.log(`[PropostaComercial] conversa de vendedor — sem fila`);
+            _propostaComercial = true;
+            classification.intent = "unknown";
+          }
+        } catch (e) {
+          console.log(`[PropostaComercial] check error (non-blocking): ${(e as Error).message}`);
+        }
+      }
+      // RAIO-X DE TIPO ESPECÍFICO (20/10, Julia Adati: "panorâmico" recebeu "Sim, fazemos").
+      // A lista fixa do que a clínica faz é do dono; até lá, tipo específico fica com a equipe.
+      const _rxTipo = tipoDeRaioXEspecifico(finalMessage || "");
+      const _rxTipoEquipe = !!_rxTipo && /\b(raio|rx|radiografia|exame)/i.test(finalMessage || "") &&
+        ["solicitar_exame", "unknown", "consultar"].includes(String(classification.intent || ""));
+      if (_rxTipoEquipe) {
+        console.log(`[Webhook] raio-X de tipo específico (${_rxTipo}) — a equipe confirma`);
+        classification.intent = "unknown";
       }
       let _raioXNoLocal = false;
       if (["solicitar_exame", "unknown", "consultar"].includes(String(classification.intent || "")) && perguntaFazRaioXNoLocal(finalMessage || "")) {
@@ -16344,6 +16497,43 @@ Deno.serve(async (req) => {
         console.log(`[Webhook] recado do médico sem pedido claro — perguntando antes de listar horários`);
         _recadoDoMedico = true;
         classification.intent = "unknown";
+      }
+      // PROCEDIMENTO É COM A EQUIPE (20/10, Gustavo: "Pode marcar o procedimento?" recebeu o
+      // link de consulta). Infiltração já tem fluxo próprio antes daqui.
+      let _procedimento = false;
+      if (classification.intent === "agendar" && pedeMarcarProcedimento(finalMessage || "")) {
+        console.log(`[Webhook] pedido de procedimento — a equipe agenda`);
+        _procedimento = true;
+        classification.intent = "unknown";
+      }
+      // PERGUNTA DE ESPECIALIDADE NÃO É PEDIDO DE HORÁRIO (20/10, Elaine: "Dr Hugo é
+      // especialista em joelho, certo?" recebeu a lista). O listar_medicos responde.
+      if (classification.intent === "agendar" && perguntaEspecialidadeDoMedico(finalMessage || "")) {
+        console.log(`[Webhook] pergunta sobre a especialidade do médico — listar_medicos`);
+        classification.intent = "listar_medicos";
+      }
+      // NOME DEPOIS DO "CPF NÃO ENCONTRADO" (20/10, Renata e Kris): a Julia ofereceu "me diga
+      // o nome completo que eu passo para a equipe" e o nome foi engolido como CPF repetido.
+      let _cadastroPeloNome = "";
+      if (conversationId && pareceNomeCompleto(finalMessage || "")) {
+        try {
+          const { data: _ultN } = await supabase
+            .from("webhook_messages")
+            .select("message_text, ai_intent, created_at")
+            .eq("conversation_id", conversationId)
+            .eq("direction", "outgoing")
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          if (_ultN && String(_ultN.ai_intent || "") !== "manual_reply" && /^Não encontrei cadastro com/.test(String(_ultN.message_text || "")) &&
+            Date.now() - Date.parse(String(_ultN.created_at)) < 30 * 60_000) {
+            console.log(`[CadastroPeloNome] nome depois do CPF não encontrado — equipe procura pelo nome`);
+            _cadastroPeloNome = String(finalMessage || "").trim().replace(/\s+/g, " ");
+            classification.intent = "unknown";
+          }
+        } catch (e) {
+          console.log(`[CadastroPeloNome] check error (non-blocking): ${(e as Error).message}`);
+        }
       }
       // "CIRURGIÃO DE COLUNA" É PEDIDO DE CONSULTA (19/10, Laura): virou falar_com_atendente
       // e foi para a fila; o agendar já sabe ir da região ao médico (Dr. Lucas, coluna).
@@ -17324,6 +17514,37 @@ Deno.serve(async (req) => {
         if (_raioXNoLocal) replyText = TEXTO_RAIO_X_NO_LOCAL;
         if (_atrasoSobAtendente) replyText = TEXTO_ATRASO_PARA_RECEPCAO;
         if (_domiciliar) replyText = TEXTO_SEM_ATENDIMENTO_DOMICILIAR;
+        if (_procedimento) replyText = TEXTO_PROCEDIMENTO_COM_EQUIPE;
+        if (_rxTipoEquipe && _rxTipo) replyText = textoRaioXTipoEquipe(_rxTipo);
+        if (_cadastroPeloNome) replyText = textoCadastroPeloNome(_cadastroPeloNome);
+        if (_reembolsoPosMarcacao) {
+          replyText = textoConvenioReembolsoPosMarcacao(_reembolsoPosMarcacao.convenio, precoDaConsulta(clinicRef?.custom_notes), _reembolsoPosMarcacao.date, _reembolsoPosMarcacao.time);
+        }
+        // CARTEIRINHA ENVIADA (20/10, Mercia): a Julia não lê imagem — diz isso e pede o plano.
+        if (falaDeCarteirinhaEnviada(finalMessage || "") && ["consultar_convenios", "unknown", "agendar", "cadastrar"].includes(String(classification.intent || "")) && !/\batendemos\b/i.test(replyText)) {
+          console.log(`[Carteirinha] paciente diz que enviou a carteirinha — pedindo o nome do plano`);
+          replyText = classification.intent === "agendar" || classification.intent === "cadastrar"
+            ? `${TEXTO_CARTEIRINHA_SEM_LEITURA}\n\n${replyText}`.trim()
+            : TEXTO_CARTEIRINHA_SEM_LEITURA;
+        }
+        // 2ª FALHA DO MESMO PEDIDO DE CPF (20/10, Kris): "Não encontrei cadastro" duas vezes
+        // seguidas é laço — a equipe procura pelo nome.
+        if (/^Não encontrei cadastro com/.test(replyText) && conversationId) {
+          try {
+            const { data: _ultC } = await supabase
+              .from("webhook_messages")
+              .select("message_text, created_at")
+              .eq("conversation_id", conversationId)
+              .eq("direction", "outgoing")
+              .order("created_at", { ascending: false })
+              .limit(1)
+              .maybeSingle();
+            if (_ultC && /^Não encontrei cadastro com/.test(String(_ultC.message_text || "")) && Date.now() - Date.parse(String(_ultC.created_at)) < 30 * 60_000) {
+              console.log(`[CadastroPeloNome] 2ª falha do CPF — equipe procura pelo nome`);
+              replyText = TEXTO_CPF_NAO_ACHADO_DE_NOVO;
+            }
+          } catch { /* non-blocking */ }
+        }
         if (_regraRetorno) replyText = TEXTO_REGRA_DO_RETORNO;
         // VALOR DA NUTRÓLOGA (19/10, Enzo): a pergunta vinha junto com outra (nota da
         // aplicação → Lidiane) e o valor, que está no script, ficou de fora.
@@ -17441,6 +17662,25 @@ Deno.serve(async (req) => {
             replyText = _tU;
           }
         }
+        // "PARECE URGENTE" LOGO DEPOIS DA LISTA (20/10, Bruna: horários às 16:03:05 e "parece
+        // urgente, procure um pronto-socorro" às 16:03:32 — dor ao mexer o punho, sem sinal
+        // determinístico). Com lista real enviada há 5 min, o texto fica coerente com ela.
+        try {
+          if (/parece urgente/i.test(replyText) && !detectUrgency(finalMessage || "") && classificarUrgencia(finalMessage || "") !== "clinica" && conversationId) {
+            const { data: _lst } = await supabase
+              .from("webhook_messages")
+              .select("id")
+              .eq("conversation_id", conversationId)
+              .eq("direction", "outgoing")
+              .eq("verified_schedule", true)
+              .gte("created_at", new Date(Date.now() - 5 * 60_000).toISOString())
+              .limit(1);
+            if (_lst && _lst.length > 0) {
+              console.log(`[Urgencia] "parece urgente" do modelo logo depois da lista — texto coerente com os horários`);
+              replyText = TEXTO_DOR_COM_HORARIOS;
+            }
+          }
+        } catch { /* non-blocking */ }
         if ((classification as any).__naoEhOPaciente) replyText = TEXTO_PEDE_CPF_DO_PACIENTE;
         if (_convenioPosMarcacao) {
           replyText = textoConvenioPosMarcacao(_convenioPosMarcacao.date, _convenioPosMarcacao.time);
@@ -17541,13 +17781,17 @@ Deno.serve(async (req) => {
             const _since2m = new Date(Date.now() - 2 * 60 * 1000).toISOString();
             const { data: _prevCpfAsk } = await supabase
               .from("webhook_messages")
-              .select("id")
+              .select("id, created_at")
               .eq("conversation_id", conversationId)
               .eq("direction", "outgoing")
               .gte("created_at", _since2m)
               .ilike("message_text", "%cpf%")
+              .order("created_at", { ascending: false })
               .limit(1);
-            if (_prevCpfAsk && _prevCpfAsk.length > 0) {
+            // 20/10 (Renata, Kris, Mercia): só é corrida se o pedido de CPF anterior saiu
+            // DEPOIS de esta mensagem chegar. Antes disso, o paciente leu e respondeu.
+            const _chegouCpf = Date.parse(String((msgRecord as any)?.created_at || ""));
+            if (_prevCpfAsk && _prevCpfAsk.length > 0 && ehCorrida(Date.parse(String(_prevCpfAsk[0].created_at)), _chegouCpf)) {
               console.log(`[CpfAskDedup] 🔁 pedido de CPF já enviado há <2min — suprimindo repetição`);
               await supabase
                 .from("webhook_messages")
@@ -18211,7 +18455,11 @@ Deno.serve(async (req) => {
           // mensagem anterior separa os dois casos.
           const _JANELA_CORRIDA_S = 120;
           const _idadeDup = dupCheck.matchedAgeSec ?? 0;
-          if (dupCheck.duplicate && _idadeDup <= _JANELA_CORRIDA_S) {
+          // 20/10 (Fabi "Ele tem pela manhã?", M7sato, Kris): corrida é a resposta igual ter
+          // saído DEPOIS de esta mensagem chegar. Se saiu antes, o paciente já a tinha lido —
+          // vai para o ramo de baixo (oferece atendente) em vez do silêncio.
+          const _chegouEm = Date.parse(String((msgRecord as any)?.created_at || ""));
+          if (dupCheck.duplicate && _idadeDup <= _JANELA_CORRIDA_S && ehCorrida(dupCheck.matchedAtMs ?? null, _chegouEm)) {
             console.log(
               `[Webhook] 🔁 Duplicate reply suppressed for ${phone} (${_idadeDup}s — corrida). Candidate: "${replyText.substring(0, 80)}..." matched recent: "${(dupCheck.matchedText || "").substring(0, 80)}..."`,
             );

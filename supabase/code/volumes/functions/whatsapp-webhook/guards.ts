@@ -41,7 +41,7 @@ export async function isDuplicateReply(
   conversationId: string | null | undefined,
   text: string,
   windowSec = 300,
-): Promise<{ duplicate: boolean; matchedText?: string; matchedAgeSec?: number }> {
+): Promise<{ duplicate: boolean; matchedText?: string; matchedAgeSec?: number; matchedAtMs?: number }> {
   if (!supabase || !conversationId || !text) return { duplicate: false };
   try {
     const cutoff = new Date(Date.now() - windowSec * 1000).toISOString();
@@ -63,13 +63,24 @@ export async function isDuplicateReply(
         // nenhuma). Quem chama decide; aqui só entregamos o dado.
         const t = Date.parse(String((row as any).created_at || ""));
         const idade = Number.isFinite(t) ? Math.round((Date.now() - t) / 1000) : undefined;
-        return { duplicate: true, matchedText: prev, matchedAgeSec: idade };
+        return { duplicate: true, matchedText: prev, matchedAgeSec: idade, matchedAtMs: Number.isFinite(t) ? t : undefined };
       }
     }
   } catch (e) {
     console.warn(`[isDuplicateReply] error: ${(e as Error).message}`);
   }
   return { duplicate: false };
+}
+
+/**
+ * CORRIDA DE VERDADE (20/10): a resposta igual saiu DEPOIS de esta mensagem chegar — as
+ * duas foram processadas juntas. Se saiu ANTES, o paciente leu e escreveu de novo (Fabi
+ * "Ele tem pela manhã?", Renata e Kris mandando o nome): suprimir era deixá-lo sem resposta.
+ */
+export function ehCorrida(saidaAnteriorMs: number | null | undefined, chegouMs: number | null | undefined): boolean {
+  if (typeof saidaAnteriorMs !== "number" || !Number.isFinite(saidaAnteriorMs)) return false;
+  if (typeof chegouMs !== "number" || !Number.isFinite(chegouMs)) return true; // sem a hora de chegada, o comportamento antigo
+  return saidaAnteriorMs >= chegouMs;
 }
 
 export function sanitizeReply(text: unknown): { valid: boolean; cleaned: string } {

@@ -402,7 +402,7 @@ export type IntencaoFisio = "agendar" | "pedido_medico" | "falar_com_fisio" | "s
 // fisioterapeuta pediu para ver" recebeu a tabela de preço. Imagem/resultado/laudo de
 // exame feito é pedido de DOCUMENTO para a equipe enviar.
 const FISIO_EXAME_RE =
-  /\b(imagens?|resultados?|laudos?|cd|filmes?|chapas?)\s+(d[oa]s?\s+|de\s+|da\s+minha\s+|do\s+meu\s+)?(rx|raio[\s-]*x|resson[âa]ncia|tomografia|ultrassom|ultrassonografia|exames?|densitometria|eletroneuromiografia)(?![\p{L}])|\b(rx|raio[\s-]*x|resson[âa]ncia|tomografia|ultrassom|exame)\b[\s\S]{0,40}\b(j[áa]\s+saiu|ficou\s+pronto|est[áa]\s+pronto)/iu;
+  /\b(?:preciso|precisava|quero|queria|gostaria|pode\s+me\s+(?:passar|mandar|enviar)|tem\s+como\s+(?:passar|mandar|enviar))\s+(?:d[ao]s?\s+|a\s+|o\s+|as\s+|os\s+)?(?:radiografias?|rx|raio[\s-]*x)(?![\p{L}])|\b(imagens?|resultados?|laudos?|cd|filmes?|chapas?)\s+(d[oa]s?\s+|de\s+|da\s+minha\s+|do\s+meu\s+)?(rx|raio[\s-]*x|resson[âa]ncia|tomografia|ultrassom|ultrassonografia|exames?|densitometria|eletroneuromiografia)(?![\p{L}])|\b(rx|raio[\s-]*x|resson[âa]ncia|tomografia|ultrassom|exame)\b[\s\S]{0,40}\b(j[áa]\s+saiu|ficou\s+pronto|est[áa]\s+pronto)/iu;
 
 export const TEXTO_FISIO_EXAME =
   "Vou passar para a nossa equipe te enviar as imagens/o resultado do exame por aqui. 🙏";
@@ -500,6 +500,8 @@ const FISIO_RECADO_RE =
 export function classificarPedidoDeFisioterapia(texto: unknown): IntencaoFisio {
   const t = String(texto ?? "");
   if (!t) return "agendar";
+  // 20/10 (Fernanda Chamie): "conseguiu o pedido medido para Fisio?" — erro de digitação
+  if (/\bpedidos?\s+medidos?\b|\bconseguiu\s+(o\s+|meu\s+)?pedido\b/i.test(t) && !FISIO_TRABALHO_RE.test(t)) return "pedido_medico";
   if (FISIO_TRABALHO_RE.test(t)) return "trabalho";
   if (FISIO_NOTA_FISCAL_RE.test(t)) return "nota_fiscal";
   // 15/10 (Suely): pix/pagamento de sessão é cobrança, não venda de pacote
@@ -2441,6 +2443,8 @@ export const TEXTO_PROCEDIMENTO_LIBERADO =
 export function perguntaFazRaioXNoLocal(texto: unknown): boolean {
   const t = stripAccents(String(texto ?? "").toLowerCase());
   if (!t.trim() || t.length > 200) return false;
+  // 20/10 (Julia Adati): "raio X panorâmico" recebeu "Sim, fazemos" — não fazemos.
+  if (tipoDeRaioXEspecifico(texto)) return false;
   if (/\b(pedido|resultado|laudo|imagens?|guia|marcar|agendar|valor|preco|quanto|custa)\b/.test(t)) return false;
   // criança/bebê/gestante: a resposta pronta não sabe — fica com a equipe
   if (/\b(crianc|bebe|gestant|gravid|filh)/.test(t)) return false;
@@ -2741,6 +2745,10 @@ const _VENDA_RE = [
   /\bcapta[çc][ãa]o\s+de\s+pacientes\b/i, /\bn[ãa]o\s+sou\s+paciente\b/i, /\b(parte|setor|[áa]rea)\s+comercial\b/i,
   /\bproposta\s+(comercial|de\s+parceria)\b/i, /\b(representante|consultor[ae]?)\s+(comercial|de\s+vendas)\b/i,
   /\bmarketing\s+(m[ée]dico|para\s+cl[íi]nicas)\b/i, /\b(gostar[íi]amos|queremos)\s+de\s+(apresentar|oferecer)\b/i,
+  // 20/10 (Potavell, Groohub): venda de produto e de serviço para a secretária
+  /\baqui\s+[ée]\s+(a|o)\s+consultor[ae]?\b/i, /\bparcelas\s+fixas\b/i, /\bsem\s+entrada\b/i, /\bpurificador/i,
+  /\b\d+\s+anos\s+(cuidando|no\s+mercado|de\s+experi[êe]ncia)\b/i, /\b(rotina|carga)\s+operacional\b/i,
+  /\b(da|de\s+sua|da\s+sua)\s+secret[áa]ria\b/i, /\bpotencial\s+real\b/i, /\bcomo\s+voc[êe]s\s+trazem\s+paciente/i,
 ];
 export function propostaComercial(texto: unknown): boolean {
   const t = String(texto ?? "");
@@ -2858,4 +2866,160 @@ export function precoDaNutrologa(notas: unknown): string | null {
 
 export function textoPrecoNutrologa(preco: string): string {
   return `A Dra. Ana Paula (nutróloga) atende somente particular — a consulta é ${preco}.`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORREÇÕES DO RELATÓRIO DE SEGUNDA 19/10 (recebido em 20/10)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Nome completo mandado sozinho (Renata: "Renata Mayer Klecz"; Kris: "Arthur mendes dos
+ * Santos"). 2 a 7 palavras de letras, sem número, sem pergunta, sem palavra de conversa.
+ */
+export function pareceNomeCompleto(texto: unknown): boolean {
+  let t = String(texto ?? "").trim().replace(/\s+/g, " ");
+  t = t.replace(/^(paciente|nome|o nome [ée]|meu nome [ée]|nome completo)[:\s]+/i, "");
+  if (!t || t.length > 70 || /\d|\?|@/.test(t)) return false;
+  const palavras = t.split(" ");
+  if (palavras.length < 2 || palavras.length > 7) return false;
+  if (!palavras.every((p) => /^[\p{L}'.-]+$/u.test(p))) return false;
+  const n = stripAccents(t.toLowerCase());
+  if (/\b(obrigad|ok|sim|nao|quero|tem|vc|voce|agenda|amanha|hoje|quinta|sexta|segunda|terca|quarta|consulta|horario|conseguiu|localizar|bom|boa|dia|tarde|noite|por favor|certo|isso)\b/.test(n)) return false;
+  return palavras.filter((p) => p.replace(/[^\p{L}]/gu, "").length >= 2).length >= 2;
+}
+
+export function textoCadastroPeloNome(nome: string): string {
+  const n = String(nome || "").trim().replace(/^(paciente|nome)[:\s]+/i, "");
+  return `Obrigada! Vou passar para a nossa equipe localizar o cadastro de *${n}* e seguir com o seu pedido — elas te respondem por aqui. 🙏`;
+}
+
+export const TEXTO_CPF_NAO_ACHADO_DE_NOVO =
+  "Não localizei o cadastro por esse CPF de novo. Vou passar para a nossa equipe procurar pelo nome — se puder, me mande o nome completo do paciente. Elas te respondem por aqui. 🙏";
+
+/** Raio-X de tipo que a clínica pode não fazer (20/10, Julia Adati: panorâmico). A lista fixa é do dono. */
+export function tipoDeRaioXEspecifico(texto: unknown): string | null {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  const m = /\b(panoramic\w*|escanometria|telerradiografia|teleradiografia|panoramica|corpo\s+inteiro|coluna\s+total|panoramico)\b/.exec(t);
+  if (!m) return null;
+  const k = m[1];
+  if (/panoramic/.test(k)) return "panorâmico";
+  if (/escanometria/.test(k)) return "escanometria";
+  if (/tele/.test(k)) return "telerradiografia";
+  return k;
+}
+
+export function textoRaioXTipoEquipe(tipo: string): string {
+  return `Fazemos raio-X aqui na clínica, mas o tipo ${tipo} eu preciso confirmar com a equipe. Vou passar para elas, que te respondem por aqui. 🙏`;
+}
+
+const _SO_REEMBOLSO: Array<[RegExp, string]> = [
+  [/\bamil\b/, "Amil"], [/\bunimed\b/, "Unimed"], [/\bprevent(\s+senior)?\b/, "Prevent Senior"],
+];
+
+/** Pergunta "aceita/atende X?" sobre convênio que a clínica só atende por reembolso (script: Unimed, Amil, Prevent Senior). */
+export function convenioSoReembolsoPerguntado(texto: unknown): string | null {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  if (!t.trim() || t.length > 200) return null;
+  // verbo de cobertura: "aceita/atende/cobre"; "tenho que pedir o reembolso pela Unimed?" não é pergunta de cobertura
+  if (!/\b(aceita|aceitam|atende|atendem|cobre|cobrem|trabalham?\s+com)\b/.test(t)) return null;
+  const achados = _SO_REEMBOLSO.filter(([re]) => re.test(t));
+  if (achados.length !== 1) return null;
+  if (citaConvenioAlem(t, achados[0][0])) return null;
+  return achados[0][1];
+}
+function citaConvenioAlem(t: string, re: RegExp): boolean {
+  return /\b(bradesco|sul\s*america|sulamerica|porto|notre\s*dame|hapvida|care\s*plus|omint|gama|mediservice)\b/.test(t.replace(re, ""));
+}
+
+export function textoConvenioReembolsoPosMarcacao(convenio: string, preco: string | null, dataISO: string, hhmm: string): string {
+  const d = String(dataISO || "");
+  const data = /^\d{4}-\d{2}-\d{2}$/.test(d) ? `${d.slice(8, 10)}/${d.slice(5, 7)}` : d;
+  return (
+    `A ${convenio} a clínica atende por *reembolso*: a consulta é particular${preco ? ` (${preco})` : ""} e emitimos a nota fiscal para você pedir o reembolso ao seu plano. ` +
+    `Sua consulta de ${data}${hhmm ? ` às ${hhmm}` : ""} continua marcada — quer manter?`
+  );
+}
+
+/** "Estou tentando agendar mas dá erro", "o sistema dá erro", "o link não abre" (20/10, M7sato e Marcelo). */
+export function siteDeuErro(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  if (!t.trim()) return false;
+  return /\b(d[aá]|deu|dando|aparece|apareceu)\s+(um\s+)?erro\b|\b(site|link|sistema|pagina|aplicativo|app)\b[\s\S]{0,30}\b(nao\s+(abre|funciona|carrega|vai|deixa)|travou|trava|fora\s+do\s+ar)\b|\bnao\s+(consigo|estou\s+conseguindo)\s+(agendar|marcar)\s+(pelo|no|pela)\s+(site|link|sistema|internet|online)\b/.test(t);
+}
+
+/** "Pode marcar o procedimento?" (20/10, Gustavo) — procedimento é com a equipe, não o link de consulta. */
+export function pedeMarcarProcedimento(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  if (!t.trim() || t.length > 250) return false;
+  if (/\bconsulta\b/.test(t)) return false;
+  return /\b(marcar|agendar|marca|agenda|marque|agende)\s+(o\s+|meu\s+|um\s+|esse\s+|este\s+)?procedimento\b/.test(t);
+}
+export const TEXTO_PROCEDIMENTO_COM_EQUIPE =
+  "Procedimento quem agenda é a nossa equipe, junto com você. Vou passar para elas — se puder, me diga qual é o procedimento e com qual médico. Elas te respondem por aqui. 🙏";
+
+/** "Dr Hugo é especialista em joelho, certo?" (20/10, Elaine) — pergunta, não pedido de horário. */
+export function perguntaEspecialidadeDoMedico(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  if (!t.trim() || t.length > 200) return false;
+  if (/\b(marcar|agendar|horario|vaga|agenda|disponivel|disponibilidade|consulta)\b/.test(t)) return false;
+  return /\b(e|eh|seria)\s+(o\s+)?(especialista|ortopedista|medico)\s+(em|de|da|do)\b/.test(t) &&
+    (/\?/.test(t) || /\bcerto\b|\bne\b/.test(t));
+}
+
+/** "enviei a carteirinha", "a carteirinha que enviei" (20/10, Mercia). A Julia não lê imagem. */
+export function falaDeCarteirinhaEnviada(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  return /\b(enviei|mandei|te\s+mandei|ja\s+mandei|ja\s+enviei)\s+(a\s+|uma\s+)?(foto\s+da\s+)?carteirinha\b|\bcarteirinha\s+que\s+(eu\s+)?(enviei|mandei)\b/.test(t);
+}
+export const TEXTO_CARTEIRINHA_SEM_LEITURA =
+  "Eu não consigo abrir imagens por aqui. 🙏 Me diga o nome do plano que está escrito na carteirinha (por exemplo: Top Nacional, Nacional III, Especial 100) que eu confiro na hora.";
+
+/** Hora da consulta de HOJE no lembrete do Amigo ("Dia: 19/10/2026, Horário: 09:20"). */
+export function horaDaConsultaDeHoje(textos: unknown[], hojeISO: string): string | null {
+  const [y, m, d] = String(hojeISO || "").split("-");
+  if (!y || !m || !d) return null;
+  for (const x of [...(textos || [])].reverse()) {
+    const r = /Dia:\s*(\d{2})\/(\d{2})\/(\d{4}),\s*Hor[áa]rio:\s*(\d{2}:\d{2})/.exec(String(x ?? ""));
+    if (r && r[1] === d && r[2] === m && r[3] === y) return r[4];
+  }
+  return null;
+}
+
+/** Minutos de atraso: "atrasar uns 15 minutos", ou a hora de chegada contra a da consulta. Negativo = chega antes. */
+export function minutosDeAtraso(texto: unknown, horaConsulta: string | null): number | null {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  // passado ("eu ia chegar uns 20 min atrasada… tentei contato") não é aviso de agora
+  if (/\b(ia|tinha|tentei|cheguei|atrasei|chegou|atrasou)\b/.test(t)) return null;
+  const min = /\b(\d{1,2})\s*(min|mins|minutos|minutinhos)\b/.exec(t);
+  if (min && /\b(atras|chego|chegar|chegando|transito)/.test(t)) return Number(min[1]);
+  if (!horaConsulta || !/^\d{2}:\d{2}$/.test(horaConsulta)) return null;
+  let chegada = horaDoTexto(t);
+  if (!chegada) {
+    const h = /\b(?:chego|chegar|chegando|estarei\s+ai)\s+(?:as\s+|às\s+|umas\s+|por\s+volta\s+das\s+)?(\d{1,2})\s*h(?:s|rs)?\b/.exec(t);
+    if (h) chegada = `${h[1].padStart(2, "0")}:00`;
+  }
+  if (!chegada) return null;
+  const mins = (x: string) => Number(x.slice(0, 2)) * 60 + Number(x.slice(3, 5));
+  return mins(chegada) - mins(horaConsulta);
+}
+
+export function textoAtrasoPodeVir(horaConsulta: string | null, minutos: number): string {
+  if (minutos <= 0 && horaConsulta) {
+    return `Obrigada por avisar! 😊 Pode vir com calma — sua consulta é às ${horaConsulta}, você chega a tempo.`;
+  }
+  return `Obrigada por avisar! 🙏 Pode vir — até 20 minutos de atraso o médico consegue te atender${horaConsulta ? ` (sua consulta é às ${horaConsulta})` : ""}. Venha com calma e segurança.`;
+}
+
+/** O modelo disse "parece urgente" logo depois de a Julia mandar a lista (20/10, Bruna). */
+export const TEXTO_DOR_COM_HORARIOS =
+  "Sinto muito pela dor. 🙏 Os horários que te mandei acima são os primeiros disponíveis — é só me dizer qual prefere. Se a dor ficar muito forte antes da consulta, procure um pronto-socorro.";
+
+/** Hora que veio do contexto e contradiz o período pedido agora (20/10, Fabi: 17:20 × "pela manhã"). */
+export function horaContradizPeriodo(hora: unknown, periodo: unknown): boolean {
+  const h = String(hora ?? "").trim();
+  if (!/^\d{1,2}:\d{2}/.test(h)) return false;
+  const hh = h.padStart(5, "0");
+  if (periodo === "manha") return hh >= "12:00";
+  if (periodo === "tarde") return hh < "12:00";
+  return false;
 }
