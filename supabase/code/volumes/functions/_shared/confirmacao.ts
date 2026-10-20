@@ -60,6 +60,9 @@ export function chaveDoTelefone(tel: unknown): string | null {
   let d = String(tel ?? "").replace(/\D/g, "");
   if ((d.length === 12 || d.length === 13) && d.startsWith("55")) d = d.slice(2);
   if (d.length !== 10 && d.length !== 11) return null;
+  // 11 dígitos só é celular brasileiro com o nono dígito: "12125551234" (EUA,
+  // sem o 55) não pode virar "DDD 12" e colidir com o paciente (revisão 20/10)
+  if (d.length === 11 && d[2] !== "9") return null;
   return d.slice(0, 2) + d.slice(-8);
 }
 

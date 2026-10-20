@@ -12510,7 +12510,7 @@ Deno.serve(async (req) => {
         if (_chaveIns && _simIns && classificarUrgencia(String(messageStr || "")) !== "clinica") {
           const { data: _ins } = await supabase
             .from("confirmacao_insistencia")
-            .select("id, attendance_id, patient_id, data_consulta, hora, medico_nome, enviada_em")
+            .select("id, attendance_id, patient_id, data_consulta, hora, medico_nome, enviada_em, telefone")
             .eq("clinic_token_id", clinicTokenId)
             .eq("telefone_chave", _chaveIns)
             .eq("status", "enviada")
@@ -12540,7 +12540,7 @@ Deno.serve(async (req) => {
                 .update({ status: "confirmando" })
                 .in("id", _ins.map((r: any) => r.id))
                 .eq("status", "enviada")
-                .select("id, attendance_id, patient_id, data_consulta, hora, medico_nome");
+                .select("id, attendance_id, patient_id, data_consulta, hora, medico_nome, telefone");
               if (Array.isArray(_meus) && _meus.length > 0) {
                 const _cid = String(decodeJwtPayload(String(_cl.token)).company_id ?? "");
                 const _ok: any[] = [];
@@ -12575,7 +12575,9 @@ Deno.serve(async (req) => {
                     sender_phone: phone, sender_name: name, message_text: _txt, direction: "outgoing",
                     ai_intent: "confirmacao_insistencia_ok", action_status: "success", verified_schedule: true,
                   } as any);
-                  const _env = await enviarTexto(_canalIns!, phone, _txt);
+                  // responde ao telefone GRAVADO da consulta, nunca ao remetente (revisão 20/10)
+                  const _telIns = String(_ok[0].telefone || phone);
+                  const _env = await enviarTexto(_canalIns!, _telIns, _txt);
                   if (!_env.ok) console.error(`[Insistencia] resposta de confirmação não enviada: ${_env.detalhe}`);
                   await supabase.from("webhook_messages").update({
                     ai_intent: "confirmar", action_status: "success", ai_response: _txt,
