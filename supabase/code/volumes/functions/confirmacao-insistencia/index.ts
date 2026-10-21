@@ -216,10 +216,12 @@ async function acharOuCriarConversa(supabase: any, clinic: any, telefone: string
   return nova?.id ?? null;
 }
 
-async function processarClinica(supabase: any, clinic: any, simular: boolean) {
+async function processarClinica(supabase: any, clinic: any, simular: boolean, foraDaJanela = false) {
   const { hojeISO, minutos } = agoraSP();
   const modo = String(clinic.confirmacao_insistencia || "off");
-  if (!simular && !janelaAberta(hojeISO, minutos)) return { clinica: clinic.id, fora_da_janela: true };
+  // `foraDaJanela` (pedido do dono, 21/10 19h40: "mesmo com o horário, mande"): só ENVIA as
+  // linhas já 'agendada' do dia — nunca planeja fora da janela. Chamada manual, com o segredo do cron.
+  if (!simular && !foraDaJanela && !janelaAberta(hojeISO, minutos)) return { clinica: clinic.id, fora_da_janela: true };
   const alvo = proximoDiaUtil(hojeISO);
   const tok = String(clinic.token || "");
 
@@ -230,7 +232,8 @@ async function processarClinica(supabase: any, clinic: any, simular: boolean) {
     .eq("clinic_token_id", clinic.id)
     .eq("data_consulta", alvo);
 
-  if (simular || modo === "teste" || !jaPlanejado) {
+  if (foraDaJanela && !simular && !jaPlanejado) return { clinica: clinic.id, fora_da_janela: "nada planejado hoje" };
+  if (simular || modo === "teste" || (!jaPlanejado && !foraDaJanela)) {
     if (modo === "teste" && !simular && jaPlanejado) return { clinica: clinic.id, teste: "resumo já enviado hoje" };
     const consultas = await consultasAConfirmar(tok, alvo);
     if (!consultas) return { clinica: clinic.id, erro: "amigo_indisponivel" };
@@ -385,9 +388,11 @@ Deno.serve(async (req) => {
     return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401, headers: corsHeaders });
   }
   let simular = false;
+  let foraDaJanela = false;
   try {
     const b = await req.json();
     simular = b?.simular === true;
+    foraDaJanela = b?.enviar_fora_da_janela === true;
   } catch { /* sem corpo */ }
 
   const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
@@ -403,7 +408,7 @@ Deno.serve(async (req) => {
   for (const c of clinicas || []) {
     if (!c.token) continue;
     try {
-      out.push(await processarClinica(supabase, c, simular));
+      out.push(await processarClinica(supabase, c, simular, foraDaJanela));
     } catch (e) {
       console.error(`[Insistencia] clínica ${c.id}: ${(e as Error).message}`);
       out.push({ clinica: c.id, erro: (e as Error).message });
