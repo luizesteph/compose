@@ -159,12 +159,13 @@ function montarPlano(
     let motivo: string | null = null;
     if (!it.telefone || !it.telefone_chave) motivo = "sem_celular";
     else if (telefoneSemJulia(it.telefone)) motivo = "numero_sem_julia";
-    else if (marcouAgora.has(it.telefone_chave)) motivo = "marcou_hoje";
     else if (emConversa.has(it.telefone_chave)) motivo = "em_conversa";
     if (motivo) {
       linhas.push({ ...it, status: "pulada", motivo, agendada_para: null });
       continue;
     }
+    // marcou nas últimas 24 h: envia igual (pedido do dono, 21/10), a marca muda só a abertura do texto
+    if (marcouAgora.has(it.telefone_chave)) (it as ItemDaInsistencia & { recente?: boolean }).recente = true;
     const g = grupos.get(it.telefone_chave!) || [];
     g.push(it);
     grupos.set(it.telefone_chave!, g);
@@ -174,10 +175,12 @@ function montarPlano(
   const horarios = planejarHorarios(ordem.length, inicioMs, fimMs);
   ordem.forEach((g, i) => {
     const t = horarios[i];
-    for (const it of g) {
+    for (const comMarca of g) {
+      // `recente` não é coluna da tabela: sai do objeto antes de gravar
+      const { recente, ...it } = comMarca as ItemDaInsistencia & { recente?: boolean };
       linhas.push(t == null
         ? { ...it, status: "pulada", motivo: "sem_tempo", agendada_para: null }
-        : { ...it, status: "agendada", motivo: null, agendada_para: new Date(t).toISOString() });
+        : { ...it, status: "agendada", motivo: recente ? "marcou_hoje" : null, agendada_para: new Date(t).toISOString() });
     }
   });
   return { linhas };
@@ -334,7 +337,9 @@ async function processarClinica(supabase: any, clinic: any, simular: boolean) {
   if (!travadas || travadas.length === 0) return { clinica: clinic.id, outra_rodada_pegou: true };
 
   const canal = canalVivo(clinic);
-  const texto = textoDaInsistencia(travadas as ItemDaInsistencia[], hojeISO);
+  const texto = textoDaInsistencia(travadas as ItemDaInsistencia[], hojeISO, {
+    marcouAgora: travadas.every((t: any) => t.motivo === "marcou_hoje"),
+  });
   const telefone = String(travadas[0].telefone);
   const ids = travadas.map((t: any) => t.id);
   if (!canal) {

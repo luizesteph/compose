@@ -23,10 +23,10 @@ export const MAXIMO_POR_DIA = 70;
  * Quem escreveu à clínica nas últimas N horas está em conversa: a equipe já fala com
  * ele. Era 12 h (20/10); em 21/10 pulou 7 de 16 — e 2 deles precisavam da mensagem
  * (Adriana: "Ah que pena, ok" às 13h48; Renato: "Não, obrigado" ao particular às
- * 8h12). Quem marcou HOJE sai pela outra regra (marcouNaConversa).
+ * 8h12). Quem marcou nas últimas 24 h também recebe, com outra abertura (marcouNaConversa).
  */
 export const HORAS_EM_CONVERSA = 2;
-/** marcação nas últimas N horas = consulta acabou de ser feita, não se pede confirmação */
+/** marcação nas últimas N horas = consulta acabou de ser feita: confirma igual, com outra abertura (21/10) */
 export const HORAS_MARCOU_AGORA = 24;
 
 /**
@@ -191,9 +191,13 @@ export function quandoEhAConsulta(dataISO: string, hojeISO: string): string {
  * resposta que não for "SIM" vai para a equipe pelo mesmo caminho da resposta ao
  * lembrete da manhã, e o resgate da mensagem parada também não pega.
  */
-export function textoDaInsistencia(itens: ItemDaInsistencia[], hojeISO: string): string {
+export function textoDaInsistencia(itens: ItemDaInsistencia[], hojeISO: string, opts?: { marcouAgora?: boolean }): string {
   const quando = quandoEhAConsulta(itens[0].data_consulta, hojeISO);
-  const cab = "Olá! 😊 Aqui é a Julia, da CBT Ortopedia. Ainda não recebemos a sua confirmação.";
+  // quem marcou nas últimas 24 h também confirma (pedido do dono, 21/10: o "SIM" ativo
+  // aumenta a chance de comparecer) — só a abertura muda, "ainda não recebemos" soaria estranho
+  const cab = opts?.marcouAgora
+    ? "Olá! 😊 Aqui é a Julia, da CBT Ortopedia. Passando para confirmar a sua consulta."
+    : "Olá! 😊 Aqui é a Julia, da CBT Ortopedia. Ainda não recebemos a sua confirmação.";
   const pe = "Se precisar remarcar ou cancelar, é só escrever aqui que a nossa equipe te ajuda.";
   if (itens.length === 1) {
     const i = itens[0];
