@@ -31,6 +31,8 @@ import { chamadaDeCronAutorizada } from "../_shared/cron.ts";
 import { canalVivo, enviarTexto } from "../_shared/zpro.ts";
 import {
   HORAS_EM_CONVERSA,
+  HORAS_MARCOU_AGORA,
+  marcouNaConversa,
   INTERVALO_MINIMO_S,
   ULTIMO_ENVIO_MIN,
   chaveDoTelefone,
@@ -112,11 +114,37 @@ async function telefonesEmConversa(supabase: any, clinicId: string, horas: numbe
   return s;
 }
 
+/** chaves dos telefones cuja conversa marcou consulta nas últimas N horas (equipe, site ou Julia) */
+async function telefonesQueMarcaramAgora(supabase: any, clinicId: string, horas: number): Promise<Set<string>> {
+  const desde = new Date(Date.now() - horas * 3600000).toISOString();
+  // três buscas pequenas, filtradas no banco (o PostgREST corta resposta grande em silêncio)
+  const base = () => supabase
+    .from("webhook_messages")
+    .select("sender_phone, direction, ai_intent, message_text, ai_entities")
+    .eq("clinic_token_id", clinicId)
+    .gte("created_at", desde)
+    .limit(1000);
+  const [equipe, site, julia] = await Promise.all([
+    base().eq("ai_intent", "manual_reply").or("message_text.ilike.%agendad%,message_text.ilike.%marcad%"),
+    base().eq("direction", "incoming").ilike("message_text", "Agendamento via widget:%"),
+    base().not("ai_entities->>booked_event_id", "is", null),
+  ]);
+  const s = new Set<string>();
+  for (const r of [...(equipe.data || []), ...(site.data || []), ...(julia.data || [])]) {
+    const booked = !!(r.ai_entities && (r.ai_entities as Record<string, unknown>).booked_event_id);
+    if (!marcouNaConversa({ ...r, booked })) continue;
+    const k = chaveDoTelefone(r.sender_phone);
+    if (k) s.add(k);
+  }
+  return s;
+}
+
 type Plano = { linhas: Array<ItemDaInsistencia & { status: string; motivo: string | null; agendada_para: string | null }> };
 
 function montarPlano(
   consultas: ConsultaDoAmigo[],
   emConversa: Set<string>,
+  marcouAgora: Set<string>,
   inicioMs: number,
   fimMs: number,
   soMedico: string | null,
@@ -131,6 +159,7 @@ function montarPlano(
     let motivo: string | null = null;
     if (!it.telefone || !it.telefone_chave) motivo = "sem_celular";
     else if (telefoneSemJulia(it.telefone)) motivo = "numero_sem_julia";
+    else if (marcouAgora.has(it.telefone_chave)) motivo = "marcou_hoje";
     else if (emConversa.has(it.telefone_chave)) motivo = "em_conversa";
     if (motivo) {
       linhas.push({ ...it, status: "pulada", motivo, agendada_para: null });
@@ -203,8 +232,9 @@ async function processarClinica(supabase: any, clinic: any, simular: boolean) {
     const consultas = await consultasAConfirmar(tok, alvo);
     if (!consultas) return { clinica: clinic.id, erro: "amigo_indisponivel" };
     const emConversa = await telefonesEmConversa(supabase, clinic.id, HORAS_EM_CONVERSA);
+    const marcouAgora = await telefonesQueMarcaramAgora(supabase, clinic.id, HORAS_MARCOU_AGORA);
     const inicio = Math.max(Date.now() + 60000, msDeHojeSP(hojeISO, 16 * 60));
-    const plano = montarPlano(consultas, emConversa, inicio, msDeHojeSP(hojeISO, ULTIMO_ENVIO_MIN), clinic.confirmacao_insistencia_so_medico || null);
+    const plano = montarPlano(consultas, emConversa, marcouAgora, inicio, msDeHojeSP(hojeISO, ULTIMO_ENVIO_MIN), clinic.confirmacao_insistencia_so_medico || null);
     const resumo = resumoDoPlano(plano);
     console.log(`[Insistencia] plano ${alvo} modo=${modo}${simular ? " (simulação)" : ""}: ${JSON.stringify(resumo)}`);
     if (simular) return { clinica: clinic.id, alvo, simulacao: resumo };
@@ -286,7 +316,7 @@ async function processarClinica(supabase: any, clinic: any, simular: boolean) {
   if (!vivos.length) return { clinica: clinic.id, ja_confirmada: mortos.length };
 
   // o paciente escreveu nesse meio-tempo: a equipe está com ele
-  const emConversa = await telefonesEmConversa(supabase, clinic.id, 2);
+  const emConversa = await telefonesEmConversa(supabase, clinic.id, HORAS_EM_CONVERSA);
   if (emConversa.has(String(proxima.telefone_chave))) {
     await supabase.from("confirmacao_insistencia")
       .update({ status: "pulada", motivo: "em_conversa" })

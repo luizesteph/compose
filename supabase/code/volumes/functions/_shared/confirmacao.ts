@@ -19,8 +19,30 @@ export const JANELA_FIM_MIN = 18 * 60; // 18:00 — nada sai depois disso
 export const ULTIMO_ENVIO_MIN = 17 * 60 + 55; // folga de 5 min antes do fim
 export const INTERVALO_MINIMO_S = 90; // nunca duas mensagens a menos de 90 s
 export const MAXIMO_POR_DIA = 70;
-/** quem escreveu à clínica nas últimas N horas está em conversa: a equipe já fala com ele */
-export const HORAS_EM_CONVERSA = 12;
+/**
+ * Quem escreveu à clínica nas últimas N horas está em conversa: a equipe já fala com
+ * ele. Era 12 h (20/10); em 21/10 pulou 7 de 16 — e 2 deles precisavam da mensagem
+ * (Adriana: "Ah que pena, ok" às 13h48; Renato: "Não, obrigado" ao particular às
+ * 8h12). Quem marcou HOJE sai pela outra regra (marcouNaConversa).
+ */
+export const HORAS_EM_CONVERSA = 2;
+/** marcação nas últimas N horas = consulta acabou de ser feita, não se pede confirmação */
+export const HORAS_MARCOU_AGORA = 24;
+
+/**
+ * A mensagem mostra que a consulta foi marcada agora? Fala da equipe "Agendado amanhã…",
+ * "Consulta agendada. 22/10…" (Laiz, Glaucia — 21/10), linha da marcação pelo site
+ * ("Agendamento via widget: …") ou marcação da Julia (ai_entities.booked_event_id).
+ */
+export function marcouNaConversa(m: { direction?: string | null; ai_intent?: string | null; message_text?: string | null; booked?: boolean }): boolean {
+  if (m.booked) return true;
+  const t = String(m.message_text ?? "");
+  if (m.direction === "incoming") return /^\s*Agendamento via widget:/i.test(t);
+  if (m.direction === "outgoing" && m.ai_intent === "manual_reply") {
+    return /\b(?:consulta\s+)?(?:agendad[oa]|marcad[oa])\b/i.test(t) && !/\?\s*$/.test(t.trim()) && !/\b(?:j[aá]\s+tem|tinha|estava)\b/i.test(t);
+  }
+  return false;
+}
 /** "SIM" vale até N horas depois do envio */
 export const HORAS_VALIDADE_DO_SIM = 30;
 
