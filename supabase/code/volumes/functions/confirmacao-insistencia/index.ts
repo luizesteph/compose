@@ -47,6 +47,8 @@ import {
   type ItemDaInsistencia,
 } from "../_shared/confirmacao.ts";
 import { telefoneSemJulia } from "../whatsapp-webhook/helpers.ts";
+import { montarRelatorio, textoParaAMardila, type LinhaDoRelatorio } from "../_shared/relatorio-confirmacao.ts";
+import { enviarDMNoSlack } from "../_shared/slack.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -382,6 +384,60 @@ async function processarClinica(supabase: any, clinic: any, simular: boolean, fo
   return { clinica: clinic.id, enviada: ids.length };
 }
 
+// ── RELATÓRIO DIÁRIO NO SLACK (21/10, pedido do dono) ─────────────────────────
+// pg_cron às 18h10 de SP chama com {"relatorio": true}. Uma vez por dia (marca na
+// própria tabela: attendance_id = -1, data_consulta = dia do envio, status 'relatorio');
+// `destino` só serve para teste (manda a outra pessoa e não marca o dia).
+async function enviarRelatorio(supabase: any, clinic: any, destinoTeste: string | null) {
+  const { hojeISO } = agoraSP();
+  const token = String(clinic.slack_bot_token || "");
+  const destino = destinoTeste || String(clinic.slack_relatorio_para || "");
+  if (!token) return { clinica: clinic.id, relatorio: "sem token do Slack (clinic_tokens.slack_bot_token)" };
+  if (!destino) return { clinica: clinic.id, relatorio: "sem destino (clinic_tokens.slack_relatorio_para)" };
+
+  if (!destinoTeste) {
+    const { data: marca } = await supabase.from("confirmacao_insistencia").select("id, status")
+      .eq("clinic_token_id", clinic.id).eq("data_consulta", hojeISO).eq("attendance_id", -1).maybeSingle();
+    if (marca?.status === "relatorio") return { clinica: clinic.id, relatorio: "já enviado hoje" };
+    const { error: mErr } = await supabase.from("confirmacao_insistencia").upsert({
+      clinic_token_id: clinic.id, data_consulta: hojeISO, attendance_id: -1, patient_id: 0, status: "relatorio_enviando",
+    }, { onConflict: "clinic_token_id,data_consulta,attendance_id" });
+    if (mErr) return { clinica: clinic.id, relatorio: `marca não gravada: ${mErr.message}` };
+  }
+
+  const inicioDoDia = new Date(Date.parse(`${hojeISO}T00:00:00-03:00`)).toISOString();
+  const { data: linhas } = await supabase.from("confirmacao_insistencia")
+    .select("id, status, motivo, paciente_nome, medico_nome, telefone, telefone_chave, hora, data_consulta, enviada_em")
+    .eq("clinic_token_id", clinic.id).gt("attendance_id", 0).gte("created_at", inicioDoDia)
+    .order("hora", { ascending: true }).limit(500);
+  const rows = (linhas || []) as Array<LinhaDoRelatorio & { id: string; telefone_chave: string | null }>;
+
+  // o que cada um escreveu depois do envio
+  const respostas = new Map<string, string[]>();
+  const enviados = rows.filter((r) => r.enviada_em);
+  if (enviados.length) {
+    const desde = enviados.map((r) => String(r.enviada_em)).sort()[0];
+    const { data: msgs } = await supabase.from("webhook_messages")
+      .select("sender_phone, message_text, created_at")
+      .eq("clinic_token_id", clinic.id).eq("direction", "incoming").gte("created_at", desde)
+      .order("created_at", { ascending: true }).limit(1000);
+    for (const r of enviados) {
+      const t = Date.parse(String(r.enviada_em));
+      const dele = (msgs || []).filter((m: any) => chaveDoTelefone(m.sender_phone) === r.telefone_chave && Date.parse(m.created_at) > t);
+      if (dele.length) respostas.set(r.id, dele.map((m: any) => String(m.message_text || "")));
+    }
+  }
+  const texto = textoParaAMardila(montarRelatorio(rows, respostas, hojeISO, rows.map((r) => r.id)));
+  const env = await enviarDMNoSlack(token, destino, texto);
+  if (!destinoTeste) {
+    await supabase.from("confirmacao_insistencia")
+      .update({ status: env.ok ? "relatorio" : "relatorio_falhou", motivo: env.ok ? null : env.detalhe.slice(0, 200) })
+      .eq("clinic_token_id", clinic.id).eq("data_consulta", hojeISO).eq("attendance_id", -1);
+  }
+  console.log(`[Insistencia] relatório ${env.ok ? "enviado" : "falhou: " + env.detalhe} (${rows.length} consultas)`);
+  return { clinica: clinic.id, relatorio: env.ok ? "enviado" : `falhou: ${env.detalhe}`, consultas: rows.length };
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
   if (!chamadaDeCronAutorizada(req, Deno.env.get("CRON_SECRET"), Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"))) {
@@ -389,16 +445,20 @@ Deno.serve(async (req) => {
   }
   let simular = false;
   let foraDaJanela = false;
+  let relatorio = false;
+  let destinoTeste: string | null = null;
   try {
     const b = await req.json();
     simular = b?.simular === true;
     foraDaJanela = b?.enviar_fora_da_janela === true;
+    relatorio = b?.relatorio === true;
+    destinoTeste = typeof b?.destino === "string" && /^[UW][A-Z0-9]{6,}$/.test(b.destino) ? b.destino : null;
   } catch { /* sem corpo */ }
 
   const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
   let q = supabase
     .from("clinic_tokens")
-    .select("id, user_id, token, avanceai_base_url, avanceai_api_id, avanceai_bearer_token, avanceai_active_channel, confirmacao_insistencia, confirmacao_insistencia_so_medico")
+    .select("id, user_id, token, avanceai_base_url, avanceai_api_id, avanceai_bearer_token, avanceai_active_channel, confirmacao_insistencia, confirmacao_insistencia_so_medico, slack_bot_token, slack_relatorio_para")
     .eq("is_active", true);
   if (!simular) q = q.in("confirmacao_insistencia", ["teste", "on"]);
   const { data: clinicas, error } = await q;
@@ -408,7 +468,7 @@ Deno.serve(async (req) => {
   for (const c of clinicas || []) {
     if (!c.token) continue;
     try {
-      out.push(await processarClinica(supabase, c, simular, foraDaJanela));
+      out.push(relatorio ? await enviarRelatorio(supabase, c, destinoTeste) : await processarClinica(supabase, c, simular, foraDaJanela));
     } catch (e) {
       console.error(`[Insistencia] clínica ${c.id}: ${(e as Error).message}`);
       out.push({ clinica: c.id, erro: (e as Error).message });
