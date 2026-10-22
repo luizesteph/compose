@@ -20,13 +20,15 @@ export type LinhaDoRelatorio = {
   enviada_em?: string | null;
 };
 
-export function limparTextoDoPaciente(t: unknown): string {
+export function limparTextoDoPaciente(t: unknown, max = 80): string {
   return String(t ?? "")
     .replace(/[<>&*_~`"|\\]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 80);
+    .slice(0, max);
 }
+/** nome, médico, hora, motivo: também vêm de fora (cadastro do Amigo, feito até pelo site) */
+const campo = (t: unknown, vazio: string) => limparTextoDoPaciente(t, 120) || vazio;
 
 /** "5511973529675" → "+55 11 97352-9675" */
 export function telefoneLegivel(t: unknown): string {
@@ -47,7 +49,7 @@ function motivoLegivel(l: LinhaDoRelatorio): string {
     case "sem_celular": return "sem celular no cadastro";
     case "sem_tempo": return "não coube na janela";
     case "numero_sem_julia": return "número sem Julia";
-    default: return l.motivo || l.status;
+    default: return campo(l.motivo || l.status, "?");
   }
 }
 
@@ -59,8 +61,8 @@ export function montarRelatorio(linhas: LinhaDoRelatorio[], respostas: Map<strin
   if (!linhas.length) return "Hoje não havia consultas de amanhã esperando confirmação.";
   const comId = linhas.map((l, i) => ({ l, id: ids?.[i] ?? String(i) }));
   const item = (l: LinhaDoRelatorio) =>
-    `• ${l.paciente_nome || "(sem nome)"} — ${telefoneLegivel(l.telefone)} — ${l.hora || "--:--"} com ${l.medico_nome || "(médico?)"}`;
-  const resp = (id: string) => (respostas.get(id) || []).map(limparTextoDoPaciente).filter(Boolean).join(" / ");
+    `• ${campo(l.paciente_nome, "(sem nome)")} — ${telefoneLegivel(l.telefone)} — ${campo(l.hora, "--:--")} com ${campo(l.medico_nome, "(médico?)")}`;
+  const resp = (id: string) => (respostas.get(id) || []).map((t) => limparTextoDoPaciente(t)).filter(Boolean).join(" / ");
   const ordena = (a: { l: LinhaDoRelatorio }, b: { l: LinhaDoRelatorio }) =>
     String(a.l.hora).localeCompare(String(b.l.hora)) || String(a.l.paciente_nome).localeCompare(String(b.l.paciente_nome));
 
