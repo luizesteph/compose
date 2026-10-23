@@ -414,6 +414,9 @@ async function enviarRelatorio(supabase: any, clinic: any, destinoTeste: string 
 
   // o que cada um escreveu depois do envio
   const respostas = new Map<string, string[]>();
+  // a equipe falou com o paciente depois da mensagem: o caso já está com ela (22/10 — o
+  // "Sim" do Eduardo respondia à Caroline e saiu como "respondeu outra coisa")
+  const equipe = new Set<string>();
   const enviados = rows.filter((r) => r.enviada_em);
   if (enviados.length) {
     const desde = enviados.map((r) => String(r.enviada_em)).sort()[0];
@@ -421,13 +424,19 @@ async function enviarRelatorio(supabase: any, clinic: any, destinoTeste: string 
       .select("sender_phone, message_text, created_at")
       .eq("clinic_token_id", clinic.id).eq("direction", "incoming").gte("created_at", desde)
       .order("created_at", { ascending: true }).limit(1000);
+    const { data: falas } = await supabase.from("webhook_messages")
+      .select("sender_phone, created_at")
+      .eq("clinic_token_id", clinic.id).eq("direction", "outgoing").eq("ai_intent", "manual_reply").gte("created_at", desde)
+      .limit(1000);
     for (const r of enviados) {
       const t = Date.parse(String(r.enviada_em));
       const dele = (msgs || []).filter((m: any) => chaveDoTelefone(m.sender_phone) === r.telefone_chave && Date.parse(m.created_at) > t);
       if (dele.length) respostas.set(r.id, dele.map((m: any) => String(m.message_text || "")));
+      // fala da equipe 2 min depois do envio (antes disso pode ser o eco da própria mensagem)
+      if ((falas || []).some((f: any) => chaveDoTelefone(f.sender_phone) === r.telefone_chave && Date.parse(f.created_at) > t + 120000)) equipe.add(r.id);
     }
   }
-  const texto = textoParaAMardila(montarRelatorio(rows, respostas, hojeISO, rows.map((r) => r.id)));
+  const texto = textoParaAMardila(montarRelatorio(rows, respostas, hojeISO, rows.map((r) => r.id), equipe));
   const env = await enviarDMNoSlack(token, destino, texto);
   if (!destinoTeste) {
     await supabase.from("confirmacao_insistencia")
@@ -452,7 +461,7 @@ Deno.serve(async (req) => {
     simular = b?.simular === true;
     foraDaJanela = b?.enviar_fora_da_janela === true;
     relatorio = b?.relatorio === true;
-    destinoTeste = typeof b?.destino === "string" && /^[UW][A-Z0-9]{6,}$/.test(b.destino) ? b.destino : null;
+    destinoTeste = typeof b?.destino === "string" && /^[UW][A-Z0-9]{6,}(,[UW][A-Z0-9]{6,}){0,7}$/.test(b.destino) ? b.destino : null;
   } catch { /* sem corpo */ }
 
   const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);

@@ -1,6 +1,6 @@
-// _shared/slack.ts — mensagem direta no Slack pelo bot da clínica (21/10/2026).
+// _shared/slack.ts — mensagem no Slack pelo bot da clínica (21/10/2026): DM ou conversa em grupo.
 // O token (xoxb-…) fica em clinic_tokens.slack_bot_token, gravado pelo DONO; nunca no
-// código nem no git. Precisa dos escopos chat:write e im:write.
+// código nem no git. Escopos: chat:write, im:write e mpim:write (grupo).
 
 export async function enviarDMNoSlack(
   token: string,
@@ -8,11 +8,16 @@ export async function enviarDMNoSlack(
   texto: string,
 ): Promise<{ ok: boolean; detalhe: string; link?: string }> {
   if (!token || !/^xox[bp]-/.test(token)) return { ok: false, detalhe: "sem token do Slack" };
-  if (!/^[UW][A-Z0-9]{6,}$/.test(usuario)) return { ok: false, detalhe: "destino inválido" };
+  // um usuário → DM com o bot; vários ("U1,U2") → conversa em grupo com o bot (precisa de mpim:write),
+  // para o dono ver o mesmo relatório que a Mardila (22/10)
+  const usuarios = String(usuario).split(",").map((u) => u.trim()).filter(Boolean);
+  if (!usuarios.length || usuarios.length > 8 || !usuarios.every((u) => /^[UW][A-Z0-9]{6,}$/.test(u))) {
+    return { ok: false, detalhe: "destino inválido" };
+  }
   const h = { Authorization: `Bearer ${token}`, "Content-Type": "application/json; charset=utf-8" };
   try {
     const abre = await fetch("https://slack.com/api/conversations.open", {
-      method: "POST", headers: h, body: JSON.stringify({ users: usuario }), signal: AbortSignal.timeout(10000),
+      method: "POST", headers: h, body: JSON.stringify({ users: usuarios.join(",") }), signal: AbortSignal.timeout(10000),
     }).then((r) => r.json());
     if (!abre?.ok) return { ok: false, detalhe: `conversations.open: ${abre?.error ?? "?"}` };
     const canal = abre.channel?.id;

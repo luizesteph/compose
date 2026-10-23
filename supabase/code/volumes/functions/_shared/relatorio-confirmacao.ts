@@ -57,7 +57,13 @@ function motivoLegivel(l: LinhaDoRelatorio): string {
  * Monta o relatório (mrkdwn do Slack). `respostas` = o que o paciente escreveu depois
  * do envio, por id da linha (já pode vir sujo — é limpo aqui).
  */
-export function montarRelatorio(linhas: LinhaDoRelatorio[], respostas: Map<string, string[]>, diaEnvioISO: string, ids?: string[]): string {
+export function montarRelatorio(
+  linhas: LinhaDoRelatorio[],
+  respostas: Map<string, string[]>,
+  diaEnvioISO: string,
+  ids?: string[],
+  equipeJaFalou?: Set<string>,
+): string {
   if (!linhas.length) return "Hoje não havia consultas de amanhã esperando confirmação.";
   const comId = linhas.map((l, i) => ({ l, id: ids?.[i] ?? String(i) }));
   const item = (l: LinhaDoRelatorio) =>
@@ -68,8 +74,10 @@ export function montarRelatorio(linhas: LinhaDoRelatorio[], respostas: Map<strin
 
   const conf = comId.filter((x) => x.l.status === "confirmada").sort(ordena);
   const canc = comId.filter((x) => x.l.status === "cancelada").sort(ordena);
-  const outra = comId.filter((x) => ["enviada", "falhou_confirmar"].includes(x.l.status) && resp(x.id)).sort(ordena);
-  const calados = comId.filter((x) => x.l.status === "enviada" && !resp(x.id)).sort(ordena);
+  const comEquipe = comId.filter((x) => ["enviada", "falhou_confirmar"].includes(x.l.status) && equipeJaFalou?.has(x.id)).sort(ordena);
+  const semEquipe = (x: { id: string }) => !equipeJaFalou?.has(x.id);
+  const outra = comId.filter((x) => ["enviada", "falhou_confirmar"].includes(x.l.status) && resp(x.id) && semEquipe(x)).sort(ordena);
+  const calados = comId.filter((x) => x.l.status === "enviada" && !resp(x.id) && semEquipe(x)).sort(ordena);
   const semMsg = comId.filter((x) => ["pulada", "falhou", "agendada"].includes(x.l.status)).sort(ordena);
   const enviadas = linhas.filter((l) => !!l.enviada_em).length;
 
@@ -84,6 +92,10 @@ export function montarRelatorio(linhas: LinhaDoRelatorio[], respostas: Map<strin
   if (canc.length) out.push("", "*❌ Canceladas depois da mensagem*", ...canc.map((x) => item(x.l)));
   if (outra.length) out.push("", "*⚠️ Responderam outra coisa — a equipe precisa ver*", ...outra.map((x) => `${item(x.l)} — disse: "${resp(x.id)}"`));
   if (calados.length) out.push("", "*📞 Receberam e não responderam (ligar)*", ...calados.map((x) => item(x.l)));
+  if (comEquipe.length) {
+    out.push("", "*👩‍💼 A equipe já conversou com o paciente depois da mensagem (conferir se ficou confirmado)*",
+      ...comEquipe.map((x) => (resp(x.id) ? `${item(x.l)} — disse: "${resp(x.id)}"` : item(x.l))));
+  }
   if (semMsg.length) out.push("", "*🚫 Não receberam a mensagem*", ...semMsg.map((x) => `${item(x.l)} — ${motivoLegivel(x.l)}`));
   return out.join("\n");
 }
