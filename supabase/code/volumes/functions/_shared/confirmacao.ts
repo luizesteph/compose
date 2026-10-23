@@ -69,8 +69,26 @@ export function proximoDiaUtil(hojeISO: string): string {
 /** A janela de envio está aberta? (seg–sex, 16:00–17:59 em SP) */
 export function janelaAberta(hojeISO: string, minutosDoDia: number): boolean {
   const dw = diaDaSemana(hojeISO);
-  if (dw === 0 || dw === 6) return false;
+  // sábado nunca; domingo é a REPESCAGEM das consultas de segunda (pedido do dono, 22/10)
+  if (dw === 6) return false;
   return minutosDoDia >= JANELA_INICIO_MIN && minutosDoDia < JANELA_FIM_MIN;
+}
+
+/**
+ * Domingo (pedido do dono, 22/10: "sempre na sexta… para segunda-feira e ainda tentar
+ * fazer uma confirmação no domingo de novo"): quem a sexta mandou e ainda não confirmou,
+ * nem respondeu nada depois, recebe a mensagem de novo — o fim de semana é longo.
+ */
+export function ehDomingo(hojeISO: string): boolean {
+  return diaDaSemana(hojeISO) === 0;
+}
+
+/** Na repescagem: a linha de sexta ainda pede mensagem? (status + o paciente não respondeu depois) */
+export function precisaDeRepescagem(linha: { status: string } | undefined, respondeuDepois: boolean): boolean {
+  if (!linha) return true; // consulta marcada depois da sexta
+  if (["confirmada", "cancelada", "falhou_confirmar", "confirmando", "enviando"].includes(linha.status)) return false;
+  if (respondeuDepois) return false; // falou algo ("remarcar", pergunta…): está com a equipe
+  return true;
 }
 
 /**

@@ -36,6 +36,8 @@ import {
   INTERVALO_MINIMO_S,
   ULTIMO_ENVIO_MIN,
   chaveDoTelefone,
+  ehDomingo,
+  precisaDeRepescagem,
   esperaConfirmacao,
   itemDaConsulta,
   janelaAberta,
@@ -235,6 +237,57 @@ async function processarClinica(supabase: any, clinic: any, simular: boolean, fo
     .eq("data_consulta", alvo);
 
   if (foraDaJanela && !simular && !jaPlanejado) return { clinica: clinic.id, fora_da_janela: "nada planejado hoje" };
+
+  // ── 1b. REPESCAGEM DE DOMINGO (22/10) ───────────────────────────────────────
+  // A sexta planejou as consultas de segunda. No domingo, uma vez (marca attendance_id = -2),
+  // quem ainda não confirmou e não respondeu nada depois da mensagem de sexta volta para a fila.
+  if (ehDomingo(hojeISO) && jaPlanejado && !simular && !foraDaJanela && modo === "on") {
+    const { data: marcaDom } = await supabase.from("confirmacao_insistencia").select("id")
+      .eq("clinic_token_id", clinic.id).eq("data_consulta", alvo).eq("attendance_id", -2).maybeSingle();
+    if (!marcaDom) {
+      const consultas = await consultasAConfirmar(tok, alvo);
+      if (!consultas) return { clinica: clinic.id, erro: "amigo_indisponivel" };
+      const { data: existentes } = await supabase.from("confirmacao_insistencia")
+        .select("attendance_id, status, enviada_em, telefone_chave")
+        .eq("clinic_token_id", clinic.id).eq("data_consulta", alvo).gt("attendance_id", 0);
+      const porId = new Map((existentes || []).map((e: any) => [Number(e.attendance_id), e]));
+      const envios = (existentes || []).map((e: any) => e.enviada_em).filter(Boolean).sort();
+      const { data: entradas } = envios.length
+        ? await supabase.from("webhook_messages").select("sender_phone, created_at")
+          .eq("clinic_token_id", clinic.id).eq("direction", "incoming").gte("created_at", envios[0]).limit(1000)
+        : { data: [] as any[] };
+      const respondeuDepois = (e: any) => !!e?.enviada_em && (entradas || []).some((m: any) =>
+        chaveDoTelefone(m.sender_phone) === e.telefone_chave && Date.parse(m.created_at) > Date.parse(e.enviada_em));
+      const candidatas = consultas.filter((c) => {
+        const e = porId.get(Number(c.id));
+        return precisaDeRepescagem(e, respondeuDepois(e));
+      });
+      const emConversa = await telefonesEmConversa(supabase, clinic.id, HORAS_EM_CONVERSA);
+      const marcouAgora = await telefonesQueMarcaramAgora(supabase, clinic.id, HORAS_MARCOU_AGORA);
+      const inicio = Math.max(Date.now() + 60000, msDeHojeSP(hojeISO, 16 * 60));
+      const plano = montarPlano(candidatas, emConversa, marcouAgora, inicio, msDeHojeSP(hojeISO, ULTIMO_ENVIO_MIN), clinic.confirmacao_insistencia_so_medico || null);
+      const resumo = resumoDoPlano(plano);
+      // linhas de sexta voltam para 'agendada' (enviada_em zera); as novas entram
+      const agendadas = plano.linhas.filter((l) => l.status === "agendada")
+        .map((l) => ({ clinic_token_id: clinic.id, ...l, enviada_em: null, confirmada_em: null }));
+      if (agendadas.length) {
+        const { error: upErr } = await supabase.from("confirmacao_insistencia")
+          .upsert(agendadas, { onConflict: "clinic_token_id,data_consulta,attendance_id" });
+        if (upErr) return { clinica: clinic.id, erro: `repescagem não gravada: ${upErr.message}` };
+      }
+      const puladas = plano.linhas.filter((l) => l.status !== "agendada").map((l) => ({ clinic_token_id: clinic.id, ...l }));
+      if (puladas.length) {
+        await supabase.from("confirmacao_insistencia")
+          .upsert(puladas, { onConflict: "clinic_token_id,data_consulta,attendance_id", ignoreDuplicates: true });
+      }
+      await supabase.from("confirmacao_insistencia").insert({
+        clinic_token_id: clinic.id, data_consulta: alvo, attendance_id: -2, patient_id: 0,
+        status: "repescagem", motivo: JSON.stringify(resumo).slice(0, 500),
+      });
+      console.log(`[Insistencia] repescagem de domingo ${alvo}: ${JSON.stringify(resumo)}`);
+      return { clinica: clinic.id, repescagem: resumo };
+    }
+  }
   if (simular || modo === "teste" || (!jaPlanejado && !foraDaJanela)) {
     if (modo === "teste" && !simular && jaPlanejado) return { clinica: clinic.id, teste: "resumo já enviado hoje" };
     const consultas = await consultasAConfirmar(tok, alvo);
@@ -405,10 +458,9 @@ async function enviarRelatorio(supabase: any, clinic: any, destinoTeste: string 
     if (mErr) return { clinica: clinic.id, relatorio: `marca não gravada: ${mErr.message}` };
   }
 
-  const inicioDoDia = new Date(Date.parse(`${hojeISO}T00:00:00-03:00`)).toISOString();
   const { data: linhas } = await supabase.from("confirmacao_insistencia")
     .select("id, status, motivo, paciente_nome, medico_nome, telefone, telefone_chave, hora, data_consulta, enviada_em")
-    .eq("clinic_token_id", clinic.id).gt("attendance_id", 0).gte("created_at", inicioDoDia)
+    .eq("clinic_token_id", clinic.id).gt("attendance_id", 0).eq("data_consulta", proximoDiaUtil(hojeISO))
     .order("hora", { ascending: true }).limit(500);
   const rows = (linhas || []) as Array<LinhaDoRelatorio & { id: string; telefone_chave: string | null }>;
 
