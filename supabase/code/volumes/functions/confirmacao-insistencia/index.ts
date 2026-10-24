@@ -1,8 +1,8 @@
 // confirmacao-insistencia — segunda mensagem de confirmação para quem não respondeu
 // (20/10/2026, pedido do dono). Regras e textos em _shared/confirmacao.ts.
 //
-// Roda a cada minuto (pg_cron, seg–sex 19h–20h59 UTC = 16h–17h59 em SP) e só age
-// dentro da janela 16h–18h de São Paulo:
+// Roda a cada minuto (pg_cron, dom–sex 19h–22h59 UTC = 16h–19h59 em SP) e só age
+// dentro da janela 16h–18h de São Paulo (até 19h30 quando o plano atrasou — 23/10):
 //   1. PLANEJA uma vez por dia: lê no Amigo (GET /attendances) as consultas do
 //      próximo dia útil que ainda esperam confirmação e grava uma linha por
 //      consulta em `confirmacao_insistencia`, com o horário de envio espalhado
@@ -34,8 +34,9 @@ import {
   HORAS_MARCOU_AGORA,
   marcouNaConversa,
   INTERVALO_MINIMO_S,
-  ULTIMO_ENVIO_MIN,
   chaveDoTelefone,
+  relatorioDeveEsperar,
+  ultimoEnvioDoPlano,
   ehDomingo,
   precisaDeRepescagem,
   esperaConfirmacao,
@@ -71,6 +72,12 @@ function agoraSP(): { hojeISO: string; minutos: number } {
 /** epoch de HH:MM de hoje em SP (SP = UTC−3, sem horário de verão desde 2019) */
 function msDeHojeSP(hojeISO: string, minutos: number): number {
   return Date.parse(`${hojeISO}T00:00:00-03:00`) + minutos * 60000;
+}
+
+/** último envio do plano que começa em `inicioMs` (plano atrasado ganha até 19h25 — 23/10) */
+function fimDoPlano(hojeISO: string, inicioMs: number): number {
+  const inicioMin = Math.floor((inicioMs - msDeHojeSP(hojeISO, 0)) / 60000);
+  return msDeHojeSP(hojeISO, ultimoEnvioDoPlano(inicioMin));
 }
 
 function companyDoToken(tok: string): string {
@@ -265,7 +272,7 @@ async function processarClinica(supabase: any, clinic: any, simular: boolean, fo
       const emConversa = await telefonesEmConversa(supabase, clinic.id, HORAS_EM_CONVERSA);
       const marcouAgora = await telefonesQueMarcaramAgora(supabase, clinic.id, HORAS_MARCOU_AGORA);
       const inicio = Math.max(Date.now() + 60000, msDeHojeSP(hojeISO, 16 * 60));
-      const plano = montarPlano(candidatas, emConversa, marcouAgora, inicio, msDeHojeSP(hojeISO, ULTIMO_ENVIO_MIN), clinic.confirmacao_insistencia_so_medico || null);
+      const plano = montarPlano(candidatas, emConversa, marcouAgora, inicio, fimDoPlano(hojeISO, inicio), clinic.confirmacao_insistencia_so_medico || null);
       const resumo = resumoDoPlano(plano);
       // linhas de sexta voltam para 'agendada' (enviada_em zera); as novas entram
       const agendadas = plano.linhas.filter((l) => l.status === "agendada")
@@ -295,7 +302,7 @@ async function processarClinica(supabase: any, clinic: any, simular: boolean, fo
     const emConversa = await telefonesEmConversa(supabase, clinic.id, HORAS_EM_CONVERSA);
     const marcouAgora = await telefonesQueMarcaramAgora(supabase, clinic.id, HORAS_MARCOU_AGORA);
     const inicio = Math.max(Date.now() + 60000, msDeHojeSP(hojeISO, 16 * 60));
-    const plano = montarPlano(consultas, emConversa, marcouAgora, inicio, msDeHojeSP(hojeISO, ULTIMO_ENVIO_MIN), clinic.confirmacao_insistencia_so_medico || null);
+    const plano = montarPlano(consultas, emConversa, marcouAgora, inicio, fimDoPlano(hojeISO, inicio), clinic.confirmacao_insistencia_so_medico || null);
     const resumo = resumoDoPlano(plano);
     console.log(`[Insistencia] plano ${alvo} modo=${modo}${simular ? " (simulação)" : ""}: ${JSON.stringify(resumo)}`);
     if (simular) return { clinica: clinic.id, alvo, simulacao: resumo };
@@ -438,11 +445,11 @@ async function processarClinica(supabase: any, clinic: any, simular: boolean, fo
 }
 
 // ── RELATÓRIO DIÁRIO NO SLACK (21/10, pedido do dono) ─────────────────────────
-// pg_cron às 18h10 de SP chama com {"relatorio": true}. Uma vez por dia (marca na
+// pg_cron às 18h10 (e 18h40, 19h10, 19h40, se a fila ainda não esvaziou) chama com {"relatorio": true}. Uma vez por dia (marca na
 // própria tabela: attendance_id = -1, data_consulta = dia do envio, status 'relatorio');
 // `destino` só serve para teste (manda a outra pessoa e não marca o dia).
 async function enviarRelatorio(supabase: any, clinic: any, destinoTeste: string | null) {
-  const { hojeISO } = agoraSP();
+  const { hojeISO, minutos } = agoraSP();
   const token = String(clinic.slack_bot_token || "");
   const destino = destinoTeste || String(clinic.slack_relatorio_para || "");
   if (!token) return { clinica: clinic.id, relatorio: "sem token do Slack (clinic_tokens.slack_bot_token)" };
@@ -452,6 +459,12 @@ async function enviarRelatorio(supabase: any, clinic: any, destinoTeste: string 
     const { data: marca } = await supabase.from("confirmacao_insistencia").select("id, status")
       .eq("clinic_token_id", clinic.id).eq("data_consulta", hojeISO).eq("attendance_id", -1).maybeSingle();
     if (marca?.status === "relatorio") return { clinica: clinic.id, relatorio: "já enviado hoje" };
+    // plano atrasado (23/10): o cron chama às 18h10, 18h40, 19h10 e 19h40 — sai quando a fila esvazia
+    const { data: fila } = await supabase.from("confirmacao_insistencia").select("status")
+      .eq("clinic_token_id", clinic.id).gt("attendance_id", 0).eq("data_consulta", proximoDiaUtil(hojeISO)).limit(500);
+    if (relatorioDeveEsperar((fila || []).map((f: any) => String(f.status)), minutos)) {
+      return { clinica: clinic.id, relatorio: "aguardando os envios do dia" };
+    }
     const { error: mErr } = await supabase.from("confirmacao_insistencia").upsert({
       clinic_token_id: clinic.id, data_consulta: hojeISO, attendance_id: -1, patient_id: 0, status: "relatorio_enviando",
     }, { onConflict: "clinic_token_id,data_consulta,attendance_id" });

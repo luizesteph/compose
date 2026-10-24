@@ -15,8 +15,25 @@
 // Funções puras: o cron (confirmacao-insistencia) e o webhook usam as mesmas.
 
 export const JANELA_INICIO_MIN = 16 * 60; // 16:00
-export const JANELA_FIM_MIN = 18 * 60; // 18:00 — nada sai depois disso
+export const JANELA_FIM_MIN = 18 * 60; // 18:00 — fim da janela num dia normal
 export const ULTIMO_ENVIO_MIN = 17 * 60 + 55; // folga de 5 min antes do fim
+/**
+ * Plano atrasado (23/10, pedido do dono: "não pode acontecer isso"): o servidor caiu
+ * das 15h31 às 17h46, o plano só saiu às 17h56 e as 44 consultas de segunda ficaram
+ * "sem_tempo". Plano que começa depois das 16h15 ganha a mesma duração (1h55), até no
+ * máximo 19h25; a janela fica aberta até 19h30 para esses envios. Dia normal não muda:
+ * plano às 16h, último envio 17h55.
+ */
+export const JANELA_FIM_ATRASO_MIN = 19 * 60 + 30;
+export const ULTIMO_ENVIO_ATRASO_MIN = 19 * 60 + 25;
+const TOLERANCIA_DO_INICIO_MIN = 15;
+
+/** Último envio permitido para um plano que começa em `inicioMin` (minutos do dia em SP). */
+export function ultimoEnvioDoPlano(inicioMin: number): number {
+  if (inicioMin <= JANELA_INICIO_MIN + TOLERANCIA_DO_INICIO_MIN) return ULTIMO_ENVIO_MIN;
+  const duracao = ULTIMO_ENVIO_MIN - JANELA_INICIO_MIN;
+  return Math.min(ULTIMO_ENVIO_ATRASO_MIN, Math.max(ULTIMO_ENVIO_MIN, inicioMin + duracao));
+}
 export const INTERVALO_MINIMO_S = 90; // nunca duas mensagens a menos de 90 s
 export const MAXIMO_POR_DIA = 70;
 /**
@@ -66,12 +83,26 @@ export function proximoDiaUtil(hojeISO: string): string {
   return d;
 }
 
-/** A janela de envio está aberta? (seg–sex, 16:00–17:59 em SP) */
+/**
+ * A janela de envio está aberta? (dom–sex, 16:00–19:29 em SP). Num dia normal o plano
+ * termina às 17h55 e nada sai depois; o resto da janela só serve ao plano atrasado (23/10).
+ */
 export function janelaAberta(hojeISO: string, minutosDoDia: number): boolean {
   const dw = diaDaSemana(hojeISO);
   // sábado nunca; domingo é a REPESCAGEM das consultas de segunda (pedido do dono, 22/10)
   if (dw === 6) return false;
-  return minutosDoDia >= JANELA_INICIO_MIN && minutosDoDia < JANELA_FIM_MIN;
+  return minutosDoDia >= JANELA_INICIO_MIN && minutosDoDia < JANELA_FIM_ATRASO_MIN;
+}
+
+/**
+ * O relatório espera os envios do dia (23/10): enquanto houver consulta ainda na fila
+ * (ou nenhum plano gravado — servidor fora), segura até as 19h40.
+ */
+export const RELATORIO_ESPERA_ATE_MIN = 19 * 60 + 40;
+export function relatorioDeveEsperar(statusDasLinhas: string[], minutosDoDia: number): boolean {
+  if (minutosDoDia >= RELATORIO_ESPERA_ATE_MIN) return false;
+  if (!statusDasLinhas.length) return true;
+  return statusDasLinhas.some((s) => s === "agendada" || s === "enviando");
 }
 
 /**
