@@ -98,6 +98,15 @@ export function janelaAberta(hojeISO: string, minutosDoDia: number): boolean {
  * O relatório espera os envios do dia (23/10): enquanto houver consulta ainda na fila
  * (ou nenhum plano gravado — servidor fora), segura até as 19h40.
  */
+/**
+ * Regra do dono (24/10): "sempre que você enviar, você tem que mandar o relatório lá no
+ * Slack… não importa o dia". Dom–sex sai sempre (é dia de envio); no sábado, só se algo
+ * foi enviado hoje (envio extraordinário, como o de 24/10).
+ */
+export function relatorioNoDia(hojeISO: string, houveEnvioHoje: boolean): boolean {
+  return diaDaSemana(hojeISO) !== 6 || houveEnvioHoje;
+}
+
 export const RELATORIO_ESPERA_ATE_MIN = 19 * 60 + 40;
 export function relatorioDeveEsperar(statusDasLinhas: string[], minutosDoDia: number): boolean {
   if (minutosDoDia >= RELATORIO_ESPERA_ATE_MIN) return false;
@@ -117,7 +126,7 @@ export function ehDomingo(hojeISO: string): boolean {
 /** Na repescagem: a linha de sexta ainda pede mensagem? (status + o paciente não respondeu depois) */
 export function precisaDeRepescagem(linha: { status: string } | undefined, respondeuDepois: boolean): boolean {
   if (!linha) return true; // consulta marcada depois da sexta
-  if (["confirmada", "cancelada", "falhou_confirmar", "confirmando", "enviando"].includes(linha.status)) return false;
+  if (["confirmada", "cancelada", "falhou_confirmar", "falhou_cancelar", "confirmando", "cancelando", "enviando"].includes(linha.status)) return false;
   if (respondeuDepois) return false; // falou algo ("remarcar", pergunta…): está com a equipe
   return true;
 }
@@ -291,6 +300,34 @@ export function ehSimDeConfirmacao(texto: unknown): boolean {
   if (/\b(nao|n|remarc\w*|cancel\w*|desmarc\w*|adiar|adiant\w*|antecip\w*|mudar|trocar|outro|outra|atras\w*|mas|porem|so que|infelizmente|nem)\b/.test(t)) return false;
   return /^(?:(?:ok|okay|ola|oi|bom dia|boa tarde|boa noite)\s+)?(?:sim|s|ss|siim+|confirmo|confirmado|confirmada|confirmar|pode confirmar|esta confirmado|ta confirmado|confirmadissimo)\b/.test(t) ||
     /^(?:vou sim|estarei la|estarei presente|irei sim|vou estar la|presenca confirmada|com certeza)\b/.test(t);
+}
+
+/**
+ * Pedido de cancelamento CLARO em resposta à insistência (24/10, regra do dono: "se você
+ * tiver certeza mesmo de que o paciente falou que quer cancelar, pode cancelar automático
+ * no Amigo… tem que ser bem claro"). Só frase curta que COMEÇA pedindo o cancelamento, sem
+ * pergunta, sem remarcar, sem condição nem negação. Casos de 24/10: "Cancelar, por
+ * gentileza" cancela; "Remarcar" e "Vou precisar remarcar a consulta" ficam com a equipe.
+ */
+export function ehCancelamentoClaro(texto: unknown): boolean {
+  const bruto = String(texto ?? "").trim();
+  if (!bruto || bruto.length > 80 || bruto.includes("?")) return false;
+  const t = bruto
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (/\b(nao|n|nem|remarc\w*|reagend\w*|marcar|agendar|outro|outra|trocar|mudar|adiar|adiant\w*|antecip\w*|transferir|se|caso|mas|porem|so que|posso|consigo|tem como|da pra|da para|como|quanto|taxa|multa|reembols\w*|talvez|acho|pensando|errad\w*|engano)\b/.test(t)) return false;
+  return /^(?:(?:oi|ola|bom dia|boa tarde|boa noite)\s+)?(?:(?:por favor|pf|pfv|favor)\s+)?(?:(?:eu\s+)?(?:quero|queria|gostaria de|preciso|vou precisar|vou ter que|tenho que|vou|pode|podem|poderia|poderiam)\s+)?(?:cancelar|cancela|cancele|desmarcar|desmarca|desmarque)\b/.test(t);
+}
+
+/** Resposta depois de cancelar no Amigo. */
+export function textoCancelado(i: Pick<ItemDaInsistencia, "data_consulta" | "hora" | "medico_nome">, hojeISO: string): string {
+  const q = quandoEhAConsulta(i.data_consulta, hojeISO);
+  return `Pronto, sua consulta de ${q} (${ddmm(i.data_consulta)}) às ${i.hora} com o(a) ${i.medico_nome} foi cancelada. ` +
+    `Se quiser marcar para outro dia, é só escrever aqui. 😊`;
 }
 
 /** Filtro de médico do teste: todas as palavras do filtro no nome (sem acento, sem caixa). Filtro vazio = todos. */

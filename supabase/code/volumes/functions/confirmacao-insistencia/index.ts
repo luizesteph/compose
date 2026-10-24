@@ -36,6 +36,7 @@ import {
   INTERVALO_MINIMO_S,
   chaveDoTelefone,
   relatorioDeveEsperar,
+  relatorioNoDia,
   ultimoEnvioDoPlano,
   ehDomingo,
   precisaDeRepescagem,
@@ -445,7 +446,7 @@ async function processarClinica(supabase: any, clinic: any, simular: boolean, fo
 }
 
 // ── RELATÓRIO DIÁRIO NO SLACK (21/10, pedido do dono) ─────────────────────────
-// pg_cron às 18h10 (e 18h40, 19h10, 19h40, se a fila ainda não esvaziou) chama com {"relatorio": true}. Uma vez por dia (marca na
+// pg_cron TODO DIA às 18h10 (e 18h40, 19h10, 19h40, se a fila ainda não esvaziou) chama com {"relatorio": true}. Uma vez por dia (marca na
 // própria tabela: attendance_id = -1, data_consulta = dia do envio, status 'relatorio');
 // `destino` só serve para teste (manda a outra pessoa e não marca o dia).
 async function enviarRelatorio(supabase: any, clinic: any, destinoTeste: string | null) {
@@ -459,6 +460,9 @@ async function enviarRelatorio(supabase: any, clinic: any, destinoTeste: string 
     const { data: marca } = await supabase.from("confirmacao_insistencia").select("id, status")
       .eq("clinic_token_id", clinic.id).eq("data_consulta", hojeISO).eq("attendance_id", -1).maybeSingle();
     if (marca?.status === "relatorio") return { clinica: clinic.id, relatorio: "já enviado hoje" };
+    const { count: enviosHoje } = await supabase.from("confirmacao_insistencia").select("id", { count: "exact", head: true })
+      .eq("clinic_token_id", clinic.id).gt("attendance_id", 0).gte("enviada_em", new Date(msDeHojeSP(hojeISO, 0)).toISOString());
+    if (!relatorioNoDia(hojeISO, (enviosHoje || 0) > 0)) return { clinica: clinic.id, relatorio: "sábado sem envio" };
     // plano atrasado (23/10): o cron chama às 18h10, 18h40, 19h10 e 19h40 — sai quando a fila esvazia
     const { data: fila } = await supabase.from("confirmacao_insistencia").select("status")
       .eq("clinic_token_id", clinic.id).gt("attendance_id", 0).eq("data_consulta", proximoDiaUtil(hojeISO)).limit(500);

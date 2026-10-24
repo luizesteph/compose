@@ -74,9 +74,9 @@ export function montarRelatorio(
 
   const conf = comId.filter((x) => x.l.status === "confirmada").sort(ordena);
   const canc = comId.filter((x) => x.l.status === "cancelada").sort(ordena);
-  const comEquipe = comId.filter((x) => ["enviada", "falhou_confirmar"].includes(x.l.status) && equipeJaFalou?.has(x.id)).sort(ordena);
+  const comEquipe = comId.filter((x) => ["enviada", "falhou_confirmar", "falhou_cancelar"].includes(x.l.status) && equipeJaFalou?.has(x.id)).sort(ordena);
   const semEquipe = (x: { id: string }) => !equipeJaFalou?.has(x.id);
-  const outra = comId.filter((x) => ["enviada", "falhou_confirmar"].includes(x.l.status) && resp(x.id) && semEquipe(x)).sort(ordena);
+  const outra = comId.filter((x) => ["enviada", "falhou_confirmar", "falhou_cancelar"].includes(x.l.status) && resp(x.id) && semEquipe(x)).sort(ordena);
   const calados = comId.filter((x) => x.l.status === "enviada" && !resp(x.id) && semEquipe(x)).sort(ordena);
   const semMsg = comId.filter((x) => ["pulada", "falhou", "agendada"].includes(x.l.status)).sort(ordena);
   const enviadas = linhas.filter((l) => !!l.enviada_em).length;
@@ -89,7 +89,7 @@ export function montarRelatorio(
       ` · canceladas: ${canc.length} · sem mensagem: ${semMsg.length}`,
   );
   if (conf.length) out.push("", "*✅ Confirmaram pelo SIM* (já registrado no Amigo)", ...conf.map((x) => item(x.l)));
-  if (canc.length) out.push("", "*❌ Canceladas depois da mensagem*", ...canc.map((x) => item(x.l)));
+  if (canc.length) out.push("", "*❌ Canceladas depois da mensagem* (já canceladas no Amigo)", ...canc.map((x) => (resp(x.id) ? `${item(x.l)} — disse: "${resp(x.id)}"` : item(x.l))));
   if (outra.length) out.push("", "*⚠️ Responderam outra coisa — a equipe precisa ver*", ...outra.map((x) => `${item(x.l)} — disse: "${resp(x.id)}"`));
   if (calados.length) out.push("", "*📞 Receberam e não responderam (ligar)*", ...calados.map((x) => item(x.l)));
   if (comEquipe.length) {

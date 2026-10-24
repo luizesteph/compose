@@ -195,7 +195,7 @@ import {
   quandoAEquipeResponde,
   relogioDaGuarda,
 } from "../_shared/atendimento.ts";
-import { chaveDoTelefone, ehSimDeConfirmacao, textoConfirmado, HORAS_VALIDADE_DO_SIM } from "../_shared/confirmacao.ts";
+import { chaveDoTelefone, ehSimDeConfirmacao, ehCancelamentoClaro, textoConfirmado, textoCancelado, HORAS_VALIDADE_DO_SIM } from "../_shared/confirmacao.ts";
 import { canalVivo, enviarTexto } from "../_shared/zpro.ts";
 import { LLM_MODEL, LLM_MODEL_FALLBACK, LLM_MODEL_RESPOSTA, LLM_GATEWAY, ehErroDeModeloDesconhecido, llmApiKey, llmHeaders, LLM_USAGE_INCLUDE, custoDaChamada } from "../_shared/llm.ts";
 import { STT_ENDPOINT, STT_MODEL, STT_LANGUAGE, STT_RESPONSE_FORMAT, sttApiKey } from "../_shared/stt.ts";
@@ -12503,10 +12503,82 @@ Deno.serve(async (req) => {
     // bloco de baixo (o texto da insistência casa o lembrete) e fica com a equipe.
     // Só vale se ninguém falou na conversa depois do envio e a mensagem chegou pelo
     // canal vivo (a insistência sai por ele).
+    // CANCELAMENTO CLARO (24/10, regra do dono: "se você tiver certeza mesmo de que o paciente
+    // falou que quer cancelar, pode cancelar automático no Amigo"): ehCancelamentoClaro + UMA
+    // consulta só nesse telefone → PUT /attendances/cancel/{id}. Com duas consultas, fica com a equipe.
     if (conversationId && !(payload as any)?.__resgate && clinicTokenId) {
       try {
         const _chaveIns = chaveDoTelefone(phone);
         const _simIns = _chaveIns ? ehSimDeConfirmacao(String(messageStr || "")) : false;
+        const _cancIns = _chaveIns && !_simIns ? ehCancelamentoClaro(String(messageStr || "")) : false;
+        if (_chaveIns && _cancIns && classificarUrgencia(String(messageStr || "")) !== "clinica") {
+          const { data: _insC } = await supabase
+            .from("confirmacao_insistencia")
+            .select("id, attendance_id, patient_id, data_consulta, hora, medico_nome, enviada_em, telefone")
+            .eq("clinic_token_id", clinicTokenId)
+            .eq("telefone_chave", _chaveIns)
+            .eq("status", "enviada")
+            .gte("enviada_em", new Date(Date.now() - HORAS_VALIDADE_DO_SIM * 3600000).toISOString())
+            .gte("data_consulta", getTodayISO_SP());
+          if (Array.isArray(_insC) && _insC.length === 1) {
+            const _envioMsC = Date.parse(String(_insC[0].enviada_em));
+            const { data: _falaDepoisC } = await supabase
+              .from("webhook_messages")
+              .select("id")
+              .eq("conversation_id", conversationId)
+              .eq("direction", "outgoing")
+              .gt("created_at", new Date(_envioMsC + 120000).toISOString())
+              .lt("created_at", (msgRecord as any).created_at)
+              .limit(1);
+            const { data: _clC } = await supabase
+              .from("clinic_tokens")
+              .select("token, avanceai_base_url, avanceai_api_id, avanceai_bearer_token, avanceai_active_channel")
+              .eq("id", clinicTokenId)
+              .maybeSingle();
+            const _canalC = canalVivo(_clC as any);
+            const _canalOkC = !!_canalC && (!resolvedChannelId || !_canalC.channelId || String(_canalC.channelId) === String(resolvedChannelId));
+            if (!(_falaDepoisC && _falaDepoisC.length) && _canalOkC && _clC?.token) {
+              // trava (enviada → cancelando): duas mensagens seguidas não cancelam duas vezes
+              const { data: _minhaC } = await supabase
+                .from("confirmacao_insistencia")
+                .update({ status: "cancelando" })
+                .eq("id", _insC[0].id)
+                .eq("status", "enviada")
+                .select("id, attendance_id, data_consulta, hora, medico_nome, telefone");
+              if (Array.isArray(_minhaC) && _minhaC.length === 1) {
+                const r = _minhaC[0];
+                const _cidC = String(decodeJwtPayload(String(_clC.token)).company_id ?? "");
+                const res = await tryFetch(`attendances/cancel/${Number(r.attendance_id)}?company_id=${_cidC}`, String(_clC.token), "PUT", undefined, true);
+                const _cancelou = res.status >= 200 && res.status < 300 && (res.data as any)?.data !== false;
+                console.log(`[Insistencia] PUT cancel att=${r.attendance_id} -> ${res.status}${_cancelou ? "" : " (recusado — fica com a equipe)"}`);
+                await supabase.from("confirmacao_insistencia")
+                  .update(_cancelou
+                    ? { status: "cancelada", motivo: "pedido claro do paciente — cancelada no Amigo" }
+                    : { status: "falhou_cancelar", motivo: "PUT cancel recusado — equipe cancela" })
+                  .eq("id", r.id);
+                if (_cancelou) {
+                  const _txtC = textoCancelado(r, getTodayISO_SP());
+                  await supabase.from("webhook_messages").insert({
+                    user_id: userId, clinic_token_id: clinicTokenId, conversation_id: conversationId,
+                    sender_phone: phone, sender_name: name, message_text: _txtC, direction: "outgoing",
+                    ai_intent: "confirmacao_insistencia_cancelada", action_status: "success", verified_schedule: true,
+                  } as any);
+                  const _envC = await enviarTexto(_canalC!, String(r.telefone || phone), _txtC);
+                  if (!_envC.ok) console.error(`[Insistencia] resposta do cancelamento não enviada: ${_envC.detalhe}`);
+                  await supabase.from("webhook_messages").update({
+                    ai_intent: "cancelar", action_status: "success", ai_response: _txtC,
+                    ai_entities: { via: "confirmacao_insistencia", attendance_id: Number(r.attendance_id), cancelled: true },
+                  }).eq("id", messageId);
+                  return new Response(JSON.stringify({ status: "success", reason: "confirmacao_insistencia_cancelada" }), {
+                    status: 200,
+                    headers: { ...corsHeaders, "Content-Type": "application/json" },
+                  });
+                }
+                // recusado: cai no bloco de baixo e fica com a equipe
+              }
+            }
+          }
+        }
         if (_chaveIns && _simIns && classificarUrgencia(String(messageStr || "")) !== "clinica") {
           const { data: _ins } = await supabase
             .from("confirmacao_insistencia")
