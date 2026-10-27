@@ -315,6 +315,23 @@ const CONVENIOS_COM_PLANO: Array<{
   { chave: "Porto Seguro", nomeRe: /\bporto\s*seguro\b/i, planoAceitoRe: null, motivo: "sempre_confirmar" },
 ];
 
+/**
+ * NOTRE DAME / HAPVIDA FORA DO 900 E DO 1000 NÃO MARCA PELO CADASTRO (27/10, Stephane:
+ * "Hapvida / Advance 700" → cadastro → "Consulta confirmada com o Dr. Lucas… 04/11" pelo
+ * plano que a clínica não atende — o script diz "não atendemos"). Só com o plano dito
+ * (número ou nome de linha); "Hapvida" sozinho segue o fluxo de sempre. Em 60 dias: 1 caso.
+ */
+export function planoNotreDameNaoAtendido(texto: unknown): boolean {
+  const t = String(texto ?? "");
+  if (!/\b(notre\s*dame|notredame|hapvida|gndi|interm[eé]dica)\b/i.test(t)) return false;
+  if (/\b(900|1000)\b/.test(t)) return false;
+  return /\d{2,}|\b(advance|smart|nosso\s+plano|mix|premium|cl[aá]ssico)\b/i.test(t);
+}
+export const TEXTO_NOTRE_DAME_NAO_ATENDIDO =
+  "Pra esse plano da Notre Dame / Hapvida a gente não tem atendimento pelo convênio — por isso ainda não marquei a consulta. " +
+  "Você pode consultar como particular (R$ 500) e pedir reembolso ao seu plano; a gente fornece a nota fiscal. " +
+  "Vou passar para a nossa equipe, que te responde por aqui para combinar. 😊";
+
 // "atendemos", "aceitamos", "cobre", "pelo seu convênio", "confirmada ... convênio".
 const AFIRMA_COBERTURA_RE =
   /\b(atendemos|aceitamos|cobre|coberto|cobertura\s+(ok|confirmada)|pel[oa]\s+(seu\s+)?(conv[êe]nio|plano)|com\s+o\s+seu\s+(conv[êe]nio|plano)|conv[êe]nio\s+(ok|confirmad[oa]|aceito))\b/i;

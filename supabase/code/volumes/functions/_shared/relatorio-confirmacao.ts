@@ -74,9 +74,12 @@ export function montarRelatorio(
 
   const conf = comId.filter((x) => x.l.status === "confirmada").sort(ordena);
   const canc = comId.filter((x) => x.l.status === "cancelada").sort(ordena);
-  const comEquipe = comId.filter((x) => ["enviada", "falhou_confirmar", "falhou_cancelar"].includes(x.l.status) && equipeJaFalou?.has(x.id)).sort(ordena);
+  const comEquipe = comId.filter((x) => x.l.status === "enviada" && equipeJaFalou?.has(x.id)).sort(ordena);
   const semEquipe = (x: { id: string }) => !equipeJaFalou?.has(x.id);
-  const outra = comId.filter((x) => ["enviada", "falhou_confirmar", "falhou_cancelar"].includes(x.l.status) && resp(x.id) && semEquipe(x)).sort(ordena);
+  // disse SIM (ou pediu para cancelar) e o Amigo recusou: confirmar/cancelar à mão (27/10, Renata —
+  // encaixe marcado pela equipe; o "Sim" saía em "responderam outra coisa")
+  const recusou = comId.filter((x) => ["falhou_confirmar", "falhou_cancelar"].includes(x.l.status)).sort(ordena);
+  const outra = comId.filter((x) => x.l.status === "enviada" && resp(x.id) && semEquipe(x)).sort(ordena);
   const calados = comId.filter((x) => x.l.status === "enviada" && !resp(x.id) && semEquipe(x)).sort(ordena);
   const semMsg = comId.filter((x) => ["pulada", "falhou", "agendada"].includes(x.l.status)).sort(ordena);
   const enviadas = linhas.filter((l) => !!l.enviada_em).length;
@@ -90,6 +93,10 @@ export function montarRelatorio(
   );
   if (conf.length) out.push("", "*✅ Confirmaram pelo SIM* (já registrado no Amigo)", ...conf.map((x) => item(x.l)));
   if (canc.length) out.push("", "*❌ Canceladas depois da mensagem* (já canceladas no Amigo)", ...canc.map((x) => (resp(x.id) ? `${item(x.l)} — disse: "${resp(x.id)}"` : item(x.l))));
+  if (recusou.length) {
+    out.push("", "*❗ O Amigo não aceitou — fazer à mão*", ...recusou.map((x) =>
+      `${item(x.l)} — ${x.l.status === "falhou_cancelar" ? "pediu para CANCELAR" : "disse SIM (confirmar)"}${resp(x.id) ? `: "${resp(x.id)}"` : ""}`));
+  }
   if (outra.length) out.push("", "*⚠️ Responderam outra coisa — a equipe precisa ver*", ...outra.map((x) => `${item(x.l)} — disse: "${resp(x.id)}"`));
   if (calados.length) out.push("", "*📞 Receberam e não responderam (ligar)*", ...calados.map((x) => item(x.l)));
   if (comEquipe.length) {
@@ -103,5 +110,5 @@ export function montarRelatorio(
 export function textoParaAMardila(relatorio: string): string {
   if (!relatorio.startsWith("*Confirmação")) return relatorio;
   return `Boa tarde, Mardila! Resultado da confirmação de hoje 👇\n\n${relatorio}\n\n` +
-    `Quem está em ⚠️ e 📞 precisa de contato da equipe. O "SIM" já foi registrado no Amigo automaticamente.`;
+    `Quem está em ❗, ⚠️ e 📞 precisa de contato da equipe. O "SIM" já foi registrado no Amigo automaticamente.`;
 }

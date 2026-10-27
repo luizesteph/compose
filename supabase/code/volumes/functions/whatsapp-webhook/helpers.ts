@@ -348,6 +348,13 @@ const NAO_CONSIGO_DE_AGENDA_RE =
 const URGENCIA_ADMINISTRATIVA_RE =
   /\b((ao|para\s+o|pro|pra\s+o)\s+(conv[eê]nio|plano)|pedido|laudo|guia|autoriza\p{L}*|documento|relat[oó]rio|nota\s+fiscal|receita|atestado|imagens?|reembolso)(?![\p{L}])/iu;
 
+const URGENCIA_DE_RESPOSTA_RE =
+  /\b(respond\p{L}*|retorn\p{L}*|resposta|contato|falar\s+comigo)\b[\s\S]{0,25}\burg(ente|[eê]ncia)\b|\burgente\b[\s\S]{0,15}\b(resposta|retorno)\b/iu;
+const _DOR_NA_FRASE_RE = /(?<![\p{L}])(dor|dores|doendo|d[oó]i|machuc\p{L}*|inchad\p{L}*|inchou|febre|sangr\p{L}*)(?![\p{L}])/iu;
+// antiga = com o tempo dito ("em 2024", "há 2 anos", "ano passado"); "tive uma fratura ontem" segue urgência
+const _TEMPO_ANTIGO = String.raw`(em\s+(19|20)\d\d|h[aá]\s+\d+\s+(anos?|meses)|\d+\s+anos?\s+atr[aá]s|ano\s+passado)`;
+const FRATURA_ANTIGA_RE = new RegExp(String.raw`\bfratur[\s\S]{0,80}\b${_TEMPO_ANTIGO}(?![\p{L}])|\b${_TEMPO_ANTIGO}[\s\S]{0,80}\bfratur`, "iu");
+
 // Um único lugar decide se o padrão i realmente dispara — detectUrgency e
 // classificarUrgencia PRECISAM concordar, senão a mensagem diria uma coisa e o
 // roteamento faria outra.
@@ -361,6 +368,14 @@ function padraoDeUrgenciaDispara(p: RegExp, i: number, t: string): boolean {
   // ...a não ser que fale de dor: "bastante dor no pé… raio-X ainda hoje… um pouco de
   // urgência… precisa de pedido médico?" (06/10) continua indo para gente na hora
   if (i === 0 && URGENCIA_ADMINISTRATIVA_RE.test(t) && !/(?<![\p{L}])(dor|dores|doendo|d[oó]i|machuc\p{L}*|inchad\p{L}*|inchou)(?![\p{L}])/iu.test(t)) return false;
+  // PRESSA NA RESPOSTA NÃO É URGÊNCIA CLÍNICA (27/10, MM: "Então pede pra me responder
+  // urgente" virou Regra 4 com "procure um pronto-socorro"). Só a palavra; dor, febre,
+  // fratura seguem disparando nos outros padrões.
+  if (i === 0 && URGENCIA_DE_RESPOSTA_RE.test(t) && !_DOR_NA_FRASE_RE.test(t)) return false;
+  // FRATURA ANTIGA NUM PEDIDO DE DOCUMENTO (27/10, Adriana: "tive fratura exposta da perna
+  // em 2024… vou viajar NESTA QUINTA e preciso de uma receita em inglês dizendo que tenho
+  // placas e pinos" recebeu "procure um pronto-socorro" duas vezes).
+  if (p.source.includes("fratur") && FRATURA_ANTIGA_RE.test(t) && (URGENCIA_ADMINISTRATIVA_RE.test(t) || /declara\p{L}*/iu.test(t)) && !_DOR_NA_FRASE_RE.test(t)) return false;
   // o padrão "não consigo/aguento" só vale com verbo clínico depois do "consigo"
   if (p.source.includes("consigo|aguento") && NAO_CONSIGO_DE_AGENDA_RE.test(t)) {
     // "não aguento" continua urgente mesmo falando de horário — é dor, não agenda
@@ -381,6 +396,10 @@ export function campoPedidoNoCadastro(texto: unknown): "nome" | "cpf" | "nascime
   if (!t) return null;
   if (/nome\s+completo/.test(t)) return "nome";
   if (/data\s+de\s+nascimento|nascimento/.test(t)) return "nascimento";
+  // "Esse CPF está no cadastro de X. Posso confirmar…?" e "Não encontrei consulta futura
+  // no seu CPF" não pedem o CPF — contavam como pedido e a Regra 8 disparou NA mensagem que
+  // trazia o CPF (27/10, Mirella 22/10: lista de espera + reserva + confirmação de paciente).
+  if (/\besse\s+cpf\s+est[áa]\s+no\s+cadastro\b|\bn[ãa]o\s+encontrei\s+consulta\s+futura\s+no\s+seu\s+cpf\b/.test(t)) return null;
   if (/\bcpf\b/.test(t)) return "cpf";
   return null;
 }
@@ -817,8 +836,10 @@ export async function fetchWithTimeout(
 // dias de respostas (3.757), só estas 6 passavam a casar — as 6 promessas vazias.
 // "Vou finalizar seu agendamento … para 07/10, às 10:20" (Alessandra Moreno, 28/09)
 // saiu sem nenhuma marcação: 1 vez em 3.933 respostas de 30 dias, esta.
+// "vou verificar os próximos horários… e já te apresento as opções" (Gabriel Longo, 27/10)
+// e nada veio: 1 vez em 4.351 respostas de 30 dias, esta — a rede transfere.
 export const PROMESSA_DE_HUMANO_RE =
-  /(vou|estou|irei|já\s+(vou|estou))\s+(te\s+)?(transferir|transferindo|passar|passando|encaminhar|encaminhando|chamar|chamando|acionar|acionando|avisar|avisando|pedir)(?![\p{L}])|j[áa]\s+(te\s+)?(avisei|acionei|pedi|passei|chamei|transferi|notifiquei|encaminhei)(?![\p{L}])|(foi|foram)\s+(acionad|notificad|avisad)[oa]s?(?![\p{L}])|(uma\s+)?(atendente|colega|pessoa\s+da\s+equipe)\s+(vai|ir[áa])\s+(te\s+)?(atender|responder|continuar|ajudar|falar)(?![\p{L}])|nossa\s+equipe\s+(vai|ir[áa])\s+(te\s+)?(atender|responder|entrar\s+em\s+contato|continuar)(?![\p{L}])|vou\s+(verificar|confirmar|checar|conferir|ver)\s+(isso\s+)?com\s+(a\s+)?(nossa\s+)?(equipe|atendente|recep[çc][ãa]o|colega)(?![\p{L}])|(nossa\s+)?equipe\s+j[áa]\s+est[áa]\s+(verificando|vendo|analisando|conferindo)(?![\p{L}])|j[áa]\s+te\s+(retorno|informo|respondo)(?![\p{L}])|te\s+retorno\s+(em\s+(breve|seguida|instantes)|assim\s+que|com\s+a\s+confirma)|vou\s+(finalizar|concluir|fechar|efetuar)\s+(o\s+|a\s+)?(seu\s+|sua\s+)?(agendamento|consulta|marca[çc][ãa]o|reserva)(?![\p{L}])/iu;
+  /(vou|estou|irei|já\s+(vou|estou))\s+(te\s+)?(transferir|transferindo|passar|passando|encaminhar|encaminhando|chamar|chamando|acionar|acionando|avisar|avisando|pedir)(?![\p{L}])|j[áa]\s+(te\s+)?(avisei|acionei|pedi|passei|chamei|transferi|notifiquei|encaminhei)(?![\p{L}])|(foi|foram)\s+(acionad|notificad|avisad)[oa]s?(?![\p{L}])|(uma\s+)?(atendente|colega|pessoa\s+da\s+equipe)\s+(vai|ir[áa])\s+(te\s+)?(atender|responder|continuar|ajudar|falar)(?![\p{L}])|nossa\s+equipe\s+(vai|ir[áa])\s+(te\s+)?(atender|responder|entrar\s+em\s+contato|continuar)(?![\p{L}])|vou\s+(verificar|confirmar|checar|conferir|ver)\s+(isso\s+)?com\s+(a\s+)?(nossa\s+)?(equipe|atendente|recep[çc][ãa]o|colega)(?![\p{L}])|(nossa\s+)?equipe\s+j[áa]\s+est[áa]\s+(verificando|vendo|analisando|conferindo)(?![\p{L}])|j[áa]\s+te\s+(retorno|informo|respondo)(?![\p{L}])|te\s+retorno\s+(em\s+(breve|seguida|instantes)|assim\s+que|com\s+a\s+confirma)|vou\s+(finalizar|concluir|fechar|efetuar)\s+(o\s+|a\s+)?(seu\s+|sua\s+)?(agendamento|consulta|marca[çc][ãa]o|reserva)(?![\p{L}])|vou\s+(verificar|checar|consultar|buscar|procurar|olhar|conferir)\s[^.!?\n]{0,80}\b(e\s+)?j[áa]\s+te\s+(apresento|passo|envio|mando|mostro)(?![\p{L}])/iu;
 
 // ─── CONVÊNIO NO TEXTO (17/08) ──────────────────────────────────────────────
 // Pedido do dono: "você continua marcando as consultas como particular. As
@@ -954,6 +975,23 @@ export function mensagemCitaHora(texto: unknown, hhmm: unknown): boolean {
  * "1040h", "às 9"/"as 9". Nunca lê dia ("28/09"), CPF ou telefone. Hora fora de
  * 6h–21h é descartada (a clínica atende das 8h às 18h; margem para quem erra).
  */
+/**
+ * A HORA FOI ESCOLHIDA PELO PACIENTE? (27/10, Tati Cury: "especialista em mão, semana que
+ * vem" + CPF → cadastro → "Seu agendamento foi confirmado… 04/11 às 08:20", um horário que
+ * ela nunca viu: a lista tinha sido montada e suprimida pelo anti-responso). Vale a hora
+ * dita em qualquer mensagem dela nas últimas horas ("15:40", "as 16,00", "9;40") ou a da
+ * vaga que a lista de espera ofereceu ("Abriu uma vaga com…" — o aceite é "quero").
+ * Replay de 30 dias: 137 de 138 marcações da Julia tinham a hora dita pelo paciente; a única
+ * que não tinha é a da Tati.
+ */
+export function horaEscolhidaPeloPaciente(textosDoPaciente: string[], textosDaJulia: string[], hhmm: string): boolean {
+  const h = String(hhmm || "").trim();
+  if (!/^\d{1,2}:\d{2}$/.test(h)) return false;
+  const alvo = h.padStart(5, "0");
+  const doPaciente = textosDoPaciente.some((t) => mensagemCitaHora(t, alvo) || horaDoTexto(t) === alvo);
+  return doPaciente || textosDaJulia.some((t) => /Abriu uma vaga com/.test(String(t || "")) && mensagemCitaHora(t, alvo));
+}
+
 export function horaDoTexto(texto: unknown): string | null {
   const t = stripAccents(String(texto || "").toLowerCase());
   const ok = (h: number, m: number): string | null =>
@@ -2295,14 +2333,20 @@ export function textoPrecoDaConsulta(preco: string): string {
 // modelo disse "já deixei a equipe avisada" sem avisar ninguém. Aviso de atraso sem
 // pergunta nem pedido recebe um texto pronto e verdadeiro.
 const _ATRASO_RE =
-  /\b((vou|vamos|devo|irei|iremos|vai|vamos\s+nos)\s+(chegar|me\s+atrasar|atrasar)|atrasad[oa]s?|atraso|chego\s+(em|daqui|umas?|uns|às|as|j[aá])|(muito|bastante|um\s+pouco\s+de)\s+tr[aâ]nsito|(estou|est[aá]|to|tô|preso)\s+(no\s+|num\s+|muito\s+)?tr[aâ]nsito|(estou|to|tô)\s+a\s+caminho)\b/iu;
+  /\b((me\s+)?atrasarei|(me\s+)?atrasaremos|(vou|vamos|devo|irei|iremos|vai|vamos\s+nos)\s+(chegar|me\s+atrasar|atrasar)|atrasad[oa]s?|atraso|chego\s+(em|daqui|umas?|uns|às|as|j[aá])|(muito|bastante|um\s+pouco\s+de)\s+tr[aâ]nsito|(estou|est[aá]|to|tô|preso)\s+(no\s+|num\s+|muito\s+)?tr[aâ]nsito|(estou|to|tô)\s+a\s+caminho)\b/iu;
+// Volta da consulta (27/10, Renato: "Acabei de sair daí… Mas está muito trânsito pra eu
+// voltar" recebeu "vou passar para a recepção confirmar se dá para te atender nesse horário").
+const _VOLTA_DA_CONSULTA_RE =
+  /\b(pra|para)\s+(eu\s+|a\s+gente\s+)?voltar\b|\bacabei\s+de\s+sair\b|\bj[aá]\s+sa[ií]\b|\bsa[ií]\s+(da[ií]|de\s+l[aá]|agora|agorinha)\b|\bdepois\s+da\s+consulta\b/iu;
 const _ATRASO_NAO_E_AVISO_RE =
   /\?|\b(remarc|desmarc|cancel|reagend|antecip|adiant|outro\s+hor[aá]rio|mais\s+tarde|n[aã]o\s+(vou|vamos|irei)\s+(conseguir|poder)|n[aã]o\s+conseguirei|n[aã]o\s+consigo|gostaria\s+de\s+saber|queria\s+saber|ser[aá]\s+que|caso\s+eu|me\s+atende)/iu;
 
 export function ehAvisoDeAtraso(texto: unknown): boolean {
   const t = String(texto ?? "").trim();
   if (!t || t.length > 200) return false;
-  if (_ATRASO_NAO_E_AVISO_RE.test(t)) return false;
+  // "Vou atrasar uns 20 min, tudo bem?" (27/10, Bruna Fialho) é aviso: o "?" é só cortesia
+  const semCortesia = t.replace(/[\s,.!]*(tudo\s+bem|ok|t[áa]\s+bom|beleza|sem\s+problema(s)?)\s*\?+\s*$/iu, "").trim();
+  if (_ATRASO_NAO_E_AVISO_RE.test(semCortesia) || _VOLTA_DA_CONSULTA_RE.test(t)) return false;
   return _ATRASO_RE.test(t);
 }
 
@@ -2463,6 +2507,17 @@ export function textoConsultaMantida(inicio: string, medico: string, hojeISO: st
   const quando = /^\d{4}-\d{2}-\d{2}$/.test(d) ? (d === hojeISO ? "hoje" : `${d.slice(8, 10)}/${d.slice(5, 7)}`) : "";
   const doc = String(medico || "").trim();
   return `Combinado! ✅ Sua consulta continua marcada${quando ? ` para ${quando}` : ""}${/^\d{2}:\d{2}$/.test(h) ? ` às ${h}` : ""}${doc ? ` com ${doc}` : ""}. Te esperamos! 😊`;
+}
+
+// CONFIRMAÇÃO COM A DATA DA CONSULTA, NÃO A DA CONVERSA (27/10, Ana Paula Franklin: pediu
+// 30/10, não havia vaga, escreveu "Manter o horário atual" → o PUT confirmou a consulta de
+// 03/11 11:00 e o modelo escreveu "sua consulta foi confirmada para 30/10/2026"). Texto pronto.
+export function textoConsultaConfirmada(inicio: string, medico: string, hojeISO: string): string {
+  const s = String(inicio || "").replace("T", " ");
+  const d = s.slice(0, 10), h = s.slice(11, 16);
+  const quando = /^\d{4}-\d{2}-\d{2}$/.test(d) ? (d === hojeISO ? "de hoje" : `de ${d.slice(8, 10)}/${d.slice(5, 7)}`) : "";
+  const doc = String(medico || "").trim();
+  return `Pronto! ✅ Sua consulta${quando ? ` ${quando}` : ""}${/^\d{2}:\d{2}$/.test(h) ? ` às ${h}` : ""}${doc ? ` com ${doc}` : ""} está confirmada. Te esperamos! 😊`;
 }
 
 export const TEXTO_CUMPRIMENTO_CURTO = "Oi de novo! 😊 Em que posso te ajudar?";
@@ -2642,6 +2697,7 @@ export function atrasoACaminho(texto: unknown): boolean {
   const aCaminho = falaDeAtraso(t) || (t.length <= 400 && /\b(estou|to|tô|t[oô])\s+(perto|chegando|quase\s+(chegando|a[ií]))\b|\bimprevisto\b[\s\S]{0,60}\b(perto|chego|chegar)\b|\bhor[áa]rio\s+que\s+(est[áa]\s+dando\s+que\s+)?chego\b/i.test(t));
   if (!aCaminho) return false;
   if (/\bse\s+n[ãa]o\s+houver\s+atraso|\bno\s+hor[áa]rio\b|\b(remarc|desmarc|cancel|reagend|marcar|agendar|pode\s+ser)/i.test(t)) return false;
+  if (_VOLTA_DA_CONSULTA_RE.test(t)) return false;
   return true;
 }
 

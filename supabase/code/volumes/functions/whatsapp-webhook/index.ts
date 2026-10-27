@@ -8,6 +8,7 @@ import {
   mensagemFalaDeDia,
   diaDaSemanaPedido,
   mensagemCitaHora,
+  horaEscolhidaPeloPaciente,
   TEXTO_SEM_CONSULTA_FUTURA,
   TEXTO_SEM_CONSULTA_PARA_CANCELAR,
   textoCpfNaoEncontrado,
@@ -128,6 +129,7 @@ import {
   recadoDoMedicoSemPedido,
   TEXTO_RECADO_DO_MEDICO,
   textoConsultaMantida,
+  textoConsultaConfirmada,
   citaConvenio,
   TEXTO_CUMPRIMENTO_CURTO,
   textoConfirmaPaciente,
@@ -240,6 +242,8 @@ import {
   avaliarEfetivoIV,
   textoEfetivoIV,
   EFETIVO_IV_MEDICO,
+  planoNotreDameNaoAtendido,
+  TEXTO_NOTRE_DAME_NAO_ATENDIDO,
 } from "./insurance.ts";
 // @ts-nocheck
 // TODO(FASE 2): remove this directive and address ~50 structural TS errors
@@ -3373,6 +3377,33 @@ async function registrarPosMarcacao(p: {
   }
 }
 
+// HORA QUE O PACIENTE NUNCA DISSE NÃO MARCA (27/10, Tati Cury — ver horaEscolhidaPeloPaciente).
+// Lê as falas das últimas 3 h da conversa (inclui as mensagens juntadas no lote).
+async function horaFoiDitaPeloPaciente(
+  supabaseClient: any,
+  conversationId: string | null | undefined,
+  mensagemAtual: string | null | undefined,
+  hhmm: string,
+): Promise<boolean> {
+  if (!supabaseClient || !conversationId) return true; // sem como conferir: não muda nada
+  try {
+    const { data } = await supabaseClient
+      .from("webhook_messages")
+      .select("message_text, direction")
+      .eq("conversation_id", conversationId)
+      .gte("created_at", new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString())
+      .order("created_at", { ascending: false })
+      .limit(80);
+    const linhas = (data || []) as Array<{ message_text: string | null; direction: string }>;
+    const doPaciente = [String(mensagemAtual || ""), ...linhas.filter((r) => r.direction === "incoming").map((r) => String(r.message_text || ""))];
+    const daJulia = linhas.filter((r) => r.direction === "outgoing").map((r) => String(r.message_text || ""));
+    return horaEscolhidaPeloPaciente(doPaciente, daJulia, hhmm);
+  } catch (e) {
+    console.log(`[HoraDoPaciente] conferência falhou (non-blocking): ${(e as Error).message}`);
+    return true;
+  }
+}
+
 async function executeAction(
   intent: string,
   entities: {
@@ -3996,6 +4027,12 @@ async function executeAction(
           console.log(
             `[Webhook] agendar - ⚠️ time="${entities.time}" extraído sem doctor_name/subspecialty — limpando para evitar commit prematuro`,
           );
+          entities.time = "";
+        }
+        // HORA QUE O PACIENTE NUNCA DISSE NÃO MARCA (27/10, Tati Cury): sem ela, o fluxo
+        // lista os horários do dia e a escolha é do paciente.
+        if (entities.time && !(await horaFoiDitaPeloPaciente(supabaseClient, conversationIdParam, currentMessageText, entities.time))) {
+          console.log(`[HoraDoPaciente] agendar - time="${entities.time}" que o paciente não disse — limpando (ele escolhe na lista)`);
           entities.time = "";
         }
         // CONSULTA PARA OUTRA PESSOA (23/09, caso Karina — ver consultaParaOutraPessoa em
@@ -7229,6 +7266,14 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         }
 
         // ── Helper: monta bloco VERIFIED_BOOKING a partir do attendance selecionado ──
+        // texto pronto com a data/hora/médico da consulta confirmada (27/10, Ana Paula Franklin)
+        const textoDaConfirmada = (att: Record<string, unknown> | null): string | null => {
+          if (!att) return null;
+          const _ini = String(att.start_date || att.date || "");
+          if (!/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(_ini)) return null;
+          const _doc = String(att.doctor_name || att.user_name || ((att.user as Record<string, unknown> | undefined)?.name) || "");
+          return textoConsultaConfirmada(_ini, _doc, getTodayISO_SP());
+        };
         const buildVerifiedBookingResponse = (att: Record<string, unknown> | null, prefix: string): string => {
           if (!att) return prefix;
           const userObj = att.user as Record<string, unknown> | undefined;
@@ -7245,9 +7290,11 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           const curStatus = String(selectedAtt.status || "").toLowerCase();
           if (curStatus === "confirmed" || curStatus === "confirmado") {
             console.log(`[Webhook] confirmar - attId=${attId} já está confirmado, pulando PUT`);
+            const _txtJa = textoDaConfirmada(selectedAtt);
             return {
               status: "success",
-              response: buildVerifiedBookingResponse(selectedAtt, `Agendamento ${attId} já estava confirmado.`),
+              response: _txtJa || buildVerifiedBookingResponse(selectedAtt, `Agendamento ${attId} já estava confirmado.`),
+              ...(_txtJa ? { bypassAiRewrite: true } : {}),
               verifiedSchedule: true,
             } as any;
           }
@@ -7310,9 +7357,11 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         }
 
         if (finalResult.status >= 200 && finalResult.status < 300) {
+          const _txtOk = textoDaConfirmada(selectedAtt);
           return {
             status: "success",
-            response: buildVerifiedBookingResponse(selectedAtt, `Agendamento ${attId} confirmado com sucesso.`),
+            response: _txtOk || buildVerifiedBookingResponse(selectedAtt, `Agendamento ${attId} confirmado com sucesso.`),
+            ...(_txtOk ? { bypassAiRewrite: true } : {}),
             verifiedSchedule: true,
           } as any;
         }
@@ -8436,6 +8485,17 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             }
           }
 
+          // HORA QUE O PACIENTE NUNCA DISSE NÃO MARCA (27/10, Tati Cury: o cadastro marcou
+          // 04/11 08:20 sem a paciente ver horário nenhum). Sem ela, cai na lista real abaixo.
+          if (entities.time && !(await horaFoiDitaPeloPaciente(supabaseClient, conversationIdParam, currentMessageText, entities.time))) {
+            console.log(`[HoraDoPaciente] cadastrar - time="${entities.time}" que o paciente não disse — sem marcação automática`);
+            entities.time = "";
+          }
+          // NOTRE DAME / HAPVIDA FORA DO 900/1000 NÃO MARCA (27/10, Stephane — insurance.ts)
+          if (entities.doctor_name && entities.date && entities.time && planoNotreDameNaoAtendido(`${entities.insurance_choice || ""} ${currentMessageText || ""}`)) {
+            console.log(`[Webhook] cadastrar - plano Notre Dame/Hapvida não atendido ("${String(entities.insurance_choice || "").slice(0, 40)}") — sem marcação, equipe`);
+            return { status: "needs_info", response: TEXTO_NOTRE_DAME_NAO_ATENDIDO, error: TEXTO_NOTRE_DAME_NAO_ATENDIDO, bypassAiRewrite: true, patientName: entities.patient_full_name } as any;
+          }
           // Auto-schedule if doctor_name, date, and time are already collected
           if (entities.doctor_name && entities.date && entities.time) {
             console.log("[Webhook] cadastrar - Auto-scheduling after registration...");
@@ -11305,11 +11365,15 @@ async function isHumanActive(
         // calado por esse handoff mais antigo. Quem estava conversando era a Julia.
         let _respondeAJulia = false;
         try {
+          // o aviso de 15 min ("seu pedido está com a nossa equipe…") não é fala da conversa:
+          // sem pular ele, a resposta à pergunta da Julia ficava calada horas (27/10, Umeda
+          // 22/10: pergunta 11h15, aviso 11h28, "segunda feira ou terça" 11h31 → equipe 15h53)
           const { data: _ultSaida } = await supabaseClient
             .from("webhook_messages")
             .select("created_at, ai_intent, action_status, message_text")
             .eq("conversation_id", conversationId)
             .eq("direction", "outgoing")
+            .not("ai_intent", "in", "(human_transfer_warning,confirmacao_insistencia,confirmacao_insistencia_ok)")
             .order("created_at", { ascending: false })
             .limit(1)
             .maybeSingle();
@@ -12625,7 +12689,7 @@ Deno.serve(async (req) => {
                     { patient_id: Number(r.patient_id), attendance_id: Number(r.attendance_id) },
                     true,
                   );
-                  console.log(`[Insistencia] PUT confirmed att=${r.attendance_id} -> ${res.status}`);
+                  console.log(`[Insistencia] PUT confirmed att=${r.attendance_id} -> ${res.status}${res.status >= 300 ? ` ${JSON.stringify(res.data ?? "").slice(0, 200)}` : ""}`);
                   (res.status >= 200 && res.status < 300 ? _ok : _falhou).push(r);
                 }
                 const _agoraIso = new Date().toISOString();
@@ -17588,6 +17652,19 @@ Deno.serve(async (req) => {
               // confirmar" + transferência, sem ela ter dito plano nenhum).
               if (!_vConv.ok && !pacienteCitouConvenio(_vConv.convenio, _ctxConv)) {
                 console.log(`[GuardConvenio] ${_vConv.convenio} não foi citado pelo paciente — lista informativa, segue`);
+                _vConv = { ok: true } as any;
+              }
+              // A RESPOSTA PRONTA JÁ RESOLVE (27/10, Alex Viamix): "Porto Seguro P320" →
+              // a guarda transferia (handoff) e, mais abaixo, a resposta virava "esse plano a
+              // clínica não atende… particular (R$ 500)… Quer que eu veja um horário?". O
+              // handoff calou o "Que horário você tem?" seguinte. Porto P220/P320/P470 e
+              // Bradesco Efetivo têm texto pronto sem fila — a guarda não transfere nesses.
+              const _intConv = String(classification.intent || "");
+              if (!_vConv.ok && ["consultar_convenios", "unknown"].includes(_intConv) && (
+                (_vConv.convenio === "Porto Seguro" && perguntaConvenioPortoSeguro(finalMessage || "") && !!portoPlanoNaoAtendido(finalMessage || "")) ||
+                (_vConv.convenio === "Bradesco" && perguntaBradescoEfetivo(finalMessage || ""))
+              )) {
+                console.log(`[GuardConvenio] ${_vConv.convenio}: resposta pronta sem fila logo abaixo — sem transferir`);
                 _vConv = { ok: true } as any;
               }
             } catch (e) {

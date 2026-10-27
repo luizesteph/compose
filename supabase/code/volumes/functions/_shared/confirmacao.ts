@@ -151,8 +151,10 @@ export function telefoneParaEnvio(celular: unknown, ddi: unknown): string | null
   const d = String(celular ?? "").replace(/\D/g, "");
   const cc = String(ddi ?? "55").replace(/\D/g, "") || "55";
   if (cc !== "55") return null; // fora do Brasil: fica com a equipe
-  if (d.length === 10 || d.length === 11) return `55${d}`;
-  if ((d.length === 12 || d.length === 13) && d.startsWith("55")) return d;
+  // só celular (11 dígitos com o 9): em 26/10 a mensagem foi para um fixo (Wolf Berger,
+  // 11 5093-…) — fixo não tem WhatsApp; fica como "sem celular" e a equipe liga
+  const n = d.length === 13 && d.startsWith("55") ? d.slice(2) : d;
+  if (n.length === 11 && n[2] === "9") return `55${n}`;
   return null;
 }
 
