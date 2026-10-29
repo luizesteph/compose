@@ -1166,6 +1166,32 @@ export function textoCpfNaoEncontrado(cpf?: unknown): string {
 const PEDE_MAIS_CEDO_RE =
   /\b(antes|mais\s+(cedo|pr[oó]xim[oa]s?|perto|r[aá]pido)|nada\s+(mais\s+)?cedo|primeir[oa]s?\s+(hor[aá]rio|data|vaga)|(essa|esta|nessa|nesta)\s+semana|hoje|amanh[aã]|urgente|s[oó]\s+(no\s+)?(fim|final)\s+do\s+m[eê]s|(t[aã]o|muito)\s+longe|demora)(?![\p{L}])/iu;
 
+// OUTROS MÉDICOS DA MESMA ÁREA (29/10, "Melhorias para a Julia" prioridade alta: Karina
+// pediu "antes do dia 31" e recebeu duas vezes a mesma lista do Dr. Cristian — a equipe
+// achou outro médico para o dia seguinte). Área = as partes do corpo da subespecialidade
+// ("Quadril, Pé e Tornozelo" → quadril, pe, tornozelo); "Geral" e nutrologia não contam.
+export function partesDaArea(sub: unknown): string[] {
+  return stripAccents(String(sub ?? "").toLowerCase())
+    .split(/,|\be\b|\//)
+    .map((p) => p.replace(/[^a-z ]/g, "").trim())
+    .filter((p) => p && p !== "geral" && !/nutrolog|performance/.test(p));
+}
+export function medicosDaMesmaArea<T extends { doctor_id: string; doctor_name: string; subspecialty: string | null; is_schedulable: boolean }>(
+  subDoAtual: unknown,
+  todos: T[],
+  idDoAtual: string,
+): T[] {
+  const area = new Set(partesDaArea(subDoAtual));
+  if (!area.size) return [];
+  return todos.filter((d) => d.is_schedulable && String(d.doctor_id) !== String(idDoAtual) && partesDaArea(d.subspecialty).some((p) => area.has(p)));
+}
+export function textoOutrosMedicosDaArea(achados: Array<{ medico: string; rotulo: string; slots: string[] }>): string {
+  if (!achados.length) return "";
+  return "\n\nCom outros médicos da mesma área, antes disso:\n" +
+    achados.map((a) => `• ${a.medico} — ${a.rotulo}: ${a.slots.join(", ")}`).join("\n") +
+    "\n\nSe algum servir, me diga o médico e o horário.";
+}
+
 export function pedeHorarioMaisCedo(texto: unknown): boolean {
   const t = typeof texto === "string" ? texto : "";
   if (!t.trim()) return false;
@@ -1405,6 +1431,7 @@ function somaDias(iso: string, n: number): string {
   const t = new Date(Date.UTC(y, m - 1, d) + n * 86400000);
   return isoDe(t.getUTCFullYear(), t.getUTCMonth() + 1, t.getUTCDate());
 }
+export const somaDiasISO = somaDias;
 function diaDaSemanaISO(iso: string): number {
   const [y, m, d] = partesISO(iso);
   return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
@@ -1496,7 +1523,10 @@ function ehAConsultaAtual(t: string, indice: number): boolean {
 export function janelaDeDatas(texto: unknown, hoje: string): JanelaDeDatas | null {
   const bruto = typeof texto === "string" ? texto : "";
   if (!bruto.trim() || !/^\d{4}-\d{2}-\d{2}$/.test(String(hoje))) return null;
-  const t = stripAccents(bruto.toLowerCase()).replace(/\s+/g, " ");
+  // "meu convênio mudará a partir do dia 31" é PRAZO, não início (29/10, Karina: a Julia
+  // mostrou "a partir de 31/10" e ela queria antes) — vira "antes do dia 31"
+  const t = stripAccents(bruto.toLowerCase()).replace(/\s+/g, " ")
+    .replace(/\b(convenio|plano|carteirinha)\b([^.!?]{0,40}?)\b(muda\w*|vai\s+mudar|venc\w*|acab\w*|termin\w*|troca\w*|expira\w*)\b([^.!?]{0,15}?)\ba\s+partir\s+d[oae]\b/, "$1$2$3$4antes do");
   const vazio: JanelaDeDatas = { inicio: null, fim: null, diasDaSemana: null, datas: null, qualquerData: false, rotulo: "", rotuloDias: "" };
 
   if (pedeQualquerData(bruto)) return { ...vazio, qualquerData: true };

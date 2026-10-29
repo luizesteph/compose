@@ -704,6 +704,44 @@ export function respondeAoLembreteDeConfirmacao(a: {
   return true;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// RESPOSTA A MENSAGEM AUTOMÁTICA É DA JULIA (29/10, pedido do dono — "Melhorias para a
+// Julia", prioridade alta, repetido desde 08/10). A regra de 20/10 (a equipe responde ao
+// lembrete) deixou Josi ("para semana que vem que horários teria?"), Isabella ("vou
+// precisar cancelar"), Dani ("vou precisar remarcar"), Geraldo ("Ok") e Felipe ("tirar o
+// nome da fila de espera") sem resposta em 28/10 — a equipe não respondeu nenhum. Agora a
+// resposta ao lembrete de confirmação e ao aviso da lista de espera passa pela Julia,
+// mesmo com dona na ficha, enquanto a conversa for dela: nenhuma fala da equipe e
+// nenhuma passagem para gente depois da mensagem automática.
+// ─────────────────────────────────────────────────────────────────────────────
+export const INTENCOES_AUTOMATICAS = ["confirmacao_insistencia", "waitlist_offer", "waitlist_nudge", "waitlist_expired"];
+
+export function ehMensagemAutomatica(m: { texto?: string | null; intent?: string | null }): boolean {
+  return INTENCOES_AUTOMATICAS.includes(String(m.intent || "")) || LEMBRETE_DE_CONFIRMACAO_RE.test(String(m.texto || ""));
+}
+
+export function conversaDaMensagemAutomatica(a: {
+  agoraMs: number;
+  hojeISO: string;
+  /** a mensagem automática mais recente da conversa (até 48 h) */
+  automatica: { texto: string; ms: number; intent: string } | null;
+  /** a última mensagem enviada na conversa */
+  ultimaSaida: { ms: number; manual: boolean; automatica: boolean } | null;
+  falaDaEquipeDepois: boolean;
+  passagemParaGenteDepois: boolean;
+}): boolean {
+  const m = a.automatica;
+  if (!m || !a.ultimaSaida || a.ultimaSaida.manual) return false;
+  if (a.falaDaEquipeDepois || a.passagemParaGenteDepois) return false;
+  if (!(a.agoraMs - m.ms <= 48 * 60 * 60 * 1000)) return false;
+  // lembrete de consulta que já passou não é mais confirmação
+  const d = /Dia:\s*(\d{2})\/(\d{2})\/(\d{4})/.exec(String(m.texto || ""));
+  if (d && `${d[3]}-${d[2]}-${d[1]}` < String(a.hojeISO || "")) return false;
+  // respondendo à automática, ou no meio da conversa que a Julia abriu com ela (≤ 60 min)
+  if (a.ultimaSaida.automatica) return true;
+  return a.agoraMs - a.ultimaSaida.ms <= 60 * 60 * 1000;
+}
+
 export function decidirResgate(a: {
   agoraMs: number;
   prazoMin: number;

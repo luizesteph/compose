@@ -9,6 +9,9 @@ import {
   diaDaSemanaPedido,
   mensagemCitaHora,
   horaEscolhidaPeloPaciente,
+  medicosDaMesmaArea,
+  textoOutrosMedicosDaArea,
+  somaDiasISO,
   TEXTO_SEM_CONSULTA_FUTURA,
   TEXTO_SEM_CONSULTA_PARA_CANCELAR,
   textoCpfNaoEncontrado,
@@ -194,6 +197,8 @@ import {
   JANELA_CASO_LONGO_DIAS,
   juliaPerguntouDepoisDoHandoff,
   respondeAoLembreteDeConfirmacao,
+  ehMensagemAutomatica,
+  conversaDaMensagemAutomatica,
   quandoAEquipeResponde,
   relogioDaGuarda,
 } from "../_shared/atendimento.ts";
@@ -5029,6 +5034,44 @@ async function executeAction(
           return dateStr;
         };
 
+        // OUTROS MÉDICOS DA MESMA ÁREA COM HORÁRIO NO PRAZO (29/10 — ver medicosDaMesmaArea).
+        // [ini, fim] inclusivo. Até 4 médicos em paralelo, 2 chamadas cada; erro = lista vazia.
+        const outrosMedicosDaAreaNoPrazo = async (idAtual: string, ini: string, fim: string, periodo?: string): Promise<string> => {
+          try {
+            if (!supabaseClient || !clinicTokenId || !idAtual || !ini || !fim || ini > fim) return "";
+            const { data: _ds } = await supabaseClient
+              .from("doctor_settings")
+              .select("doctor_id, doctor_name, subspecialty, is_schedulable")
+              .eq("clinic_token_id", clinicTokenId);
+            const _todos = (_ds || []) as Array<{ doctor_id: string; doctor_name: string; subspecialty: string | null; is_schedulable: boolean }>;
+            const _atual = _todos.find((d) => String(d.doctor_id) === String(idAtual));
+            const _outros = medicosDaMesmaArea(_atual?.subspecialty, _todos, idAtual).slice(0, 4);
+            if (!_outros.length) return "";
+            const _achados = await Promise.all(_outros.map(async (o) => {
+              try {
+                const _r = await tryFetch(`doctors/${o.doctor_id}/available-dates?event_id=${eventId}&place_id=${placeId}&company_id=${companyId}`, amigoToken);
+                const _arr = normalizeApiResponse(_r);
+                const _datas = (Array.isArray(_arr) ? (_arr as string[]) : []).map((d) => toIsoDate(String(d)).slice(0, 10))
+                  .filter((d) => d >= ini && d <= fim && !isWeekendISO(d)).sort();
+                for (const d of _datas.slice(0, 3)) {
+                  let _sl = (await fetchSlotsForDate(d, String(o.doctor_id), undefined, 0)).filter((t) => !slotJaPassou(d, t, agoraSP()));
+                  if (periodo === "manha") _sl = _sl.filter((t) => t < "12:00");
+                  if (periodo === "tarde") _sl = _sl.filter((t) => t >= "12:00");
+                  if (_sl.length) return { medico: String(o.doctor_name), data: d, rotulo: formatDateLabel(d), slots: _sl.slice(0, 4) };
+                }
+              } catch { /* um médico com erro não derruba os outros */ }
+              return null;
+            }));
+            const _ok = _achados.filter((a): a is { medico: string; data: string; rotulo: string; slots: string[] } => !!a)
+              .sort((a, b) => a.data.localeCompare(b.data)).slice(0, 3);
+            console.log(`[OutrosDaArea] ${_outros.length} médico(s) da área, ${_ok.length} com horário de ${ini} a ${fim}`);
+            return textoOutrosMedicosDaArea(_ok);
+          } catch (e) {
+            console.log(`[OutrosDaArea] falhou (non-blocking): ${(e as Error).message}`);
+            return "";
+          }
+        };
+
         // Helper: get weekday index (0=domingo) from DD/MM/YYYY or YYYY-MM-DD
         const getWeekday = (dateStr: string): number => {
           let d: number, m: number, y: number;
@@ -5371,6 +5414,20 @@ async function executeAction(
                         depoisDoPedido: _depoisDoPedido,
                       })
                     : header + body + footer;
+                  // Sem vaga no prazo pedido (janela não atendida) ou "tem antes?": os outros
+                  // médicos da mesma área que têm horário nesse prazo (29/10, Karina)
+                  let _outrosArea = "";
+                  {
+                    const _hojeOA = getTodayISO_SP();
+                    const _fimJanela = _jb ? (((_jb.datas || []) as string[]).slice().sort().pop() || _jb.fim || "") : "";
+                    const _janelaNaoAtendida = !!(_jb && _temPeriodo && (_nivel > 1 || _depoisDoPedido) && _fimJanela);
+                    const _pediuAntes = pedeHorarioMaisCedo(currentMessageText || "");
+                    if (doctorId && (_janelaNaoAtendida || _pediuAntes)) {
+                      const _ini = _janelaNaoAtendida ? (_jb!.inicio && _jb!.inicio > _hojeOA ? _jb!.inicio : _hojeOA) : _hojeOA;
+                      const _fim = _janelaNaoAtendida ? _fimJanela : somaDiasISO(datesWithSlots[0].date, -1);
+                      _outrosArea = await outrosMedicosDaAreaNoPrazo(String(doctorId), _ini, _fim, periodFilter);
+                    }
+                  }
                   console.log(`[Webhook] Returning ${datesWithSlots.length} dates with slots${_jb ? ` (janela nível ${_nivel})` : ""}`);
                   // Lock presented slots (1 min TTL) to prevent them from being taken while patient decides
                   if (supabaseClient && clinicTokenId && doctorId) {
@@ -5383,7 +5440,8 @@ async function executeAction(
                     );
                   }
                   // níveis 2 e 3 explicam o que não tem — vão literais, sem reescrita
-                  return { status: "needs_info", response: fullMsg, error: fullMsg, verifiedSchedule: true, bypassAiRewrite: _nivel > 1 || !!_avisoDia } as any;
+                  const _msgFinal = _outrosArea ? fullMsg.replace(/\n\nQual data e horário prefere\?\s*$/, "") + _outrosArea : fullMsg;
+                  return { status: "needs_info", response: _msgFinal, error: _msgFinal, verifiedSchedule: true, bypassAiRewrite: _nivel > 1 || !!_avisoDia || !!_outrosArea } as any;
                 } else {
                   // Dates exist but no slots found from bulk fetch — fetch individually per date
                   const top5 = filteredIso.filter((d: string) => !isWeekendISO(d)).slice(0, 5);
@@ -5787,6 +5845,25 @@ async function executeAction(
               }
             }
 
+            // NUNCA "NÃO TEM" SEM A PRÓXIMA DATA (29/10, Andreia: "amanhã tem após as 18h30?" →
+            // "não tem nos próximos 7 dias. Gostaria de tentar outro dia?", sem data nenhuma; o
+            // Dr. Luiz tinha 09/11 e 11/11). Sem nada em 7 dias, as próximas datas da agenda dele.
+            let _alemDos7 = false;
+            if (nextDays.length === 0 && doctorId) {
+              try {
+                const _rAd = await tryFetch(`doctors/${doctorId}/available-dates?event_id=${eventId}&place_id=${placeId}&company_id=${companyId}`, amigoToken);
+                const _arrAd = normalizeApiResponse(_rAd);
+                const _datasAd = (Array.isArray(_arrAd) ? (_arrAd as string[]) : []).map((d) => toIsoDate(String(d)).slice(0, 10))
+                  .filter((d) => d > entities.date && !isWeekendISO(d)).sort().slice(0, 6);
+                for (const d of _datasAd) {
+                  if (nextDays.length >= 3) break;
+                  const _sl = await fetchSlotsForDate(d, doctorId);
+                  if (_sl.length > 0) nextDays.push({ date: d, label: formatDateLabel(d), slots: _sl.slice(0, 4) });
+                }
+                _alemDos7 = nextDays.length > 0;
+              } catch (_) { /* non-blocking */ }
+            }
+
             if (nextDays.length > 0) {
               const lines = nextDays.map((d) => `${d.label}: ${d.slots.join(", ")}`).join("\n");
               // TOM (reclamação do dono, 11/08: "você está respondendo de forma
@@ -5804,7 +5881,11 @@ async function executeAction(
                 ((_jDia65.datas || []) as string[]).includes(entities.date) ||
                 ((_jDia65.diasDaSemana || []) as number[]).includes(new Date(`${entities.date}T12:00:00`).getDay())
               );
-              const altMsg = _ofereciEsse
+              const _outros65 = await outrosMedicosDaAreaNoPrazo(String(doctorId || ""), entities.date, somaDiasISO(nextDays[0].date, -1), entities.preferred_period || undefined);
+              const altMsg = _alemDos7
+                ? `Em ${dateLabel} ${doctorName} não tem horário livre, nem nos 7 dias seguintes. As próximas datas que ele tem:\n${lines}` +
+                  (_outros65 || "\n\nAlguma delas te atende? Se quiser, também te coloco na *lista de espera* para avisar se abrir uma vaga antes.")
+                : _ofereciEsse
                 ? textoHorarioPreenchido(dateLabel, String(entities.time || ""), doctorName, lines)
                 : _diaPedido65
                 ? `Em ${dateLabel} ${doctorName} não tem horário livre. Estas são as próximas datas que ele tem:\n${lines}\n\nAlguma delas te atende?`
@@ -5814,13 +5895,15 @@ async function executeAction(
               return { status: "needs_info", response: altMsg, error: altMsg, verifiedSchedule: true, bypassAiRewrite: true } as any;
             }
 
-            return {
-              status: "needs_info",
-              response: "",
-              error: `Sem horários com ${doctorName} em ${dateLabel} nem nos próximos 7 dias.`,
-              internal_instruction:
-                "Informe que não há disponibilidade nem na data pedida nem nos próximos 7 dias com este médico, e pergunte se deseja tentar outro profissional. NÃO invente horários.",
-            };
+            // agenda dele sem nada aberto: os outros da mesma área nas próximas 3 semanas, ou a
+            // lista de espera — texto literal, nunca "quer tentar outro dia?" sem opção (29/10)
+            {
+              const _outrosSem = await outrosMedicosDaAreaNoPrazo(String(doctorId || ""), entities.date, somaDiasISO(entities.date, 21), entities.preferred_period || undefined);
+              const _msgSem = `Não encontrei horário livre com ${doctorName} em ${dateLabel} nem nas próximas semanas — a agenda dele ainda não abriu mais datas.` +
+                (_outrosSem || "\n\nSe quiser, te coloco na *lista de espera* dele: se abrir uma vaga, te aviso por aqui.");
+              // o `error` mantém a frase que a Regra 7 conta como negativa de horário
+              return { status: "needs_info", response: _msgSem, error: `Sem horários com ${doctorName} em ${dateLabel} nem nos próximos 7 dias.`, verifiedSchedule: !!_outrosSem, bypassAiRewrite: true } as any;
+            }
           }
           console.log(`[Webhook] Step 6.5: Time ${entities.time} validated OK in slots [${realSlots.join(",")}]`);
         }
@@ -12127,6 +12210,9 @@ Deno.serve(async (req) => {
     // Ver decidirResgate em _shared/atendimento.ts.
     const _resgateBruto = (payload as any)?.__resgate;
     let _resgate: { ids: string[]; texto: string; desde: string } | null = null;
+    // resposta a mensagem automática (lembrete de confirmação, aviso da lista de espera):
+    // é da Julia mesmo com dona na ficha (29/10 — ver conversaDaMensagemAutomatica)
+    let _respostaAutomatica = false;
     if (_resgateBruto) {
       if (!chamadaDeCronAutorizada(req, Deno.env.get("CRON_SECRET"), Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"))) {
         console.log("[Resgate] __resgate sem o segredo do cron — recusado");
@@ -12735,39 +12821,57 @@ Deno.serve(async (req) => {
       }
     }
 
-    // === RESPOSTA À CONFIRMAÇÃO DA CONSULTA (20/10, pedido do dono) ===
-    // A clínica manda "você tem um atendimento agendado… Responda somente: SIM… NÃO…".
-    // Quem responde a isso fala com a equipe — a Julia não entra. Só urgência clínica
-    // segue o fluxo. O resgate da mensagem parada também não pega estas (decidirResgate).
+    // === RESPOSTA A MENSAGEM AUTOMÁTICA É DA JULIA (29/10, pedido do dono) ===
+    // Era (20/10): resposta ao lembrete de confirmação → "a equipe responde", e a Julia
+    // calava. Em 28/10 a equipe não respondeu nenhuma (Josi, Isabella, Dani, Geraldo; e o
+    // Felipe, que pediu para sair da lista de espera). Agora a Julia responde — remarcar,
+    // cancelar, sair da lista —, mesmo com dona na ficha, enquanto a equipe não tiver
+    // falado nem a Julia passado o caso para gente depois da mensagem automática.
     if (conversationId && !(payload as any)?.__resgate) {
       try {
-        const { data: _ultSaidaConf } = await supabase
+        const _desde48 = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+        const { data: _saidas } = await supabase
           .from("webhook_messages")
-          .select("message_text, created_at")
+          .select("message_text, created_at, ai_intent")
           .eq("conversation_id", conversationId)
           .eq("direction", "outgoing")
+          .gte("created_at", _desde48)
           .lt("created_at", (msgRecord as any).created_at)
           .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-        const _ehRespConf = respondeAoLembreteDeConfirmacao({
-          ultimaSaida: _ultSaidaConf ? { texto: String(_ultSaidaConf.message_text || ""), ms: Date.parse(String(_ultSaidaConf.created_at)) } : null,
-          agoraMs: Date.now(),
-          hojeISO: getTodayISO_SP(),
-        });
-        if (_ehRespConf && classificarUrgencia(String(messageStr || "")) !== "clinica") {
-          console.log(`[Confirmacao] resposta ao lembrete de confirmação da consulta — a equipe responde`);
-          await supabase
-            .from("webhook_messages")
-            .update({ action_status: "skipped", action_error: "Resposta à confirmação da consulta — a equipe responde" })
-            .eq("id", messageId);
-          return new Response(JSON.stringify({ status: "skipped", reason: "resposta_a_confirmacao" }), {
-            status: 200,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          .limit(40);
+        const _lista = (_saidas || []) as Array<{ message_text: string | null; created_at: string; ai_intent: string | null }>;
+        const _auto = _lista.find((r) => ehMensagemAutomatica({ texto: r.message_text, intent: r.ai_intent }));
+        if (_auto) {
+          const _autoMs = Date.parse(String(_auto.created_at));
+          const _ult = _lista[0];
+          const _falaEquipe = _lista.some((r) => r.ai_intent === "manual_reply" && Date.parse(String(r.created_at)) > _autoMs);
+          const { count: _passagens } = await supabase
+            .from("transfer_audit")
+            .select("id", { count: "exact", head: true })
+            .eq("conversation_id", conversationId)
+            .eq("initiated_by", "julia")
+            .not("trigger", "in", FILTRO_GATILHOS_SEM_MOVIMENTO)
+            .gt("created_at", String(_auto.created_at));
+          _respostaAutomatica = conversaDaMensagemAutomatica({
+            agoraMs: Date.now(),
+            hojeISO: getTodayISO_SP(),
+            automatica: { texto: String(_auto.message_text || ""), ms: _autoMs, intent: String(_auto.ai_intent || "") },
+            ultimaSaida: _ult
+              ? {
+                ms: Date.parse(String(_ult.created_at)),
+                manual: _ult.ai_intent === "manual_reply",
+                automatica: ehMensagemAutomatica({ texto: _ult.message_text, intent: _ult.ai_intent }),
+              }
+              : null,
+            falaDaEquipeDepois: _falaEquipe,
+            passagemParaGenteDepois: (_passagens || 0) > 0,
           });
+          if (_respostaAutomatica) {
+            console.log(`[MensagemAutomatica] resposta a ${String(_auto.ai_intent || "lembrete")} de ${String(_auto.created_at).slice(11, 16)}Z — a Julia responde (sem a guarda de humano)`);
+          }
         }
       } catch (e) {
-        console.log(`[Confirmacao] check error (non-blocking): ${(e as Error).message}`);
+        console.log(`[MensagemAutomatica] check error (non-blocking): ${(e as Error).message}`);
       }
     }
 
@@ -13616,7 +13720,7 @@ Deno.serve(async (req) => {
         }
       }
       let _atrasoSobAtendente = false;
-      if (!_resgate) {
+      if (!_resgate && !_respostaAutomatica) {
         const payloadTicketSec = payload.ticket as Record<string, unknown> | undefined;
         if (payloadTicketSec && String(payloadTicketSec.status || "") === "pending" && payloadTicketSec.isCreated) {
           console.log(
@@ -15927,6 +16031,46 @@ Deno.serve(async (req) => {
             }
           } catch (e) {
             console.log(`[CpfRecovery] error (non-blocking): ${(e as Error).message}`);
+          }
+        }
+
+        // === CPF DA CONSULTA DA CONFIRMAÇÃO (29/10) ===
+        // Quem responde à confirmação automática ("vou precisar remarcar para a semana que
+        // vem") já tem a consulta identificada: o CPF sai do cadastro guardado do paciente
+        // dela (local_patients pelo patient_id), e o remarcar/cancelar segue sem pedir CPF.
+        if (_respostaAutomatica && clinicTokenId && phone && !classification.cpf &&
+          ["reagendar", "cancelar", "confirmar", "consultar"].includes(String(classification.intent || ""))) {
+          try {
+            const _kc = chaveDoTelefone(phone);
+            if (_kc) {
+              const { data: _ci } = await supabase
+                .from("confirmacao_insistencia")
+                .select("patient_id, data_consulta")
+                .eq("clinic_token_id", clinicTokenId)
+                .eq("telefone_chave", _kc)
+                .gt("attendance_id", 0)
+                .gte("data_consulta", getTodayISO_SP())
+                .not("enviada_em", "is", null)
+                .order("enviada_em", { ascending: false })
+                .limit(1)
+                .maybeSingle();
+              if (_ci?.patient_id) {
+                const { data: _lp } = await supabase
+                  .from("local_patients")
+                  .select("cpf")
+                  .eq("amigo_patient_id", String(_ci.patient_id))
+                  .not("cpf", "is", null)
+                  .limit(1)
+                  .maybeSingle();
+                const _cpfConsulta = String(_lp?.cpf || "").replace(/\D/g, "");
+                if (_cpfConsulta && isValidCpf(_cpfConsulta)) {
+                  classification.cpf = _cpfConsulta;
+                  console.log(`[MensagemAutomatica] CPF da consulta de ${_ci.data_consulta} (paciente ${_ci.patient_id}) — ${classification.intent} sem pedir CPF`);
+                }
+              }
+            }
+          } catch (e) {
+            console.log(`[MensagemAutomatica] CPF da consulta: erro (non-blocking): ${(e as Error).message}`);
           }
         }
 
@@ -18660,7 +18804,7 @@ Deno.serve(async (req) => {
           // ── REVALIDATE TICKET before sending AI reply ──
           // No resgate o ticket AINDA pode estar "open" com a atendente calada — é
           // justamente o caso que o resgate existe para atender (o cron conferiu o prazo).
-          if (!_resgate && avanceaiBaseUrl && avanceaiApiId && avanceaiBearerToken && phone) {
+          if (!_resgate && !_respostaAutomatica && avanceaiBaseUrl && avanceaiApiId && avanceaiBearerToken && phone) {
             const replyTicketCheck = await checkTicketIsHumanOwned(
               avanceaiBaseUrl,
               avanceaiApiId,

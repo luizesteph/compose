@@ -299,6 +299,9 @@ export function ehSimDeConfirmacao(texto: unknown): boolean {
     .replace(/\s+/g, " ")
     .trim();
   if (!t) return /^(?:👍|👍🏻|👍🏼|👍🏽|👍🏾|👍🏿|✅|☑️)+$/u.test(bruto.replace(/\s+/g, ""));
+  // "Ok", "pode deixar", "combinado" à mensagem de confirmação = SIM (29/10, pedido do dono:
+  // Geraldo respondeu "Ok" e ficou sem confirmar). Só a mensagem inteira — "ok, vou ver" não.
+  if (/^(?:(?:oi|ola|bom dia|boa tarde|boa noite)\s+)?(?:ok|okay|okey|okk+|pode deixar|combinado|certo|beleza|blz|ta bom|ta certo|perfeito|fechado|positivo)(?:\s+(?:obrigad[oa]|obg|grat[oa]|valeu|ate amanha|estarei la))*$/.test(t)) return true;
   if (/\b(nao|n|remarc\w*|cancel\w*|desmarc\w*|adiar|adiant\w*|antecip\w*|mudar|trocar|outro|outra|atras\w*|mas|porem|so que|infelizmente|nem)\b/.test(t)) return false;
   return /^(?:(?:ok|okay|ola|oi|bom dia|boa tarde|boa noite)\s+)?(?:sim|s|ss|siim+|confirmo|confirmado|confirmada|confirmar|pode confirmar|esta confirmado|ta confirmado|confirmadissimo)\b/.test(t) ||
     /^(?:vou sim|estarei la|estarei presente|irei sim|vou estar la|presenca confirmada|com certeza)\b/.test(t);
@@ -312,7 +315,10 @@ export function ehSimDeConfirmacao(texto: unknown): boolean {
  * gentileza" cancela; "Remarcar" e "Vou precisar remarcar a consulta" ficam com a equipe.
  */
 export function ehCancelamentoClaro(texto: unknown): boolean {
-  const bruto = String(texto ?? "").trim();
+  // a saudação na frente não muda o pedido: "Olá tudo bom? Vou precisar cancelar" (29/10, Isabella)
+  const bruto = String(texto ?? "").trim()
+    .replace(/^(?:oi+|ol[aá]|bom\s+dia|boa\s+tarde|boa\s+noite)[\s,!.]*(?:(?:tudo|td)\s+(?:bem|bom|certo|joia|jóia)[\s,!.?]*)?/iu, "")
+    .trim();
   if (!bruto || bruto.length > 80 || bruto.includes("?")) return false;
   const t = bruto
     .toLowerCase()
