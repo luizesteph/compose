@@ -15819,7 +15819,7 @@ Deno.serve(async (req) => {
         // Vale para o telefone que está em Liberados sem nada marcado, mesmo sem a palavra
         // "infiltração" na conversa. O telefone pode ser de um parente: errar aqui só leva a
         // mensagem para uma atendente, nunca marca nada.
-        if (["agendar", "cadastrar", "unknown"].includes(classification.intent) && clinicTokenId && phone) {
+        if (["agendar", "cadastrar", "unknown", "solicitar_infiltracao"].includes(classification.intent) && clinicTokenId && phone) {
           try {
             const _chaveLib = chaveDoTelefone(phone);
             const { data: _libs } = await supabase
@@ -15847,7 +15847,7 @@ Deno.serve(async (req) => {
               })) {
                 console.log(`[Webhook] ⛔ LIBERADO: '${classification.intent}' de paciente com infiltração liberada vai para a atendente`);
                 classification.intent = "solicitar_infiltracao";
-                classification.entities = { ...(classification.entities || {}), liberado_infiltracao: true };
+                (classification as any).liberado_infiltracao = true;
               }
             }
           } catch (e) {
@@ -17134,6 +17134,8 @@ Deno.serve(async (req) => {
           // Nome do WhatsApp e "sim" à pergunta "A consulta é para X, certo?" (07/10, Roberto)
           nome_whatsapp: name || "",
           paciente_confirmado: !!(classification as any).paciente_confirmado,
+          // Infiltração liberada no PDF Visco (30/10): não pedir documento de novo
+          liberado_infiltracao: (classification as any).liberado_infiltracao === true,
           // Quem está com a ficha no Z-PRO agora (07/10): só esse nome pode ser citado
           dona_do_ticket: String((payload as any)?.ticket?.status || "") === "open" ? String((payload as any)?.ticket?.user?.name || "") : "",
         } as any,

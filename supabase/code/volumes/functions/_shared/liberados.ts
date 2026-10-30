@@ -339,6 +339,9 @@ export function liberadoVaiParaAtendente(a: {
   respondendoAoAviso: boolean;
   soAgradecimento: boolean;
 }): boolean {
+  // a guarda das 72 h já vira "pode ser amanhã?" em solicitar_infiltracao: aqui só marca que
+  // ele foi liberado, senão a resposta pede carteirinha e laudo (Andreia, 30/10)
+  if (a.intent === "solicitar_infiltracao") return true;
   if (a.soAgradecimento) return false;
   if (a.intent === "agendar" || a.intent === "cadastrar") return true;
   return a.intent === "unknown" && a.respondendoAoAviso;
