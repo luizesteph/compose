@@ -39,7 +39,7 @@ import {
   relatorioNoDia,
   ultimoEnvioDoPlano,
   JANELA_INICIO_MIN,
-  ehDomingo,
+  diaDeRepescagem,
   precisaDeRepescagem,
   esperaConfirmacao,
   itemDaConsulta,
@@ -250,7 +250,7 @@ async function processarClinica(supabase: any, clinic: any, simular: boolean, fo
   // ── 1b. REPESCAGEM DE DOMINGO (22/10) ───────────────────────────────────────
   // A sexta planejou as consultas de segunda. No domingo, uma vez (marca attendance_id = -2),
   // quem ainda não confirmou e não respondeu nada depois da mensagem de sexta volta para a fila.
-  if (ehDomingo(hojeISO) && jaPlanejado && !simular && !foraDaJanela && modo === "on") {
+  if (diaDeRepescagem(hojeISO) && jaPlanejado && !simular && !foraDaJanela && modo === "on") {
     const { data: marcaDom } = await supabase.from("confirmacao_insistencia").select("id")
       .eq("clinic_token_id", clinic.id).eq("data_consulta", alvo).eq("attendance_id", -2).maybeSingle();
     if (!marcaDom) {

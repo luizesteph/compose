@@ -98,8 +98,9 @@ export function proximoDiaUtil(hojeISO: string): string {
  */
 export function janelaAberta(hojeISO: string, minutosDoDia: number): boolean {
   const dw = diaDaSemana(hojeISO);
-  // sábado nunca; domingo é a REPESCAGEM das consultas de segunda (pedido do dono, 22/10)
-  if (dw === 6 || ehFeriado(hojeISO)) return false;
+  // sábado nunca; domingo/feriado só no dia da REPESCAGEM (véspera da consulta — 22/10 e 29/10)
+  if (dw === 6) return false;
+  if ((dw === 0 || ehFeriado(hojeISO)) && !diaDeRepescagem(hojeISO)) return false;
   return minutosDoDia >= JANELA_INICIO_MIN && minutosDoDia < JANELA_FIM_ATRASO_MIN;
 }
 
@@ -113,7 +114,8 @@ export function janelaAberta(hojeISO: string, minutosDoDia: number): boolean {
  * foi enviado hoje (envio extraordinário, como o de 24/10).
  */
 export function relatorioNoDia(hojeISO: string, houveEnvioHoje: boolean): boolean {
-  return (diaDaSemana(hojeISO) !== 6 && !ehFeriado(hojeISO)) || houveEnvioHoje;
+  const dw = diaDaSemana(hojeISO);
+  return houveEnvioHoje || diaDeRepescagem(hojeISO) || (dw >= 1 && dw <= 5 && !ehFeriado(hojeISO));
 }
 
 export const RELATORIO_ESPERA_ATE_MIN = 19 * 60 + 40;
@@ -130,6 +132,18 @@ export function relatorioDeveEsperar(statusDasLinhas: string[], minutosDoDia: nu
  */
 export function ehDomingo(hojeISO: string): boolean {
   return diaDaSemana(hojeISO) === 0;
+}
+
+/**
+ * Dia da repescagem: dia sem atendimento (domingo ou feriado) que é a VÉSPERA da próxima
+ * consulta. Domingo normal → segunda. Feriado de segunda 02/11 (pedido do dono, 29/10: "a
+ * repescagem vai ser na segunda"): a sexta manda para a terça, o domingo 01/11 fica quieto
+ * e a repescagem é na segunda 02/11.
+ */
+export function diaDeRepescagem(hojeISO: string): boolean {
+  const dw = diaDaSemana(hojeISO);
+  if (dw !== 0 && !ehFeriado(hojeISO)) return false;
+  return somaDias(proximoDiaUtil(hojeISO), -1) === hojeISO;
 }
 
 /** Na repescagem: a linha de sexta ainda pede mensagem? (status + o paciente não respondeu depois) */
