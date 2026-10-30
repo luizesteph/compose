@@ -4,6 +4,7 @@
 // Corpo opcional, com o segredo do cron:
 //   {"agenda_mes":"2026-10"}                   varre um mês da agenda do Amigo para o índice
 //   {"conferir":[{"nome":"…","medico":"…"}]}   conta como os nomes casariam, sem gravar
+//   {"so_casar":true}                          procura no Amigo quem já está na lista, sem ler o PDF Visco
 //
 // Erro ao ler o PDF Visco não mexe na lista: só resposta boa tira alguém de lá.
 
@@ -143,7 +144,7 @@ async function sincronizar(supabase: any, clinica: any) {
         medicamento: l.medication,
         quantidade: l.quantity,
         data_exame: l.exam_date,
-        validade_guia: l.expiration_date,
+        validade_guia: l.validade_guia,
         liberado_em: l.liberado_em,
         liberado_por: l.liberado_por_email,
         ativo: true,
@@ -171,6 +172,15 @@ async function sincronizar(supabase: any, clinica: any) {
       .in("id", sairam.map((n: any) => n.id));
   }
 
+  const casados = await casarPendentes(
+    supabase,
+    clinica,
+    (nossos || []).filter((n: any) => naLista.has(String(n.liberacao_id))),
+  );
+  return { visco: lista.length, sairam: sairam.length, casados };
+}
+
+async function casarPendentes(supabase: any, clinica: any, linhas: any[]): Promise<number> {
   // agenda fresca antes de casar: o paciente pode ter passado aqui hoje
   const { data: recente } = await supabase
     .from("amigo_agenda")
@@ -185,12 +195,12 @@ async function sincronizar(supabase: any, clinica: any) {
   }
 
   const limite = Date.now() - NOVA_TENTATIVA_MS;
-  const aCasar = (nossos || [])
-    .filter((n: any) => naLista.has(String(n.liberacao_id)))
+  const aCasar = linhas
     .filter((n: any) => n.casamento === "pendente" || (n.casamento !== "exato" && (Date.parse(n.casado_em ?? "") || 0) < limite))
     .slice(0, MAX_CASAR_POR_RODADA);
-  if (!aCasar.length) return { visco: lista.length, sairam: sairam.length, casados: 0 };
+  if (!aCasar.length) return 0;
 
+  const agora = new Date().toISOString();
   const agenda = prepararAgenda(await agendaInteira(supabase, clinica.id));
   for (const n of aCasar) {
     const r = casarPaciente(n.paciente_nome, n.medico_nome, agenda);
@@ -215,7 +225,7 @@ async function sincronizar(supabase: any, clinica: any) {
       .eq("id", n.id);
     if (error) console.error(`[Liberados] gravar casamento: ${error.message}`);
   }
-  return { visco: lista.length, sairam: sairam.length, casados: aCasar.length };
+  return aCasar.length;
 }
 
 Deno.serve(async (req) => {
@@ -253,6 +263,20 @@ Deno.serve(async (req) => {
       }
     }
     return json({ ok: true, contagem });
+  }
+
+  if (corpo?.so_casar === true) {
+    const saida: Record<string, number> = {};
+    for (const c of clinicas || []) {
+      const { data, error: e } = await supabase
+        .from("infiltracao_liberados")
+        .select("id, casamento, casado_em, paciente_nome, medico_nome")
+        .eq("clinic_token_id", c.id)
+        .eq("ativo", true);
+      if (e) return json({ error: e.message }, 500);
+      saida[c.id] = await casarPendentes(supabase, c, data || []);
+    }
+    return json({ ok: true, saida });
   }
 
   const resumo: unknown[] = [];
