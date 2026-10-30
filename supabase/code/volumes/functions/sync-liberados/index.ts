@@ -10,7 +10,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 import { chamadaDeCronAutorizada } from "../_shared/cron.ts";
-import { casarPaciente, convenioDaFicha, linhasDaAgenda, type LinhaDaAgenda } from "../_shared/liberados.ts";
+import { casarPaciente, convenioDaFicha, linhasDaAgenda, prepararAgenda, type LinhaDaAgenda } from "../_shared/liberados.ts";
 
 const AMIGO = "https://amigobot-api.amigoapp.com.br";
 const TAMANHO_DO_LOTE = 500;
@@ -191,7 +191,7 @@ async function sincronizar(supabase: any, clinica: any) {
     .slice(0, MAX_CASAR_POR_RODADA);
   if (!aCasar.length) return { visco: lista.length, sairam: sairam.length, casados: 0 };
 
-  const agenda = await agendaInteira(supabase, clinica.id);
+  const agenda = prepararAgenda(await agendaInteira(supabase, clinica.id));
   for (const n of aCasar) {
     const r = casarPaciente(n.paciente_nome, n.medico_nome, agenda);
     const ficha = r.amigo_patient_id ? await fichaDoAmigo(clinica.token, r.amigo_patient_id) : null;
@@ -244,8 +244,9 @@ Deno.serve(async (req) => {
   if (Array.isArray(corpo?.conferir)) {
     const contagem: Record<string, number> = {};
     for (const c of clinicas || []) {
-      const agenda = await agendaInteira(supabase, c.id);
-      if (!agenda.length) continue;
+      const linhas = await agendaInteira(supabase, c.id);
+      if (!linhas.length) continue;
+      const agenda = prepararAgenda(linhas);
       for (const p of corpo.conferir) {
         const r = casarPaciente(String(p?.nome ?? ""), String(p?.medico ?? ""), agenda);
         contagem[r.casamento] = (contagem[r.casamento] || 0) + 1;

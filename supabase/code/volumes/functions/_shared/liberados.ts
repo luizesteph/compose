@@ -57,7 +57,7 @@ export function medicoChave(t: unknown): string {
     .join(" ");
 }
 
-const mesmoNome = (a: string[], b: string[]) => a.length > 0 && [...a].sort().join(" ") === [...b].sort().join(" ");
+const chaveDoNome = (tokens: string[]) => [...tokens].sort().join(" ");
 
 function distancia(a: string, b: string): number {
   let ant = Array.from({ length: b.length + 1 }, (_, j) => j);
@@ -127,12 +127,46 @@ function porPessoa(linhas: LinhaDaAgenda[]): Map<number, LinhaDaAgenda[]> {
 const comOMedico = (linhas: LinhaDaAgenda[], medico: string) =>
   linhas.filter((l) => l.realizada && medicoChave(l.medico_nome) === medico);
 
-export function casarPaciente(nomeGuia: string, medicoGuia: string, agenda: LinhaDaAgenda[]): ResultadoDoCasamento {
+export interface AgendaPreparada {
+  porNome: Map<string, LinhaDaAgenda[]>;
+  porMedico: Map<string, Array<{ linha: LinhaDaAgenda; tokens: string[] }>>;
+}
+
+/** normaliza a agenda UMA vez: são ~15 mil linhas, e refazer isso por paciente estoura a CPU da função */
+export function prepararAgenda(linhas: LinhaDaAgenda[]): AgendaPreparada {
+  const a: AgendaPreparada = { porNome: new Map(), porMedico: new Map() };
+  const chaveDoMedico = new Map<string, string>();
+  for (const linha of linhas) {
+    const tokens = tokensDoNome(linha.nome);
+    const nome = chaveDoNome(tokens);
+    const lista = a.porNome.get(nome);
+    if (lista) lista.push(linha);
+    else a.porNome.set(nome, [linha]);
+    const bruto = String(linha.medico_nome ?? "");
+    let medico = chaveDoMedico.get(bruto);
+    if (medico === undefined) {
+      medico = medicoChave(bruto);
+      chaveDoMedico.set(bruto, medico);
+    }
+    if (!linha.realizada) continue;
+    const doMedico = a.porMedico.get(medico);
+    if (doMedico) doMedico.push({ linha, tokens });
+    else a.porMedico.set(medico, [{ linha, tokens }]);
+  }
+  return a;
+}
+
+export function casarPaciente(
+  nomeGuia: string,
+  medicoGuia: string,
+  agenda: LinhaDaAgenda[] | AgendaPreparada,
+): ResultadoDoCasamento {
   const alvo = tokensDoNome(nomeGuia);
   const medico = medicoChave(medicoGuia);
   if (!alvo.length) return SEM_ACHADO;
+  const preparada = Array.isArray(agenda) ? prepararAgenda(agenda) : agenda;
 
-  const iguais = agenda.filter((l) => mesmoNome(alvo, tokensDoNome(l.nome)));
+  const iguais = preparada.porNome.get(chaveDoNome(alvo)) ?? [];
   if (iguais.length) {
     const pessoas = [...porPessoa(iguais).values()];
     if (pessoas.length === 1) {
@@ -152,7 +186,7 @@ export function casarPaciente(nomeGuia: string, medicoGuia: string, agenda: Linh
   }
 
   // nome só parecido vale apenas entre os pacientes do médico da guia
-  const parecidos = agenda.filter((l) => l.realizada && medicoChave(l.medico_nome) === medico && nomeParecido(alvo, tokensDoNome(l.nome)));
+  const parecidos = (preparada.porMedico.get(medico) ?? []).filter((x) => nomeParecido(alvo, x.tokens)).map((x) => x.linha);
   if (!parecidos.length) return SEM_ACHADO;
   const pessoas = [...porPessoa(parecidos).values()];
   if (pessoas.length > 1) return AMBIGUO(pessoas.length);
