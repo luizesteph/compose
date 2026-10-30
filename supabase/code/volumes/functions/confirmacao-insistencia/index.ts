@@ -38,6 +38,7 @@ import {
   relatorioDeveEsperar,
   relatorioNoDia,
   ultimoEnvioDoPlano,
+  JANELA_INICIO_MIN,
   ehDomingo,
   precisaDeRepescagem,
   esperaConfirmacao,
@@ -272,7 +273,7 @@ async function processarClinica(supabase: any, clinic: any, simular: boolean, fo
       });
       const emConversa = await telefonesEmConversa(supabase, clinic.id, HORAS_EM_CONVERSA);
       const marcouAgora = await telefonesQueMarcaramAgora(supabase, clinic.id, HORAS_MARCOU_AGORA);
-      const inicio = Math.max(Date.now() + 60000, msDeHojeSP(hojeISO, 16 * 60));
+      const inicio = Math.max(Date.now() + 60000, msDeHojeSP(hojeISO, JANELA_INICIO_MIN));
       const plano = montarPlano(candidatas, emConversa, marcouAgora, inicio, fimDoPlano(hojeISO, inicio), clinic.confirmacao_insistencia_so_medico || null);
       const resumo = resumoDoPlano(plano);
       // linhas de sexta voltam para 'agendada' (enviada_em zera); as novas entram
@@ -302,7 +303,7 @@ async function processarClinica(supabase: any, clinic: any, simular: boolean, fo
     if (!consultas) return { clinica: clinic.id, erro: "amigo_indisponivel" };
     const emConversa = await telefonesEmConversa(supabase, clinic.id, HORAS_EM_CONVERSA);
     const marcouAgora = await telefonesQueMarcaramAgora(supabase, clinic.id, HORAS_MARCOU_AGORA);
-    const inicio = Math.max(Date.now() + 60000, msDeHojeSP(hojeISO, 16 * 60));
+    const inicio = Math.max(Date.now() + 60000, msDeHojeSP(hojeISO, JANELA_INICIO_MIN));
     const plano = montarPlano(consultas, emConversa, marcouAgora, inicio, fimDoPlano(hojeISO, inicio), clinic.confirmacao_insistencia_so_medico || null);
     const resumo = resumoDoPlano(plano);
     console.log(`[Insistencia] plano ${alvo} modo=${modo}${simular ? " (simulação)" : ""}: ${JSON.stringify(resumo)}`);

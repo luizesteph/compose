@@ -1,8 +1,8 @@
 // _shared/confirmacao.ts — insistência da confirmação da consulta (20/10/2026, pedido do dono).
 //
 // O lembrete "você tem um atendimento agendado… Responda somente: SIM/NÃO" sai de
-// outro mecanismo, de manhã. Quem não respondeu até a tarde recebe, entre 16h e
-// 18h do dia anterior à consulta, uma segunda mensagem — uma por paciente,
+// outro mecanismo, de manhã. Quem não respondeu até a tarde recebe, entre 13h e
+// 15h do dia anterior à consulta, uma segunda mensagem — uma por paciente,
 // espaçada (tudo junto o WhatsApp bloqueia a linha). "SIM" a ela confirma a
 // consulta no Amigo (PUT /attendances/confirmed); qualquer outra resposta fica
 // com a equipe, como a resposta ao lembrete da manhã.
@@ -14,9 +14,10 @@
 //
 // Funções puras: o cron (confirmacao-insistencia) e o webhook usam as mesmas.
 
-export const JANELA_INICIO_MIN = 16 * 60; // 16:00
-export const JANELA_FIM_MIN = 18 * 60; // 18:00 — fim da janela num dia normal
-export const ULTIMO_ENVIO_MIN = 17 * 60 + 55; // folga de 5 min antes do fim
+// 29/10 (pedido do dono): o envio começa às 13h (era 16h–17h55), com a mesma duração.
+export const JANELA_INICIO_MIN = 13 * 60; // 13:00
+export const JANELA_FIM_MIN = 15 * 60; // 15:00 — fim da janela num dia normal
+export const ULTIMO_ENVIO_MIN = 14 * 60 + 55; // folga de 5 min antes do fim
 /**
  * Plano atrasado (23/10, pedido do dono: "não pode acontecer isso"): o servidor caiu
  * das 15h31 às 17h46, o plano só saiu às 17h56 e as 44 consultas de segunda ficaram
@@ -76,21 +77,29 @@ function somaDias(iso: string, n: number): string {
   return t.toISOString().slice(0, 10);
 }
 
-/** Próximo dia útil (seg–sex) depois de hoje. Sexta → segunda. */
+/**
+ * Feriados em que a clínica não atende (pedido do dono, 29/10: "segunda é feriado… manda
+ * amanhã para as consultas de terça; na segunda não manda nada"). Dia de feriado não é
+ * dia útil: a véspera mira o dia seguinte a ele e no feriado não sai nada.
+ */
+export const FERIADOS = new Set<string>(["2026-11-02"]);
+export const ehFeriado = (iso: string) => FERIADOS.has(iso);
+
+/** Próximo dia útil (seg–sex, fora feriado) depois de hoje. Sexta → segunda. */
 export function proximoDiaUtil(hojeISO: string): string {
   let d = somaDias(hojeISO, 1);
-  while (diaDaSemana(d) === 0 || diaDaSemana(d) === 6) d = somaDias(d, 1);
+  while (diaDaSemana(d) === 0 || diaDaSemana(d) === 6 || ehFeriado(d)) d = somaDias(d, 1);
   return d;
 }
 
 /**
- * A janela de envio está aberta? (dom–sex, 16:00–19:29 em SP). Num dia normal o plano
+ * A janela de envio está aberta? (dom–sex fora feriado, 13:00–19:29 em SP). Num dia normal o plano
  * termina às 17h55 e nada sai depois; o resto da janela só serve ao plano atrasado (23/10).
  */
 export function janelaAberta(hojeISO: string, minutosDoDia: number): boolean {
   const dw = diaDaSemana(hojeISO);
   // sábado nunca; domingo é a REPESCAGEM das consultas de segunda (pedido do dono, 22/10)
-  if (dw === 6) return false;
+  if (dw === 6 || ehFeriado(hojeISO)) return false;
   return minutosDoDia >= JANELA_INICIO_MIN && minutosDoDia < JANELA_FIM_ATRASO_MIN;
 }
 
@@ -104,7 +113,7 @@ export function janelaAberta(hojeISO: string, minutosDoDia: number): boolean {
  * foi enviado hoje (envio extraordinário, como o de 24/10).
  */
 export function relatorioNoDia(hojeISO: string, houveEnvioHoje: boolean): boolean {
-  return diaDaSemana(hojeISO) !== 6 || houveEnvioHoje;
+  return (diaDaSemana(hojeISO) !== 6 && !ehFeriado(hojeISO)) || houveEnvioHoje;
 }
 
 export const RELATORIO_ESPERA_ATE_MIN = 19 * 60 + 40;
