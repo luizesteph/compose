@@ -74,6 +74,8 @@ export function montarRelatorio(
 
   const conf = comId.filter((x) => x.l.status === "confirmada").sort(ordena);
   const canc = comId.filter((x) => x.l.status === "cancelada").sort(ordena);
+  // remarcada pela Julia na resposta à mensagem (29/10): a nova data vai no motivo
+  const remarc = comId.filter((x) => x.l.status === "remarcada").sort(ordena);
   const comEquipe = comId.filter((x) => x.l.status === "enviada" && equipeJaFalou?.has(x.id)).sort(ordena);
   const semEquipe = (x: { id: string }) => !equipeJaFalou?.has(x.id);
   // disse SIM (ou pediu para cancelar) e o Amigo recusou: confirmar/cancelar à mão (27/10, Renata —
@@ -87,12 +89,20 @@ export function montarRelatorio(
   const out: string[] = [];
   out.push(`*Confirmação das consultas de ${ddmm(linhas[0].data_consulta)}* (envio de ${ddmm(diaEnvioISO)})`);
   out.push(
-    `• Sem confirmação às 16h: ${linhas.length} · mensagens enviadas: ${enviadas} · confirmadas pelo SIM: ${conf.length}` +
+    `• Sem confirmação às 13h: ${linhas.length} · mensagens enviadas: ${enviadas} · confirmadas pelo SIM: ${conf.length}` +
       ` · já confirmadas antes do envio: ${linhas.filter((l) => l.status === "ja_confirmada").length}` +
-      ` · canceladas: ${canc.length} · sem mensagem: ${semMsg.length}`,
+      ` · canceladas: ${canc.length}${remarc.length ? ` · remarcadas: ${remarc.length}` : ""} · sem mensagem: ${semMsg.length}`,
   );
   if (conf.length) out.push("", "*✅ Confirmaram pelo SIM* (já registrado no Amigo)", ...conf.map((x) => item(x.l)));
   if (canc.length) out.push("", "*❌ Canceladas depois da mensagem* (já canceladas no Amigo)", ...canc.map((x) => (resp(x.id) ? `${item(x.l)} — disse: "${resp(x.id)}"` : item(x.l))));
+  if (remarc.length) {
+    const nova = (m: string | null | undefined) => {
+      const r = String(m || "").match(/(\d{4})-(\d{2})-(\d{2})\s*(\d{2}:\d{2})?/);
+      return r ? `${r[3]}/${r[2]}${r[4] ? ` às ${r[4]}` : ""}` : "";
+    };
+    out.push("", "*🔁 Remarcadas pela Julia* (já remarcadas no Amigo)", ...remarc.map((x) =>
+      `${item(x.l)}${nova(x.l.motivo) ? ` → ${nova(x.l.motivo)}` : ""}${resp(x.id) ? ` — disse: "${resp(x.id)}"` : ""}`));
+  }
   if (recusou.length) {
     out.push("", "*❗ O Amigo não aceitou — fazer à mão*", ...recusou.map((x) =>
       `${item(x.l)} — ${x.l.status === "falhou_cancelar" ? "pediu para CANCELAR" : "disse SIM (confirmar)"}${resp(x.id) ? `: "${resp(x.id)}"` : ""}`));

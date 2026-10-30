@@ -369,3 +369,62 @@ export function medicoDoFiltro(nomeMedico: unknown, filtro: string | null | unde
   const nome = n(nomeMedico);
   return f.split(" ").every((p) => nome.includes(p));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REMARCAR NA RESPOSTA À CONFIRMAÇÃO (29/10, pedido do dono: "muitos pacientes, na hora
+// da confirmação, falam 'Quero remarcar' ou 'Não vou conseguir'… já entra, já dá as
+// próximas datas… tentar reverter"). De 20 a 29/10, 19 respostas assim; até 29/10 a Julia
+// pedia CPF (60% das consultas não têm CPF guardado), perguntava "é essa?" ou cancelava
+// (Silvia, 29/10: "Não conseguirei ir" → CPF → consulta cancelada, sem oferta de outra data).
+// Agora a consulta já é a da mensagem (attendance_id), e a primeira resposta são os
+// próximos horários do mesmo médico.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const _semAcento = (s: unknown) => String(s ?? "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")
+  .replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
+
+/**
+ * A resposta à confirmação pede para remarcar ou avisa que não vai? ("Remarcar", "preciso
+ * remarcar", "Não conseguirei ir", "não vou poder comparecer", "tive um imprevisto").
+ * Pedido de cancelar/desmarcar fica fora (segue o cancelamento); atraso é o webhook que exclui.
+ */
+export function querRemarcarNaConfirmacao(texto: unknown): boolean {
+  const bruto = String(texto ?? "").trim();
+  if (!bruto || bruto.length > 300) return false;
+  const t = _semAcento(bruto);
+  if (/\b(cancel\w*|desmarc\w*)\b/.test(t)) return false;
+  if (/\b(remarc\w*|reagend\w*|adiar|outro dia|outra data|outro horario|outra semana)\b/.test(t)) return true;
+  if (/\b(mudar|trocar|alterar|transferir)\b.{0,20}\b(data|dia|horario|consulta)\b/.test(t)) return true;
+  // atraso não é falta: "não vou conseguir chegar no horário, chego 9h15" fica com o aviso de atraso
+  if (/\b(atras\w*|chego|chegarei|no horario|a tempo|transito|minutos?|min)\b/.test(t)) return false;
+  if (/\bimprevisto\b/.test(t)) return true;
+  // ausência: "não vou conseguir (ir)", "não poderei comparecer", "não consigo ir", "não vai dar"
+  return /\b(nao|n)\s+(?:vou|vai|irei|poderei|conseguirei|consigo|posso|podera|conseguira|estarei)\s+(?:(?:conseguir|poder|mais)\s+)?(?:ir|comparecer|vir|estar|chegar|dar|conseguir|poder)\b/.test(t) ||
+    /\b(nao|n)\s+(?:vou|irei)\s+(?:conseguir|poder)\s*$/.test(t);
+}
+
+/** "29/10 às 10:20" a partir de "2026-10-29 10:20" (hora local, ver CLAUDE.md). */
+function dataHoraLegivel(inicio: string): string {
+  const d = String(inicio || "").replace("T", " ");
+  const iso = d.slice(0, 10), hh = d.slice(11, 16);
+  return /^\d{4}-\d{2}-\d{2}$/.test(iso) ? `${ddmm(iso)}${/^\d{2}:\d{2}$/.test(hh) ? ` às ${hh}` : ""}` : "";
+}
+
+/** Marca da primeira resposta (o turno seguinte reconhece a escolha do horário por ela). */
+export const MARCA_REMARCAR_DA_CONFIRMACAO = "Vamos remarcar a sua consulta";
+
+/** Cabeçalho da lista de horários para quem respondeu à confirmação pedindo outra data. */
+export function cabecalhoRemarcarDaConfirmacao(consultaAtual: string, medico: string): string {
+  const q = dataHoraLegivel(consultaAtual);
+  return `Sem problema! ${MARCA_REMARCAR_DA_CONFIRMACAO}${q ? ` de ${q}` : ""} com ${medico || "o médico"}. ` +
+    `Estes são os próximos horários livres:\n\n`;
+}
+export const RODAPE_REMARCAR_DA_CONFIRMACAO =
+  "\n\nQual data e horário fica melhor? Se nenhum servir, me diga o dia ou o período que eu procuro. Se preferir só cancelar, é só me dizer.";
+
+/** Resposta depois de remarcar no Amigo. */
+export function textoRemarcadaDaConfirmacao(dataISO: string, hora: string, medico: string): string {
+  const iso = String(dataISO || "").slice(0, 10);
+  return `Pronto! ✅ Remarquei sua consulta para ${/^\d{4}-\d{2}-\d{2}$/.test(iso) ? ddmm(iso) : dataISO}` +
+    `${hora ? ` às ${hora}` : ""}${medico ? ` com ${medico}` : ""}. Te esperamos! 😊`;
+}

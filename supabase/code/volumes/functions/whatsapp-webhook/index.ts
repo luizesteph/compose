@@ -202,7 +202,7 @@ import {
   quandoAEquipeResponde,
   relogioDaGuarda,
 } from "../_shared/atendimento.ts";
-import { chaveDoTelefone, ehSimDeConfirmacao, ehCancelamentoClaro, textoConfirmado, textoCancelado, HORAS_VALIDADE_DO_SIM } from "../_shared/confirmacao.ts";
+import { chaveDoTelefone, ehSimDeConfirmacao, ehCancelamentoClaro, textoConfirmado, textoCancelado, HORAS_VALIDADE_DO_SIM, querRemarcarNaConfirmacao, cabecalhoRemarcarDaConfirmacao, MARCA_REMARCAR_DA_CONFIRMACAO, RODAPE_REMARCAR_DA_CONFIRMACAO, textoRemarcadaDaConfirmacao } from "../_shared/confirmacao.ts";
 import { canalVivo, enviarTexto } from "../_shared/zpro.ts";
 import { LLM_MODEL, LLM_MODEL_FALLBACK, LLM_MODEL_RESPOSTA, LLM_GATEWAY, ehErroDeModeloDesconhecido, llmApiKey, llmHeaders, LLM_USAGE_INCLUDE, custoDaChamada } from "../_shared/llm.ts";
 import { STT_ENDPOINT, STT_MODEL, STT_LANGUAGE, STT_RESPONSE_FORMAT, sttApiKey } from "../_shared/stt.ts";
@@ -7727,17 +7727,22 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             let origEventId = "";
             let origPlaceId = "";
 
-            if (entities.cpf) {
-              const cleanCpf = entities.cpf.replace(/\D/g, "");
-              const patRes = await tryFetch(
-                `patients/exists?cpf=${cleanCpf}&company_id=${companyId}`,
-                amigoToken,
-                "GET",
-                undefined,
-                true,
-              );
-              const patObj = normalizeApiResponse(patRes) as Record<string, unknown>;
-              const patientId = patObj?.id || patObj?.patient_id;
+            // a consulta da confirmação já traz o paciente (29/10): sem CPF, sem patients/exists
+            const _pidConsulta = /^\d+$/.test(String((entities as any).patient_id_da_consulta || "")) ? String((entities as any).patient_id_da_consulta) : "";
+            if (entities.cpf || _pidConsulta) {
+              let patientId: unknown = _pidConsulta;
+              if (!patientId) {
+                const cleanCpf = entities.cpf.replace(/\D/g, "");
+                const patRes = await tryFetch(
+                  `patients/exists?cpf=${cleanCpf}&company_id=${companyId}`,
+                  amigoToken,
+                  "GET",
+                  undefined,
+                  true,
+                );
+                const patObj = normalizeApiResponse(patRes) as Record<string, unknown>;
+                patientId = patObj?.id || patObj?.patient_id;
+              }
               if (patientId) {
                 const attRes = await tryFetch(`attendances/${patientId}?company_id=${companyId}`, amigoToken);
                 const attsArr = normalizeApiResponse(attRes) as Array<Record<string, unknown>>;
@@ -7989,13 +7994,16 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                   // No exact time — present real slots
                   const periodLabel =
                     periodFilter === "manha" ? " (manhã)" : periodFilter === "tarde" ? " (tarde)" : "";
-                  const header = _ehAConsultaAtual
+                  const _daConfirmacao = !!(entities as any).remarcar_da_confirmacao && !_semVagaNoPedido && (!entities.date || _ehAConsultaAtual);
+                  const header = _daConfirmacao
+                    ? cabecalhoRemarcarDaConfirmacao(origStart, origDoctorName)
+                    : _ehAConsultaAtual
                     ? `Essa é a data e o horário da sua consulta atual com ${origDoctorName || "o médico"}. Para mudar, estes são os horários reais disponíveis${periodLabel}:\n\n`
                     : _semVagaNoPedido
                       ? `Nas datas que você pediu não há horário livre com ${origDoctorName || "o médico"}${periodLabel}. Os próximos são:\n\n`
                       : `Confirmei aqui na agenda do ${origDoctorName || "médico"}${periodLabel}. Estes são os horários reais para reagendar:\n\n`;
                   const body = datesWithSlots.map((p) => `${p.label}: ${p.slots.join(", ")}`).join("\n");
-                  const footer = "\n\nQual data e horário prefere?";
+                  const footer = _daConfirmacao ? RODAPE_REMARCAR_DA_CONFIRMACAO : "\n\nQual data e horário prefere?";
                   const fullMsg = header + body + footer;
                   if (supabaseClient && clinicTokenId && origDoctorId) {
                     await lockPresentedSlots(supabaseClient, clinicTokenId, origDoctorId, datesWithSlots, senderPhone || "");
@@ -8005,6 +8013,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                     response: fullMsg,
                     error: fullMsg,
                     verifiedSchedule: true,
+                    ...(_daConfirmacao ? { bypassAiRewrite: true } : {}),
                     entities: { ...entities, attendance_id: attId, doctor_name: origDoctorName },
                   } as any;
                 }
@@ -8147,6 +8156,21 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               `não quero deixar você achando que mudou. 🙏 Já estou chamando uma atendente pra concluir essa aqui.`;
             console.log(`[Webhook] reagendar - ${_cpfsNaConversa.size} CPFs na conversa e só 1 atendimento remarcado — NÃO vou dizer "prontinho"`);
             return { status: "needs_info", response: _aviso, error: _aviso, bypassAiRewrite: true } as any;
+          }
+          // Remarcada na resposta à confirmação (29/10): texto pronto e a linha da confirmação
+          // vira 'remarcada' (o relatório do Slack mostra; a equipe não precisa ligar)
+          if ((entities as any).remarcar_da_confirmacao && supabaseClient) {
+            const _horaR = entities.time ? normalizeTimeToHHMM(entities.time) || entities.time : "";
+            try {
+              await supabaseClient.from("confirmacao_insistencia")
+                .update({ status: "remarcada", motivo: `remarcada para ${reschedIsoDate} ${_horaR}`.trim() })
+                .eq("id", String((entities as any).remarcar_da_confirmacao));
+            } catch (_e) { /* não bloqueia a resposta */ }
+            return {
+              status: "success",
+              response: textoRemarcadaDaConfirmacao(reschedIsoDate, _horaR, origDoctorName),
+              bypassAiRewrite: true,
+            } as any;
           }
           return {
             status: "success",
@@ -12672,14 +12696,17 @@ Deno.serve(async (req) => {
             .gte("data_consulta", getTodayISO_SP());
           if (Array.isArray(_insC) && _insC.length === 1) {
             const _envioMsC = Date.parse(String(_insC[0].enviada_em));
-            const { data: _falaDepoisC } = await supabase
+            // a lista de horários da própria Julia para remarcar (29/10) não conta: "pode
+            // cancelar" depois dela é o paciente recusando a troca, e o cancelamento claro vale
+            const { data: _falasDepoisC } = await supabase
               .from("webhook_messages")
-              .select("id")
+              .select("id, message_text")
               .eq("conversation_id", conversationId)
               .eq("direction", "outgoing")
               .gt("created_at", new Date(_envioMsC + 120000).toISOString())
               .lt("created_at", (msgRecord as any).created_at)
-              .limit(1);
+              .limit(20);
+            const _falaDepoisC = (_falasDepoisC || []).filter((m: any) => !String(m?.message_text || "").includes(MARCA_REMARCAR_DA_CONFIRMACAO));
             const { data: _clC } = await supabase
               .from("clinic_tokens")
               .select("token, avanceai_base_url, avanceai_api_id, avanceai_bearer_token, avanceai_active_channel")
@@ -16783,6 +16810,65 @@ Deno.serve(async (req) => {
         console.log("[Webhook] Skipping entity recovery — reset intent active");
       }
 
+      // === REMARCAR NA RESPOSTA À CONFIRMAÇÃO (29/10, pedido do dono) ===
+      // "Quero remarcar" / "Não vou conseguir ir" à mensagem de confirmação: a consulta é a da
+      // mensagem (attendance_id da confirmacao_insistencia) — sem CPF, sem "é essa?" — e a
+      // primeira resposta já são os próximos horários do mesmo médico. Na resposta seguinte
+      // ("dia 11 às 9h"), o classificador às vezes diz `agendar`: a última fala da Julia ter
+      // sido essa lista faz virar remarcar (nunca uma consulta nova por cima da antiga).
+      if (_respostaAutomatica && clinicTokenId && phone &&
+        ["reagendar", "cancelar", "agendar", "unknown", "confirmar", "consultar"].includes(String(classification.intent || ""))) {
+        try {
+          const _kr = chaveDoTelefone(phone);
+          const _txtR = String(finalMessage || "");
+          const { data: _ciR } = _kr
+            ? await supabase
+              .from("confirmacao_insistencia")
+              .select("id, attendance_id, patient_id, data_consulta, hora, medico_nome, status")
+              .eq("clinic_token_id", clinicTokenId)
+              .eq("telefone_chave", _kr)
+              .gt("attendance_id", 0)
+              .gte("data_consulta", getTodayISO_SP())
+              .in("status", ["enviada", "confirmada", "falhou_confirmar", "remarcada"])
+              .order("enviada_em", { ascending: false })
+              .limit(1)
+              .maybeSingle()
+            : { data: null };
+          if (_ciR?.attendance_id) {
+            let _continua = false;
+            if (["agendar", "unknown"].includes(String(classification.intent || "")) && (classification.date || classification.time || horaDoTexto(_txtR))) {
+              const { data: _ultR } = await supabase
+                .from("webhook_messages")
+                .select("message_text, ai_intent, created_at")
+                .eq("conversation_id", conversationId)
+                .eq("direction", "outgoing")
+                .order("created_at", { ascending: false })
+                .limit(1)
+                .maybeSingle();
+              _continua = !!_ultR && _ultR.ai_intent === "reagendar" &&
+                Date.now() - Date.parse(String(_ultR.created_at)) < 60 * 60 * 1000 &&
+                /hor[áa]rios? (?:livres|reais|dispon[ií]veis)|n[ãa]o est[áa] livre/i.test(String(_ultR.message_text || ""));
+            }
+            const _pedeR = querRemarcarNaConfirmacao(_txtR) && !ehAvisoDeAtraso(_txtR);
+            if (classification.intent === "reagendar" || _pedeR || _continua) {
+              console.log(`[RemarcarConfirmacao] ${classification.intent} → reagendar da consulta ${_ciR.attendance_id} (${_ciR.data_consulta} ${_ciR.hora}) sem CPF nem "é essa?"`);
+              classification.intent = "reagendar";
+              classification.attendance_id = String(_ciR.attendance_id);
+              (classification as any).reagendar_confirmed = true;
+              (classification as any).patient_id_da_consulta = String(_ciR.patient_id || "");
+              (classification as any).remarcar_da_confirmacao = String(_ciR.id);
+              if (_pedeR && !_continua) {
+                // a data/hora que o classificador copiou é a da consulta atual, não um destino
+                const _d = normalizeDateToISO(String(classification.date || "")) || "";
+                if (_d === String(_ciR.data_consulta)) { classification.date = ""; classification.time = ""; }
+              }
+            }
+          }
+        } catch (e) {
+          console.log(`[RemarcarConfirmacao] erro (non-blocking): ${(e as Error).message}`);
+        }
+      }
+
       // Set conversationId for executeAction to use (esp. resetar_conversa)
       (globalThis as any).__currentConversationId = conversationId;
 
@@ -16998,6 +17084,9 @@ Deno.serve(async (req) => {
           // Período da lista de espera capturado deterministicamente (10/07)
           _waitlist_period_set: (classification as any)._waitlist_period_set,
           _waitlist_period_texto: (classification as any)._waitlist_period_texto,
+          // Remarcar na resposta à confirmação (29/10): consulta e paciente já conhecidos
+          patient_id_da_consulta: (classification as any).patient_id_da_consulta || "",
+          remarcar_da_confirmacao: (classification as any).remarcar_da_confirmacao || "",
           // Telefone no cadastro de outra pessoa (30/09): não buscar CPF pelo telefone
           sem_cpf_pelo_telefone: _telefoneDeOutraPessoa,
           // Nome do WhatsApp e "sim" à pergunta "A consulta é para X, certo?" (07/10, Roberto)
