@@ -714,7 +714,7 @@ export function respondeAoLembreteDeConfirmacao(a: {
 // mesmo com dona na ficha, enquanto a conversa for dela: nenhuma fala da equipe e
 // nenhuma passagem para gente depois da mensagem automática.
 // ─────────────────────────────────────────────────────────────────────────────
-export const INTENCOES_AUTOMATICAS = ["confirmacao_insistencia", "waitlist_offer", "waitlist_nudge", "waitlist_expired"];
+export const INTENCOES_AUTOMATICAS = ["confirmacao_insistencia", "waitlist_offer", "waitlist_nudge", "waitlist_expired", "liberado_aviso"];
 
 export function ehMensagemAutomatica(m: { texto?: string | null; intent?: string | null }): boolean {
   return INTENCOES_AUTOMATICAS.includes(String(m.intent || "")) || LEMBRETE_DE_CONFIRMACAO_RE.test(String(m.texto || ""));

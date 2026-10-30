@@ -202,6 +202,7 @@ import {
   quandoAEquipeResponde,
   relogioDaGuarda,
 } from "../_shared/atendimento.ts";
+import { liberadoVaiParaAtendente, INTENT_AVISO_DE_LIBERACAO } from "../_shared/liberados.ts";
 import { chaveDoTelefone, ehSimDeConfirmacao, ehCancelamentoClaro, textoConfirmado, textoCancelado, HORAS_VALIDADE_DO_SIM, querRemarcarNaConfirmacao, cabecalhoRemarcarDaConfirmacao, MARCA_REMARCAR_DA_CONFIRMACAO, RODAPE_REMARCAR_DA_CONFIRMACAO, textoRemarcadaDaConfirmacao } from "../_shared/confirmacao.ts";
 import { canalVivo, enviarTexto } from "../_shared/zpro.ts";
 import { LLM_MODEL, LLM_MODEL_FALLBACK, LLM_MODEL_RESPOSTA, LLM_GATEWAY, ehErroDeModeloDesconhecido, llmApiKey, llmHeaders, LLM_USAGE_INCLUDE, custoDaChamada } from "../_shared/llm.ts";
@@ -10782,7 +10783,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                   status: "transferred_infiltracao",
                   response: "Encaminhado para a fila de pendentes",
                   error:
-                    instrucaoDaInfiltracao(currentMessageText, "a Lidiane (ou atendente)"),
+                    instrucaoDaInfiltracao(currentMessageText, "a Lidiane (ou atendente)", entities?.liberado_infiltracao === true),
                 };
               }
             }
@@ -10796,7 +10797,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           status: "transferred_infiltracao",
           response: "",
           error:
-            instrucaoDaInfiltracao(currentMessageText, "uma atendente"),
+            instrucaoDaInfiltracao(currentMessageText, "uma atendente", entities?.liberado_infiltracao === true),
         };
       }
 
@@ -15549,7 +15550,8 @@ Deno.serve(async (req) => {
             // (C) Pergunta nossa REAL: outgoing nas últimas 2h, não manual_reply, com marca de pergunta
             const lastReal = (recentOuts || []).find((o) => {
               const ageMin = (Date.now() - new Date(o.created_at).getTime()) / 60000;
-              if (ageMin > 120) return false;
+              // "sim" ao aviso de infiltração liberada pode vir dias depois
+              if (ageMin > (o.ai_intent === INTENT_AVISO_DE_LIBERACAO ? 4320 : 120)) return false;
               if (o.ai_intent === "manual_reply") return false;
               const txt = (o.ai_response || o.message_text || "").trim();
               if (!txt) return false;
@@ -15811,6 +15813,46 @@ Deno.serve(async (req) => {
         if (classification.intent === "agendar" && temContextoDeInfiltracao(conversationHistory)) {
           console.log(`[Webhook] ⛔ GUARD INFILTRAÇÃO: contexto de infiltração em 72h — 'agendar' vira solicitar_infiltracao`);
           classification.intent = "solicitar_infiltracao";
+        }
+
+        // === INFILTRAÇÃO LIBERADA: A JULIA AVISA E NÃO MARCA (30/10, pedido do dono) ===
+        // Vale para o telefone que está em Liberados sem nada marcado, mesmo sem a palavra
+        // "infiltração" na conversa. O telefone pode ser de um parente: errar aqui só leva a
+        // mensagem para uma atendente, nunca marca nada.
+        if (["agendar", "cadastrar", "unknown"].includes(classification.intent) && clinicTokenId && phone) {
+          try {
+            const _chaveLib = chaveDoTelefone(phone);
+            const { data: _libs } = await supabase
+              .from("infiltracao_liberados")
+              .select("telefone")
+              .eq("clinic_token_id", clinicTokenId)
+              .eq("ativo", true)
+              .is("agendado_para", null)
+              .is("feita_em", null)
+              .not("telefone", "is", null);
+            if (_chaveLib && (_libs || []).some((l: any) => chaveDoTelefone(l.telefone) === _chaveLib)) {
+              const { data: _ultSaida } = conversationId
+                ? await supabase
+                  .from("webhook_messages")
+                  .select("ai_intent")
+                  .eq("conversation_id", conversationId)
+                  .eq("direction", "outgoing")
+                  .order("created_at", { ascending: false })
+                  .limit(1)
+                : { data: null };
+              if (liberadoVaiParaAtendente({
+                intent: classification.intent,
+                respondendoAoAviso: _ultSaida?.[0]?.ai_intent === INTENT_AVISO_DE_LIBERACAO,
+                soAgradecimento: isClosingThanks(finalMessage || ""),
+              })) {
+                console.log(`[Webhook] ⛔ LIBERADO: '${classification.intent}' de paciente com infiltração liberada vai para a atendente`);
+                classification.intent = "solicitar_infiltracao";
+                classification.entities = { ...(classification.entities || {}), liberado_infiltracao: true };
+              }
+            }
+          } catch (e) {
+            console.log(`[Webhook] Liberado check error (non-blocking): ${(e as Error).message}`);
+          }
         }
 
         // === CPF QUEBRADO NUNCA VAI PARA BUSCA (caso Renan 31/07) ===

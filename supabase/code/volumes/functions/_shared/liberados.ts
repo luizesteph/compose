@@ -233,3 +233,113 @@ export function convenioDaFicha(h: unknown): string | null {
   }
   return null;
 }
+
+// Depois da liberação (30/10/2026, pedido do dono): a Julia AVISA o paciente e não marca.
+// A infiltração é marcada por uma atendente ("Ele pode ligar também, já sabe o telefone da
+// clínica"). A tabela acompanha o resto: agendado vem do Amigo, feita é confirmada por gente.
+//
+// O Amigo não tem tipo "infiltração": a equipe marca como consulta com o médico da guia
+// (conferido em 30/10: Dr. Hugo 27/10 10:45 e Dr. Cristian 22/10 17:00, os dois com o horário
+// que a Lidiane e a Vânia escreveram ao paciente). Por isso "agendado" é atendimento não
+// cancelado com o médico da guia DEPOIS da liberação; uma consulta comum com ele também conta.
+
+export const TELEFONE_DA_CLINICA = "(11) 5044-3566";
+export const INTENT_AVISO_DE_LIBERACAO = "liberado_aviso";
+
+/** O GET /attendances recusa janela de mais de 90 dias (400 VALIDATION_ERROR em end_date) */
+export const AGENDA_DIAS_ANTES = 8;
+export const AGENDA_DIAS_DEPOIS = 80;
+
+const INICIO_DO_AVISO_MIN = 8 * 60 + 30;
+const FIM_DO_AVISO_MIN = 17 * 60 + 30;
+
+export function primeiroNome(nome: unknown): string {
+  const p = String(nome ?? "").trim().split(/\s+/)[0] ?? "";
+  return p ? p[0].toUpperCase() + p.slice(1).toLowerCase() : "";
+}
+
+export function textoAvisoDeLiberacao(nome: unknown, medicos: string[]): string {
+  const n = primeiroNome(nome);
+  const unicos = [...new Set(medicos.map((m) => String(m ?? "").trim()).filter(Boolean))];
+  const comQuem = unicos.length === 1 ? ` com ${unicos[0]}` : "";
+  return `Olá${n ? `, ${n}` : ""}! Aqui é da CBT Ortopedia. 😊 Sua infiltração${comQuem} foi liberada e você já pode agendar. ` +
+    `Quer marcar? É só responder por aqui que uma das nossas atendentes continua com você, ou, se preferir, ligar para ${TELEFONE_DA_CLINICA}.`;
+}
+
+/** 55 + DDD + celular com o 9; fixo não recebe WhatsApp */
+export function celularParaEnvio(tel: unknown): string | null {
+  let d = digitos(tel);
+  if ((d.length === 12 || d.length === 13) && d.startsWith("55")) d = d.slice(2);
+  return d.length === 11 && d[2] === "9" ? `55${d}` : null;
+}
+
+/** seg-sex, 8h30-17h30, fora de feriado: a resposta tem que encontrar a equipe na clínica */
+export function podeAvisarAgora(a: { diaDaSemana: number; minutos: number; feriado: boolean }): boolean {
+  if (a.feriado || a.diaDaSemana < 1 || a.diaDaSemana > 5) return false;
+  return a.minutos >= INICIO_DO_AVISO_MIN && a.minutos < FIM_DO_AVISO_MIN;
+}
+
+export interface LiberadoParaAviso {
+  casamento: string;
+  telefone: string | null;
+  validade_guia: string | null;
+  aviso_enviado_em: string | null;
+  agendado_para: string | null;
+  feita_em: string | null;
+}
+
+/** Só quem tem certeza de nome e médico, guia em dia e nada marcado ainda */
+export function recebeAviso(l: LiberadoParaAviso, hojeISO: string): boolean {
+  if (l.casamento !== "exato" || l.aviso_enviado_em || l.agendado_para || l.feita_em) return false;
+  if (!l.validade_guia || l.validade_guia.slice(0, 10) < hojeISO) return false;
+  return celularParaEnvio(l.telefone) !== null;
+}
+
+const horaLocalSP = (iso: string) =>
+  new Date(iso).toLocaleString("sv-SE", { timeZone: "America/Sao_Paulo" }).replace(" ", "T").slice(0, 16);
+
+interface AtendimentoParaAgendado extends AtendimentoDoAmigo {
+  patient_id?: unknown;
+  agenda_event?: { name?: unknown } | null;
+}
+
+/** o primeiro atendimento vivo com o médico da guia depois da liberação */
+export function agendamentoDoLiberado(
+  l: { amigo_patient_id: number | null; medico_amigo_id: number | null; medico_nome: string; liberado_em: string },
+  lista: AtendimentoParaAgendado[],
+): { agendado_para: string; agendado_tipo: string | null } | null {
+  if (!l.amigo_patient_id) return null;
+  const desde = horaLocalSP(l.liberado_em);
+  const medico = medicoChave(l.medico_nome);
+  const achados = lista
+    .filter((a) => {
+      if (Number(a.patient_id ?? a.patient?.id) !== Number(l.amigo_patient_id)) return false;
+      const situacao = String(a.status ?? "").toLowerCase();
+      if (a.canceled || situacao === "canceled" || situacao === "missed") return false;
+      const mesmoMedico = l.medico_amigo_id
+        ? Number(a.user?.id) === Number(l.medico_amigo_id)
+        : medicoChave(a.user?.name) === medico;
+      return mesmoMedico && String(a.start_date ?? "").slice(0, 16) >= desde;
+    })
+    .sort((x, y) => String(x.start_date).localeCompare(String(y.start_date)));
+  if (!achados.length) return null;
+  return {
+    agendado_para: String(achados[0].start_date).slice(0, 16),
+    agendado_tipo: String(achados[0].agenda_event?.name ?? "").trim() || null,
+  };
+}
+
+/**
+ * Liberado com a marcação em aberto não é agendado pela Julia: "agendar" e "cadastrar" vão
+ * para a atendente. "unknown" só vai se ele está respondendo ao aviso ("sim", "pode ser"),
+ * e agradecimento não abre ticket para ninguém.
+ */
+export function liberadoVaiParaAtendente(a: {
+  intent: string;
+  respondendoAoAviso: boolean;
+  soAgradecimento: boolean;
+}): boolean {
+  if (a.soAgradecimento) return false;
+  if (a.intent === "agendar" || a.intent === "cadastrar") return true;
+  return a.intent === "unknown" && a.respondendoAoAviso;
+}

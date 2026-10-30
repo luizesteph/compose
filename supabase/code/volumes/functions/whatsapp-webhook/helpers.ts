@@ -2481,9 +2481,9 @@ export function textoMesmaListaNaData(medico: string, dataISO: string): string {
 }
 
 /** Instrução da infiltração: quem diz que JÁ está autorizado não recebe pedido de documento (06/10, Karina Yoshida). */
-export function instrucaoDaInfiltracao(texto: unknown, destino: string): string {
+export function instrucaoDaInfiltracao(texto: unknown, destino: string, liberadaNoPdfVisco = false): string {
   const t = stripAccents(String(texto ?? "").toLowerCase());
-  const jaAutorizada = /\b(autoriz\w*|aprovad\w*|liberad\w*|guia\s+(saiu|liberada))\b/.test(t);
+  const jaAutorizada = liberadaNoPdfVisco || /\b(autoriz\w*|aprovad\w*|liberad\w*|guia\s+(saiu|liberada))\b/.test(t);
   if (jaAutorizada) {
     return `O paciente falou de infiltração e o procedimento JÁ FOI AUTORIZADO (ou ele pergunta do andamento). NÃO peça carteirinha, documento nem laudo. Diga que estamos encaminhando para ${destino}, que segue com o agendamento do procedimento por aqui. NÃO peça dados cadastrais. NÃO tente agendar consulta.`;
   }
