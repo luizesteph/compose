@@ -2480,12 +2480,22 @@ export function textoMesmaListaNaData(medico: string, dataISO: string): string {
   return `Em ${data} também não há horário livre com ${doc}. 🙏 Os horários que te passei acima são os primeiros disponíveis — algum deles te atende? Se quiser, me diga outra data que eu confiro.`;
 }
 
-/** Instrução da infiltração: quem diz que JÁ está autorizado não recebe pedido de documento (06/10, Karina Yoshida). */
+/** A instrução da infiltração liberada no PDF Visco leva esta marca: só aí a resposta pode dizer que foi liberada. */
+export const MARCA_LIBERACAO_CONFERIDA = "LIBERAÇÃO CONFERIDA NO SISTEMA DA CLÍNICA";
+
+/**
+ * Instrução da infiltração: quem diz que JÁ está autorizado não recebe pedido de documento (06/10, Karina Yoshida).
+ * Só o PDF Visco confirma a liberação. Quando é o paciente quem diz, a Julia não confirma: a Rozania (30/10) ouviu
+ * "que bom que a autorização saiu!" e a guia ainda estava em análise.
+ */
 export function instrucaoDaInfiltracao(texto: unknown, destino: string, liberadaNoPdfVisco = false): string {
   const t = stripAccents(String(texto ?? "").toLowerCase());
-  const jaAutorizada = liberadaNoPdfVisco || /\b(autoriz\w*|aprovad\w*|liberad\w*|guia\s+(saiu|liberada))\b/.test(t);
+  if (liberadaNoPdfVisco) {
+    return `A infiltração do paciente está liberada (${MARCA_LIBERACAO_CONFERIDA}). NÃO peça carteirinha, documento nem laudo. Diga que estamos encaminhando para ${destino}, que segue com o agendamento do procedimento por aqui. NÃO peça dados cadastrais. NÃO tente agendar consulta.`;
+  }
+  const jaAutorizada = /\b(autoriz\w*|aprovad\w*|liberad\w*|guia\s+(saiu|liberada))\b/.test(t);
   if (jaAutorizada) {
-    return `O paciente falou de infiltração e o procedimento JÁ FOI AUTORIZADO (ou ele pergunta do andamento). NÃO peça carteirinha, documento nem laudo. Diga que estamos encaminhando para ${destino}, que segue com o agendamento do procedimento por aqui. NÃO peça dados cadastrais. NÃO tente agendar consulta.`;
+    return `O paciente DIZ que a autorização da infiltração saiu (ou pergunta do andamento), mas a clínica ainda NÃO conferiu. NÃO afirme que foi autorizada, liberada ou aprovada, e NÃO diga "que bom que saiu". NÃO peça carteirinha, documento nem laudo. Diga que estamos encaminhando para ${destino}, que confere a autorização e segue com o agendamento do procedimento por aqui. NÃO peça dados cadastrais. NÃO tente agendar consulta.`;
   }
   return `O paciente falou de infiltração (a Lidiane cuida). Informe que pode enviar por aqui mesmo a foto da carteirinha do convênio, um documento pessoal (RG ou CNH) e o laudo da ressonância, e que estamos encaminhando para ${destino} que dará continuidade. NÃO peça dados cadastrais. NÃO tente agendar consulta.`;
 }

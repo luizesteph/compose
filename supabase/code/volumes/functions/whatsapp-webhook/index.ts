@@ -227,6 +227,8 @@ import {
   nearDuplicate,
   respostaFoiFalha,
   corrigirLinkDoMapa,
+  naoConfirmaAutorizacao,
+  temLiberacaoConferida,
   avisoDeEncerramento,
   textoDaAcaoParaOPaciente,
   marcacaoRecenteDaConversa,
@@ -12044,8 +12046,13 @@ Responda APENAS com o texto da mensagem, sem aspas, sem prefixos, sem explicaç�
   // Strip markdown bold/italic formatting for natural WhatsApp messages
   // corrigirLinkDoMapa: o Luna corta o último caractere do link do Maps com prompt
   // grande (7 de 12 no teste de 13/09). Aplicado aqui, cobre os dois retornos abaixo.
+  // naoConfirmaAutorizacao: autorização só é confirmada pelo PDF Visco ou pela equipe,
+  // nunca pela Julia (03/11, Rozania: "que bom que a autorização saiu!" com a guia em análise).
   const _limpoBase = corrigirLinkDoMapa(
-    content.trim().replace(/\*{1,2}([^*]+)\*{1,2}/g, "$1"),
+    naoConfirmaAutorizacao(
+      content.trim().replace(/\*{1,2}([^*]+)\*{1,2}/g, "$1"),
+      temLiberacaoConferida(actionResult?.error, actionResult?.response, actionResult?.internal_instruction),
+    ),
     clinicLocationInfo?.google_maps_link,
   );
   // Bradesco fora do Top Nacional: nunca "apenas"/"não atendemos" — a equipe confirma (07/10).

@@ -4,7 +4,7 @@
 // horarios (tokens de agenda so saem com respaldo verificado), pre-book guard
 // (fim de semana / fora do expediente) e dedup de respostas quase-identicas.
 // Extraido byte a byte do index.ts — comportamento identico. Sem @ts-nocheck.
-import { stripAccents, PROMESSA_DE_HUMANO_RE } from "./helpers.ts";
+import { stripAccents, PROMESSA_DE_HUMANO_RE, MARCA_LIBERACAO_CONFERIDA } from "./helpers.ts";
 import { FRASE_ENCERRAMENTO, pertoDoEncerramento, expedienteAberto, fraseForaDoExpediente } from "../_shared/atendimento.ts";
 
 export function normalizeForSimilarity(s: string): string {
@@ -905,4 +905,69 @@ export function comDesculpasPelaDemora(texto: unknown): string {
   const saudacao = /^((?:Bom dia|Boa tarde|Boa noite|Ol[áa]|Oi)[^\n]*\n\n)/i.exec(s);
   if (saudacao) return `${saudacao[1]}${DESCULPA_PELA_DEMORA}\n\n${s.slice(saudacao[1].length)}`;
   return `${DESCULPA_PELA_DEMORA}\n\n${s}`;
+}
+
+// ───────────────────────────────────────
+// A JULIA NÃO CONFIRMA AUTORIZAÇÃO (03/11/2026, pedido do dono)
+// ───────────────────────────────────────
+// Rozania (30/10): "Saiu a autorização da minha infiltração" → "que bom que a autorização
+// da sua infiltração saiu!". A guia estava em análise, e ela mostrou a mensagem à clínica
+// como prova. Em 60 dias (83 respostas que falam de autorização) foram 7 assim: "A
+// infiltração já foi autorizada" (Lucia), "a guia já está autorizada na recepção", "Fico
+// feliz que a autorização da sua esposa já tenha sido liberada"... Quem confirma é o PDF
+// Visco (Liberados) ou a equipe. A frase que afirma vira o texto neutro; a que só promete
+// conferir ("a Lidiane vai verificar se foi liberada") fica.
+export const TEXTO_EQUIPE_CONFERE_AUTORIZACAO = "A nossa equipe vai conferir a autorização e seguir com você por aqui.";
+
+const _AUT_SUBST = "(autorizac\\w*|guias?|infiltrac\\w*|procedimentos?|cirurgias?|aplicac\\w*)";
+const _AUT_VERBO = "(liberad\\w*|autorizad\\w*|aprovad\\w*)";
+const AFIRMA_AUTORIZACAO_RES = [
+  new RegExp(`\\b(que bom|fico feliz|otimo|perfeito|maravilha)\\b[^.!?]{0,80}\\b${_AUT_SUBST}\\b[^.!?]{0,50}\\b(sai[ur]|sairam|${_AUT_VERBO})\\b`),
+  new RegExp(`\\b(que bom|fico feliz|otimo|maravilha)\\b[^.!?]{0,30}\\b${_AUT_VERBO}\\b`),
+  new RegExp(`\\b${_AUT_SUBST}\\b[^.!?]{0,40}\\b(foi|foram|esta|estao|ficou|ficaram|sido)\\s+(ja\\s+)?${_AUT_VERBO}\\b`),
+];
+// antes do trecho que afirma: é pergunta, promessa de conferir, condição ou o que o paciente disse
+const _AUT_NAO_AFIRMA_RE =
+  /\b(verificar|verifica|confirmar|confirma|conferir|confere|checar|saber|consultar|ver|olhar)\b|\bse\s+(a|o|as|os|sua|seu|suas|seus|ja|foi|esta)\b|\b(assim que|quando|caso|ate que)\b|\b(voce|vc)\s+(comentou|disse|falou|informou|mencionou)\b|\bnao\b/;
+
+const _COMEMORACAO_RE = /^\s*(que bom|que otimo|que maravilha|otima noticia|boa noticia|maravilha|otimo)\b[^.!?]{0,25}[!.]\s*$/;
+
+function afirmaAutorizacao(frase: string): boolean {
+  const t = stripAccents(frase.toLowerCase());
+  for (const re of AFIRMA_AUTORIZACAO_RES) {
+    const m = re.exec(t);
+    if (m && !_AUT_NAO_AFIRMA_RE.test(t.slice(0, m.index))) return true;
+  }
+  return false;
+}
+
+/** Troca a frase que afirma autorização pelo texto neutro (uma vez); com a liberação conferida, não mexe. */
+export function naoConfirmaAutorizacao(resposta: string, liberacaoConferida: boolean): string {
+  if (liberacaoConferida || !resposta) return resposta;
+  let trocou = false;
+  const partes = resposta.split(/(?<=[.!?])(\s+)/);
+  const saida: string[] = [];
+  for (let i = 0; i < partes.length; i++) {
+    const p = partes[i];
+    if (/^\s+$/.test(p) || !afirmaAutorizacao(p)) {
+      saida.push(p);
+      continue;
+    }
+    if (!trocou) {
+      // "Que bom, Marcio!" / "Ótima notícia, Bruno!" logo antes também comemoram a autorização
+      const anterior = saida.length >= 2 ? saida[saida.length - 2] : "";
+      if (/^\s+$/.test(saida[saida.length - 1] ?? "") && _COMEMORACAO_RE.test(stripAccents(anterior.toLowerCase()))) {
+        saida.splice(saida.length - 2, 2);
+      }
+      saida.push(TEXTO_EQUIPE_CONFERE_AUTORIZACAO);
+    }
+    else if (/^\s+$/.test(partes[i + 1] ?? "")) i++;
+    trocou = true;
+  }
+  return saida.join("").trim();
+}
+
+/** A instrução que a Julia recebeu traz a liberação conferida no PDF Visco? */
+export function temLiberacaoConferida(...textos: unknown[]): boolean {
+  return textos.some((t) => String(t ?? "").includes(MARCA_LIBERACAO_CONFERIDA));
 }
