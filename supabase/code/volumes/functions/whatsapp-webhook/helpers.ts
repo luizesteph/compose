@@ -2497,7 +2497,7 @@ export function instrucaoDaInfiltracao(texto: unknown, destino: string, liberada
   if (jaAutorizada) {
     return `O paciente DIZ que a autorização da infiltração saiu (ou pergunta do andamento), mas a clínica ainda NÃO conferiu. NÃO afirme que foi autorizada, liberada ou aprovada, e NÃO diga "que bom que saiu". NÃO peça carteirinha, documento nem laudo. Diga que estamos encaminhando para ${destino}, que confere a autorização e segue com o agendamento do procedimento por aqui. NÃO peça dados cadastrais. NÃO tente agendar consulta.`;
   }
-  return `O paciente falou de infiltração (a Lidiane cuida). Informe que pode enviar por aqui mesmo a foto da carteirinha do convênio, um documento pessoal (RG ou CNH) e o laudo da ressonância, e que estamos encaminhando para ${destino} que dará continuidade. NÃO peça dados cadastrais. NÃO tente agendar consulta.`;
+  return `O paciente falou de infiltração. NÃO cite o nome de nenhuma atendente. Informe que pode enviar por aqui mesmo a foto da carteirinha do convênio, um documento pessoal (RG ou CNH) e o laudo da ressonância, e que estamos encaminhando para ${destino} que dará continuidade. NÃO peça dados cadastrais. NÃO tente agendar consulta.`;
 }
 
 /** "O Dr. Luiz falou pra dar um alô pra vocês" sem dizer o que quer (07/10, Marcello). */

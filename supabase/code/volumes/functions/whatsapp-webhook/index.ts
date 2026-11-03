@@ -228,6 +228,7 @@ import {
   respostaFoiFalha,
   corrigirLinkDoMapa,
   naoConfirmaAutorizacao,
+  semNomeDaLidiane,
   temLiberacaoConferida,
   avisoDeEncerramento,
   textoDaAcaoParaOPaciente,
@@ -10785,7 +10786,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                   status: "transferred_infiltracao",
                   response: "Encaminhado para a fila de pendentes",
                   error:
-                    instrucaoDaInfiltracao(currentMessageText, "a Lidiane (ou atendente)", entities?.liberado_infiltracao === true),
+                    instrucaoDaInfiltracao(currentMessageText, "a nossa equipe", entities?.liberado_infiltracao === true),
                 };
               }
             }
@@ -11900,7 +11901,7 @@ ${
     : actionResult.status === "needs_registration"
       ? "O paciente NÃO está cadastrado na clínica. Gere uma mensagem amigável pedindo o nome completo, convênio (e plano), endereço completo (ou CEP) e data de nascimento para realizar o cadastro. Inclua a lista de convênios disponíveis se fornecida na mensagem de erro. Informe que se não tiver convênio, pode responder 'particular'. O telefone já é capturado automaticamente, não precisa pedir."
       : actionResult.status === "transferred_infiltracao"
-        ? "O paciente falou de INFILTRAÇÃO (a Lidiane cuida). Gere uma mensagem informando que pode enviar por aqui mesmo o que ainda faltar (carteirinha do convênio, documento pessoal e laudo da ressonância) e que estamos encaminhando para a atendente que dará continuidade. Se o paciente só pergunta do andamento (autorização), não peça documento: diga que a Lidiane confere e responde por aqui. Seja acolhedora e profissional. NÃO peça dados cadastrais. NÃO agende consulta."
+        ? "O paciente falou de INFILTRAÇÃO. Gere uma mensagem informando que pode enviar por aqui mesmo o que ainda faltar (carteirinha do convênio, documento pessoal e laudo da ressonância) e que estamos encaminhando para a nossa equipe, que dará continuidade. Se o paciente só pergunta do andamento (autorização), não peça documento: diga que a nossa equipe confere e responde por aqui. NÃO cite o nome de nenhuma atendente. Seja acolhedora e profissional. NÃO peça dados cadastrais. NÃO agende consulta."
         : actionResult.status === "needs_documents_infiltracao"
           ? "O paciente solicitou uma INFILTRAÇÃO e acabou de se cadastrar. Gere uma mensagem informando que para dar continuidade ao processo de infiltração, é necessário enviar 3 documentos: 1) Foto da carteirinha do convênio, 2) Foto de um documento pessoal (RG ou CNH), 3) Laudo da ressonância magnética. Informe que uma atendente receberá os documentos e dará continuidade ao processo. NÃO tente agendar consulta. Seja acolhedora e profissional."
           : actionResult.status === "transferred_exame"
@@ -11931,8 +11932,8 @@ Responda APENAS com o texto da mensagem, sem aspas, sem prefixos, sem explicaç�
 
 ## ⚠️ REGRA DE NOMEAÇÃO DE ATENDENTES (PROIBIDO QUEBRAR):
 - NUNCA cite pelo nome próprio atendentes da "Equipe geral" / "atendimento padrão" / "fisioterapia" (ex: Lais, Mardila, Glaucia, Gláucia). Use sempre expressões neutras: "nossa equipe de atendimento", "uma de nossas atendentes", "nossa recepção".
-- Você SÓ pode citar nomes próprios de atendentes nos roteamentos específicos descritos no script da clínica: Vânia (cirurgia/pós-operatório) e Lidiane (infiltração/aplicação). Fora desses dois casos, nunca escreva um primeiro nome de atendente na resposta.
-- Se o sistema transferir para um atendente sem que o roteamento seja Vânia/Lidiane, diga apenas "Estou te transferindo para nossa equipe de atendimento" — sem mencionar nome.`;
+- Você SÓ pode citar o nome próprio de atendente no roteamento de cirurgia/pós-operatório (Vânia). Infiltração/aplicação vai para "a nossa equipe" — NÃO escreva "Lidiane": a transferência fica na fila de pendentes, não vai para ela. Fora disso, nunca escreva um primeiro nome de atendente na resposta.
+- Se o sistema transferir para um atendente sem que o roteamento seja Vânia, diga apenas "Estou te transferindo para nossa equipe de atendimento" — sem mencionar nome.`;
 
   // Anti-greeting duplication: check if AI already greeted in this conversation
   let antiGreetingNote = "";
@@ -15477,7 +15478,7 @@ Deno.serve(async (req) => {
           // oferecendo horario.
           const handoffReason = String(currentConvState.context?.handoff_reason || "");
           if (handoffReason === "infiltracao") {
-            stateMsg += `PACIENTE EM FLUXO DE INFILTRAÇÃO. Já foi transferida para Lidiane (responsável). PROIBIDO oferecer agenda de consulta comum, pedir CPF/dados cadastrais, mencionar médicos ou horários. Se o paciente perguntar algo, responda APENAS confirmando que Lidiane está em contato e que ela cuida do processo de infiltração (documentação, autorização da guia, agendamento próprio do procedimento). NUNCA classifique como "agendar".`;
+            stateMsg += `PACIENTE EM FLUXO DE INFILTRAÇÃO. Já foi transferida para a nossa equipe. PROIBIDO oferecer agenda de consulta comum, pedir CPF/dados cadastrais, mencionar médicos ou horários, e citar o nome de atendente. Se o paciente perguntar algo, responda APENAS confirmando que a nossa equipe está em contato e que ela cuida do processo de infiltração (documentação, autorização da guia, agendamento próprio do procedimento). NUNCA classifique como "agendar".`;
           } else if (handoffReason === "exame") {
             stateMsg += `PACIENTE EM FLUXO DE EXAME. Já foi encaminhada para a equipe responsável. PROIBIDO oferecer agenda de consulta. Apenas confirme que a equipe está em contato pra dar continuidade ao pedido do exame.`;
           } else if (handoffReason === "cirurgia") {
@@ -18792,6 +18793,19 @@ Deno.serve(async (req) => {
           }
         } catch (e) {
           console.log(`[ClosedDays] notice error (non-blocking): ${(e as Error).message}`);
+        }
+
+        // === "A LIDIANE" NA RESPOSTA (03/11, caso Mauri) — ver semNomeDaLidiane (guards.ts) ===
+        // A transferência vai para os pendentes, sem dona: "estou te encaminhando para a
+        // Lidiane" era falso. Vale para toda resposta (modelo ou texto pronto); o nome
+        // fica só no caso longo com a ficha com ela ("A mensagem ficou com a Lidiane…").
+        try {
+          replyText = semNomeDaLidiane(
+            replyText,
+            !!(actionResult as any)?.casoLongoSemNovaTransferencia && /ficou com a lidiane/i.test(String(actionResult?.response || "")),
+          );
+        } catch (e) {
+          console.log(`[SemNomeDaLidiane] erro (não bloqueante): ${(e as Error).message}`);
         }
 
         // === VOCATIVO ERRADO (23/09) — ver corrigirVocativo (guards.ts) ===

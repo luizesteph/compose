@@ -967,6 +967,29 @@ export function naoConfirmaAutorizacao(resposta: string, liberacaoConferida: boo
   return saida.join("").trim();
 }
 
+// A LIDIANE NÃO RECEBE A TRANSFERÊNCIA (03/11, pedido do dono; caso Mauri 30/10).
+// Desde 30/08 toda transferência vai para os pendentes, sem dona — mas o script e o
+// prompt ainda mandavam dizer "estou te encaminhando para a Lidiane". O Mauri ouviu
+// isso, o ticket ficou na fila e a Lidiane só achou o caso procurando. Em 30 dias,
+// 93 respostas da Julia citaram a Lidiane; quase todas prometiam passar para ela.
+// Agora a resposta diz "a nossa equipe". Fica o nome só quando a ficha está mesmo
+// com ela (caso longo: "a mensagem ficou com a Lidiane", com ela dona do ticket).
+const _LIDIANE_COM_PREPOSICAO_RE = /(?<![\p{L}])(para|pra|com|pela|da|de|à)\s+(?:a\s+)?lidiane(?![\p{L}])/giu;
+const _LIDIANE_RE = /(?<![\p{L}])(?:(a)\s+)?lidiane(?![\p{L}])/giu;
+
+/** Troca "a Lidiane" por "a nossa equipe"; com a ficha com ela, não mexe. */
+export function semNomeDaLidiane(resposta: string, fichaComEla: boolean): string {
+  if (fichaComEla || !/lidiane/i.test(resposta)) return resposta;
+  const prep: Record<string, string> = { da: "da", de: "da", pela: "pela", "à": "à", pra: "pra" };
+  return resposta
+    .replace(_LIDIANE_COM_PREPOSICAO_RE, (_m, p: string) => {
+      const base = prep[p.toLowerCase()] ?? `${p} a`;
+      return `${p[0] === p[0].toUpperCase() ? base[0].toUpperCase() + base.slice(1) : base} nossa equipe`;
+    })
+    .replace(_LIDIANE_RE, (_m, _art: string | undefined, off: number, s: string) =>
+      off === 0 || /[.!?]\s*$/.test(s.slice(0, off)) ? "A nossa equipe" : "a nossa equipe");
+}
+
 /** A instrução que a Julia recebeu traz a liberação conferida no PDF Visco? */
 export function temLiberacaoConferida(...textos: unknown[]): boolean {
   return textos.some((t) => String(t ?? "").includes(MARCA_LIBERACAO_CONFERIDA));
