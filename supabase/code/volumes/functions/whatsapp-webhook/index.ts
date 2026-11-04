@@ -228,7 +228,7 @@ import {
   respostaFoiFalha,
   corrigirLinkDoMapa,
   naoConfirmaAutorizacao,
-  semNomeDaLidiane,
+  semNomeDeAtendente,
   temLiberacaoConferida,
   avisoDeEncerramento,
   textoDaAcaoParaOPaciente,
@@ -11932,8 +11932,8 @@ Responda APENAS com o texto da mensagem, sem aspas, sem prefixos, sem explicaç�
 
 ## ⚠️ REGRA DE NOMEAÇÃO DE ATENDENTES (PROIBIDO QUEBRAR):
 - NUNCA cite pelo nome próprio atendentes da "Equipe geral" / "atendimento padrão" / "fisioterapia" (ex: Lais, Mardila, Glaucia, Gláucia). Use sempre expressões neutras: "nossa equipe de atendimento", "uma de nossas atendentes", "nossa recepção".
-- Você SÓ pode citar o nome próprio de atendente no roteamento de cirurgia/pós-operatório (Vânia). Infiltração/aplicação vai para "a nossa equipe" — NÃO escreva "Lidiane": a transferência fica na fila de pendentes, não vai para ela. Fora disso, nunca escreva um primeiro nome de atendente na resposta.
-- Se o sistema transferir para um atendente sem que o roteamento seja Vânia, diga apenas "Estou te transferindo para nossa equipe de atendimento" — sem mencionar nome.`;
+- Toda transferência vai para "a nossa equipe" — cirurgia/pós-operatório e infiltração/aplicação também. NÃO escreva "Vânia" nem "Lidiane": a transferência fica na fila de pendentes, não vai direto para elas. Nunca escreva um primeiro nome de atendente na resposta.
+- Ao transferir, diga "Estou te encaminhando para a nossa equipe" — sem mencionar nome.`;
 
   // Anti-greeting duplication: check if AI already greeted in this conversation
   let antiGreetingNote = "";
@@ -15482,7 +15482,7 @@ Deno.serve(async (req) => {
           } else if (handoffReason === "exame") {
             stateMsg += `PACIENTE EM FLUXO DE EXAME. Já foi encaminhada para a equipe responsável. PROIBIDO oferecer agenda de consulta. Apenas confirme que a equipe está em contato pra dar continuidade ao pedido do exame.`;
           } else if (handoffReason === "cirurgia") {
-            stateMsg += `PACIENTE EM FLUXO DE CIRURGIA/PÓS-OPERATÓRIO. Já foi transferida para Vânia. PROIBIDO oferecer agenda de consulta. Apenas confirme que Vânia está em contato.`;
+            stateMsg += `PACIENTE EM FLUXO DE CIRURGIA/PÓS-OPERATÓRIO. Já foi transferida para a nossa equipe. PROIBIDO oferecer agenda de consulta. Apenas confirme que a nossa equipe vai dar continuidade — sem citar nome de atendente.`;
           } else {
             // Sem handoff_reason explicito — fluxo neutro. Defesa em profundidade
             // pra nao gerar alucinacoes de "estou te transferindo".
@@ -18795,17 +18795,21 @@ Deno.serve(async (req) => {
           console.log(`[ClosedDays] notice error (non-blocking): ${(e as Error).message}`);
         }
 
-        // === "A LIDIANE" NA RESPOSTA (03/11, caso Mauri) — ver semNomeDaLidiane (guards.ts) ===
+        // === "A LIDIANE"/"A VÂNIA" NA RESPOSTA (03/11, caso Mauri) — ver semNomeDeAtendente (guards.ts) ===
         // A transferência vai para os pendentes, sem dona: "estou te encaminhando para a
-        // Lidiane" era falso. Vale para toda resposta (modelo ou texto pronto); o nome
-        // fica só no caso longo com a ficha com ela ("A mensagem ficou com a Lidiane…").
+        // Lidiane/Vânia" era falso. Vale para toda resposta (modelo ou texto pronto); o
+        // nome fica só no caso longo com a ficha com ela ("A mensagem ficou com a Vânia…")
+        // e quando é o nome de alguém da conversa (paciente chamada Vânia).
         try {
-          replyText = semNomeDaLidiane(
-            replyText,
-            !!(actionResult as any)?.casoLongoSemNovaTransferencia && /ficou com a lidiane/i.test(String(actionResult?.response || "")),
-          );
+          const _fichaCom = (actionResult as any)?.casoLongoSemNovaTransferencia
+            ? (String(actionResult?.response || "").match(/ficou com a (lidiane|v[aâ]nia)/i)?.[1] ?? null)
+            : null;
+          replyText = semNomeDeAtendente(replyText, {
+            fichaCom: _fichaCom,
+            pessoas: [name, (classification as any)?.caller_name, (classification as any)?.entities?.patient_full_name],
+          });
         } catch (e) {
-          console.log(`[SemNomeDaLidiane] erro (não bloqueante): ${(e as Error).message}`);
+          console.log(`[SemNomeDeAtendente] erro (não bloqueante): ${(e as Error).message}`);
         }
 
         // === VOCATIVO ERRADO (23/09) — ver corrigirVocativo (guards.ts) ===

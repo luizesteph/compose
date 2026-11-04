@@ -974,20 +974,55 @@ export function naoConfirmaAutorizacao(resposta: string, liberacaoConferida: boo
 // 93 respostas da Julia citaram a Lidiane; quase todas prometiam passar para ela.
 // Agora a resposta diz "a nossa equipe". Fica o nome só quando a ficha está mesmo
 // com ela (caso longo: "a mensagem ficou com a Lidiane", com ela dona do ticket).
-const _LIDIANE_COM_PREPOSICAO_RE = /(?<![\p{L}])(para|pra|com|pela|da|de|à)\s+(?:a\s+)?lidiane(?![\p{L}])/giu;
-const _LIDIANE_RE = /(?<![\p{L}])(?:(a)\s+)?lidiane(?![\p{L}])/giu;
+//
+// A VÂNIA TAMBÉM (03/11, pedido do dono): a cirurgia segue sendo dela, mas a
+// transferência cai nos mesmos pendentes — "vou encaminhar para a Vânia" era a mesma
+// promessa falsa (75 respostas em 30 dias). A Vânia é nome comum de paciente, então
+// só sai com artigo ("a Vânia", "para a Vânia", "da Vânia"): "Vânia, sua consulta…" e
+// "confirmar a consulta para Vania?" são a paciente. E nenhuma das duas é trocada
+// quando é o nome de alguém da conversa (WhatsApp, quem escreve, paciente).
+const _ATENDENTES_DA_FILA: Array<{ chave: string; prep: RegExp; solto: RegExp }> = [
+  {
+    chave: "lidiane",
+    prep: /(?<![\p{L}])(para|pra|com|pela|da|de|à)\s+(?:a\s+)?lidiane(?![\p{L}])/giu,
+    solto: /(?<![\p{L}])(?:(a)\s+)?lidiane(?![\p{L}])/giu,
+  },
+  {
+    chave: "vania",
+    prep: /(?<![\p{L}])(para\s+a|com\s+a|pra|pela|da|à)\s+v[aâ]nia(?![\p{L}])/giu,
+    solto: /(?<![\p{L}])(a)\s+v[aâ]nia(?![\p{L}])/giu,
+  },
+];
 
-/** Troca "a Lidiane" por "a nossa equipe"; com a ficha com ela, não mexe. */
-export function semNomeDaLidiane(resposta: string, fichaComEla: boolean): string {
-  if (fichaComEla || !/lidiane/i.test(resposta)) return resposta;
+function _semAcentoMin(s: string): string {
+  return s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+}
+
+/** Troca "a Lidiane"/"a Vânia" por "a nossa equipe". Não mexe na que está com a
+ *  ficha (`fichaCom`), nem em nome que é de alguém da conversa (`pessoas`). */
+export function semNomeDeAtendente(
+  resposta: string,
+  opts: { fichaCom?: string | null; pessoas?: Array<unknown> } = {},
+): string {
+  let s = String(resposta ?? "");
+  const dona = _semAcentoMin(String(opts.fichaCom ?? "")).split(/\s+/)[0];
+  const pessoas = (opts.pessoas || []).map((p) => _semAcentoMin(String(p ?? "")));
   const prep: Record<string, string> = { da: "da", de: "da", pela: "pela", "à": "à", pra: "pra" };
-  return resposta
-    .replace(_LIDIANE_COM_PREPOSICAO_RE, (_m, p: string) => {
-      const base = prep[p.toLowerCase()] ?? `${p} a`;
-      return `${p[0] === p[0].toUpperCase() ? base[0].toUpperCase() + base.slice(1) : base} nossa equipe`;
-    })
-    .replace(_LIDIANE_RE, (_m, _art: string | undefined, off: number, s: string) =>
-      off === 0 || /[.!?]\s*$/.test(s.slice(0, off)) ? "A nossa equipe" : "a nossa equipe");
+  for (const a of _ATENDENTES_DA_FILA) {
+    if (!_semAcentoMin(s).includes(a.chave) || dona === a.chave) continue;
+    if (pessoas.some((p) => new RegExp(`(^|[^a-z])${a.chave}([^a-z]|$)`).test(p))) continue;
+    // Nome em negrito é cadastro de paciente ("Esse CPF está no cadastro de *Vania…*").
+    if (new RegExp(`\\*\\s*${a.chave}`).test(_semAcentoMin(s))) continue;
+    s = s
+      .replace(a.prep, (_m, p: string) => {
+        const p1 = p.replace(/\s+a$/i, "");
+        const base = prep[p1.toLowerCase()] ?? `${p1} a`;
+        return `${p[0] === p[0].toUpperCase() ? base[0].toUpperCase() + base.slice(1) : base} nossa equipe`;
+      })
+      .replace(a.solto, (_m, _art: string | undefined, off: number, t: string) =>
+        off === 0 || /[.!?]\s*$/.test(t.slice(0, off)) ? "A nossa equipe" : "a nossa equipe");
+  }
+  return s;
 }
 
 /** A instrução que a Julia recebeu traz a liberação conferida no PDF Visco? */
