@@ -2466,7 +2466,7 @@ export const TEXTO_NAO_E_ESSA_CONSULTA =
 // e o "sim" a essa pergunta faz a troca. "Não" ou qualquer outra coisa depois da pergunta
 // não remarca nada.
 const _ACEITE_DO_REMARCAR_RE =
-  /^(?:sim|s|ss|isso|ess[ae]|este|esta|pode|confirm[a-z]*|ok|okay|exato|exatamente|corret[oa]|cert[oa]|certinho|claro|positivo|perfeito|fechado|combinado|beleza|blz|otimo|por favor|pfv|aceito|fechou|show|maravilha|tudo bem|tudo certo|ta bom|ta otimo|esta bom|esta otimo|eu aceito|eu confirmo|vou querer|fico com|por mim|tenho interesse|com certeza|uhum|aham|yes)(?![a-z])/;
+  /^(?:sim|s|ss|isso|ess[ae]|este|esta|pode|confirm[a-z]*|ok|okay|exato|exatamente|corret[oa]|cert[oa]|certinho|claro|positivo|perfeito|fechado|combinado|beleza|blz|otimo|por favor|pfv|aceito|fechou|show|maravilha|tudo bem|tudo certo|ta bom|ta otimo|esta bom|esta otimo|eu aceito|eu confirmo|vou querer|fico com|por mim|tenho interesse|com certeza|uhum|aham|yes|gostaria sim|vamos)(?![a-z])/;
 const _PERGUNTA_DESTINO_DO_REMARCAR_RE =
   /posso remarcar a sua consulta[^?]*? para \*(\d{2})\/(\d{2})\/(\d{4})\* às \*(\d{2}:\d{2})\*\?/i;
 
@@ -2481,10 +2481,13 @@ export function autorizacaoDoRemarcar(mensagem: unknown, ultimaSaidaDaJulia: unk
     .replace(/^(?:oi+|ola|bom dia|boa tarde|boa noite)[\s,!.]*/, "")
     .trim();
   const jaPerguntei = _PERGUNTA_DESTINO_DO_REMARCAR_RE.test(String(ultimaSaidaDaJulia ?? ""));
-  if (!/\?/.test(bruto)) {
+  // Pergunta não é aceite, e aceite com "não" no meio também não ("Este horário eu não
+  // consigo, mas agradeço" — resposta real a uma vaga da lista de espera, 05/11).
+  if (!/\?/.test(bruto) && !/(?<![a-z])(?:nao|nunca|nem|infelizmente)(?![a-z])/.test(t)) {
     if (_ACEITE_DO_REMARCAR_RE.test(t)) return "autoriza";
-    // "quero", "quero sim", "quero esse" aceitam; "quero remarcar", "quero outro dia" não
-    if (/^(?:eu )?quero(?![a-z])/.test(t) && !/(remarc|reagend|mudar|troc|alter|cancel|desmarc|outr[oa]|saber)/.test(t)) return "autoriza";
+    // "quero", "quero sim", "quero esse" aceitam; "quero remarcar", "quero outro dia",
+    // "quero sair da lista" não
+    if (/^(?:eu )?quero(?![a-z])/.test(t) && !/(remarc|reagend|mudar|troc|alter|cancel|desmarc|outr[oa]|saber|sair|lista de espera|tirar|remov|desist)/.test(t)) return "autoriza";
   }
   if (/^(?:nao|n|nunca|negativo)(?![a-z])/.test(t)) return "nao_remarcar";
   return jaPerguntei ? "nao_remarcar" : "perguntar";
