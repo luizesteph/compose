@@ -17,6 +17,11 @@
 // "Recebi seu pedido de encaixe!" — por isso a exceção depois do "ainda".
 export const URGENCIA_AGENDA_RE = /\b(encaix(e|ar|amento)|hoje\s+ainda(?!\s+(?:[ée]|eh|est[áa]|era|foi|n[ãa]o|estou)(?![\p{L}]))|hoje\s+mesmo|agora\s+mesmo)\b/iu;
 
+// verbo no passado + até 3 palavras + "no/ao/pelo PS" ("passei com ele no pronto socorro",
+// "fui hoje ao PS"); "foi atropelado, estamos indo ao pronto socorro" NÃO casa (vírgula, e
+// "indo" é agora). Também "o médico do pronto-socorro" e "encaminhado pelo PS".
+const PS_NO_PASSADO_RE =
+  /(?<![\p{L}])(?:passei|passou|passamos|fui|foi|fomos|estive|esteve|estivemos|vim|veio)\s+(?:[\p{L}\d]+\s+){0,3}?(?:n[oa]|ao|pelo|em\s+um|num)\s+(?:p\.?\s?s\.?|pronto[\s-]?socorro)(?![\p{L}])|(?<![\p{L}])encaminh\p{L}+\s+(?:pel[oa]|d[oe])\s+(?:p\.?\s?s\.?|pronto[\s-]?socorro)(?![\p{L}])|(?<![\p{L}])(?:m[eé]dic[oa]|ortopedista|doutora?|dra?\.?)\s+d[oe]\s+(?:p\.?\s?s\.?|pronto[\s-]?socorro)(?![\p{L}])/iu;
 const ENCAIXE_RECUSADO_RE =
   /(?<![\p{L}])n[aã]o\s+(?:quero|queremos|preciso|precisa|precisamos|necessito|gostaria)\s+(?:mais\s+)?(?:de\s+|do\s+)?(?:um\s+|o\s+|nenhum\s+)?encaix(?:e|ar|amento)(?![\p{L}])/giu;
 
@@ -382,6 +387,11 @@ function padraoDeUrgenciaDispara(p: RegExp, i: number, t: string): boolean {
   // em 2024… vou viajar NESTA QUINTA e preciso de uma receita em inglês dizendo que tenho
   // placas e pinos" recebeu "procure um pronto-socorro" duas vezes).
   if (p.source.includes("fratur") && FRATURA_ANTIGA_RE.test(t) && (URGENCIA_ADMINISTRATIVA_RE.test(t) || /declara\p{L}*/iu.test(t)) && !_DOR_NA_FRASE_RE.test(t)) return false;
+  // PRONTO-SOCORRO NO PASSADO NÃO É URGÊNCIA AGORA (10/11, Rafael 03/11: "Tenho um
+  // encaminhamento… Passei com ele no pronto socorro" virou Regra 4 com "procure um
+  // pronto-socorro"; em 60 dias, 4 pedidos de consulta de quem JÁ tinha passado no PS).
+  // Dor na frase e os outros padrões (fratura, "não consigo andar"…) continuam valendo.
+  if (p.source.includes("pronto") && PS_NO_PASSADO_RE.test(t) && !_DOR_NA_FRASE_RE.test(t)) return false;
   // "NÃO QUERO ENCAIXE NÃO" É RECUSA (10/11, Dani 09/11: virou "Recebi seu pedido de
   // encaixe!" + fila). Só a afirmação ("não quero/não preciso de encaixe"); a pergunta
   // ("não teria um encaixe?", "não tem nenhum encaixe antes?") continua sendo pedido —
