@@ -1212,9 +1212,11 @@ export const TEXTO_SEM_CONSULTA_PARA_CANCELAR =
 // (478248); a lista veio da agenda da CONSULTA do mesmo médico e o PUT recusou todos.
 // "Alguém pegou antes — me diga outra data" era falso e virava laço (freio de repetição,
 // "Atendente", 2 h de espera). Quem remarca essa é a equipe, pela tela do Amigo. Casa a
-// PROMESSA_DE_HUMANO_RE de propósito: é a rede da promessa que transfere.
+// PROMESSA_DE_HUMANO_RE de propósito: é a rede da promessa que transfere. Sem "consegui
+// remarcar": a guarda de confirmação falsa lê "consegui <verbo>" sem olhar o "não" e
+// trocaria o texto por "Quase concluí seu agendamento!".
 export const TEXTO_REMARCACAO_NAO_ACEITA =
-  "Não consegui remarcar esse horário por aqui — o sistema da agenda não aceitou a troca para a sua consulta. 🙏 Vou passar para a nossa equipe remarcar para você.";
+  "Não foi possível mudar esse horário por aqui — o sistema da agenda não aceitou a troca da sua consulta. 🙏 Vou passar para a nossa equipe remarcar para você.";
 
 /**
  * A mensagem não traz destino nenhum — nem número, nem dia, nem período? Na resposta à
@@ -2454,6 +2456,65 @@ export function textoEncontreiConsulta(nomePaciente: string, medico: string, ini
 }
 export const TEXTO_NAO_E_ESSA_CONSULTA =
   "Entendi! Me conta o que está diferente: é a consulta de outra pessoa, com outro médico ou em outra data? Se for de outra pessoa, me passa o CPF dela. 😊";
+// ─── O PUT DO REMARCAR PRECISA DE UMA ESCOLHA OU DE UM "SIM" (10/11) ────────────────
+// Em 60 dias, 4 remarcações foram executadas em cima de mensagem que não era escolha nem
+// aceite: "Isso é mão né?" (03/11), "Consulta para meu marido Jose Roberto" (07/10),
+// "Convenio" (25/09) e "Como ficou?" (01/10). O classificador marcou reagendar_confirmed e
+// a data e a hora vieram do contexto. Nas outras ~40, a mensagem trazia número (hora, data,
+// CPF) ou era um "sim". A regra: a mensagem ATUAL autoriza a troca quando traz número ou é
+// um aceite; senão a Julia pergunta uma vez ("posso remarcar … para dd/mm/aaaa às HH:MM?")
+// e o "sim" a essa pergunta faz a troca. "Não" ou qualquer outra coisa depois da pergunta
+// não remarca nada.
+const _ACEITE_DO_REMARCAR_RE =
+  /^(?:sim|s|ss|isso|ess[ae]|este|esta|pode|confirm[a-z]*|ok|okay|exato|exatamente|corret[oa]|cert[oa]|certinho|claro|positivo|perfeito|fechado|combinado|beleza|blz|otimo|por favor|pfv|aceito|fechou|show|maravilha|tudo bem|tudo certo|ta bom|ta otimo|esta bom|esta otimo|eu aceito|eu confirmo|vou querer|fico com|por mim|tenho interesse|com certeza|uhum|aham|yes)(?![a-z])/;
+const _PERGUNTA_DESTINO_DO_REMARCAR_RE =
+  /posso remarcar a sua consulta[^?]*? para \*(\d{2})\/(\d{2})\/(\d{4})\* às \*(\d{2}:\d{2})\*\?/i;
+
+export type AutorizacaoDoRemarcar = "autoriza" | "perguntar" | "nao_remarcar";
+
+/** A mensagem atual autoriza o PUT do remarcar? Ver o comentário acima. */
+export function autorizacaoDoRemarcar(mensagem: unknown, ultimaSaidaDaJulia: unknown): AutorizacaoDoRemarcar {
+  const bruto = semMetadados(mensagem).trim();
+  if (/\d/.test(bruto)) return "autoriza"; // hora, data, CPF, "a opção 2"
+  if (/^[\s👍✅👌🙏😊]+$/u.test(bruto) && /[👍✅👌]/u.test(bruto)) return "autoriza";
+  const t = stripAccents(bruto.toLowerCase())
+    .replace(/^(?:oi+|ola|bom dia|boa tarde|boa noite)[\s,!.]*/, "")
+    .trim();
+  const jaPerguntei = _PERGUNTA_DESTINO_DO_REMARCAR_RE.test(String(ultimaSaidaDaJulia ?? ""));
+  if (!/\?/.test(bruto)) {
+    if (_ACEITE_DO_REMARCAR_RE.test(t)) return "autoriza";
+    // "quero", "quero sim", "quero esse" aceitam; "quero remarcar", "quero outro dia" não
+    if (/^(?:eu )?quero(?![a-z])/.test(t) && !/(remarc|reagend|mudar|troc|alter|cancel|desmarc|outr[oa]|saber)/.test(t)) return "autoriza";
+  }
+  if (/^(?:nao|n|nunca|negativo)(?![a-z])/.test(t)) return "nao_remarcar";
+  return jaPerguntei ? "nao_remarcar" : "perguntar";
+}
+
+/**
+ * A pergunta de confirmação do destino. O formato é lido de volta por
+ * `destinoPerguntadoNoRemarcar`. Termina em "?" e NÃO diz "responda sim": a guarda de ACK
+ * solto trata "Responda … SIM" como o lembrete de confirmação do Amigo e calaria o "sim".
+ * Sem a palavra "confirmar", para o classificador não ler o "sim" como confirmação de presença.
+ */
+export function textoConfirmaDestinoDoRemarcar(dataISO: string, hhmm: string, medico?: string): string {
+  const [a, m, d] = String(dataISO || "").slice(0, 10).split("-");
+  const med = String(medico || "").trim();
+  return `Antes de trocar: posso remarcar a sua consulta${med ? ` com ${med}` : ""} para *${d}/${m}/${a}* às *${String(hhmm || "").slice(0, 5)}*?`;
+}
+
+/** Data e hora da pergunta "posso remarcar a sua consulta … para *dd/mm/aaaa* às *HH:MM*?", ou null. */
+export function destinoPerguntadoNoRemarcar(ultimaSaidaDaJulia: unknown): { dataISO: string; hhmm: string } | null {
+  const m = String(ultimaSaidaDaJulia ?? "").match(_PERGUNTA_DESTINO_DO_REMARCAR_RE);
+  return m ? { dataISO: `${m[3]}-${m[2]}-${m[1]}`, hhmm: m[4] } : null;
+}
+
+/**
+ * Depois de "não" (ou de outra coisa) à pergunta do destino: nada foi trocado. Sem promessa
+ * de gente e sem "remarquei" — a guarda de confirmação falsa lê o verbo sem olhar o "não".
+ */
+export const TEXTO_NAO_REMARQUEI =
+  "Tudo bem — não fiz nenhuma troca: a sua consulta continua como estava. Me diga a data e o horário que você prefere, ou *atendente* se quiser falar com a nossa equipe.";
+
 export function respostaNegaReagendamento(mensagem: unknown, ultimaSaidaDaJulia: unknown): boolean {
   if (!_PERGUNTA_REAGENDAR_RE.test(String(ultimaSaidaDaJulia ?? ""))) return false;
   const t = String(mensagem ?? "").trim();

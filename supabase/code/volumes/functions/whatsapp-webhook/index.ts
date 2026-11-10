@@ -15,6 +15,10 @@ import {
   TEXTO_SEM_CONSULTA_FUTURA,
   TEXTO_SEM_CONSULTA_PARA_CANCELAR,
   TEXTO_REMARCACAO_NAO_ACEITA,
+  TEXTO_NAO_REMARQUEI,
+  autorizacaoDoRemarcar,
+  textoConfirmaDestinoDoRemarcar,
+  destinoPerguntadoNoRemarcar,
   textoCpfNaoEncontrado,
   pedeHorarioMaisCedo,
   textoMesmaLista,
@@ -7600,6 +7604,26 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             return { status: "needs_info", response: TEXTO_NAO_E_ESSA_CONSULTA, error: TEXTO_NAO_E_ESSA_CONSULTA, bypassAiRewrite: true, entities: { ...entities, attendance_id: "" } } as any;
           }
         }
+        // RESPOSTA À PERGUNTA DO DESTINO (10/11): "posso remarcar a sua consulta para
+        // dd/mm/aaaa às HH:MM?" — o "sim" faz a troca para o destino da pergunta (lido do
+        // texto dela, não do classificador); "não" ou outra coisa não remarca nada. Quem
+        // responde com número ("pode ser às 10:20") está escolhendo de novo: segue o fluxo.
+        {
+          const _ultimaJuliaD = [...(recentMessages || [])].reverse().find((m: any) => m?.role === "assistant");
+          const _destinoPerguntado = destinoPerguntadoNoRemarcar(_ultimaJuliaD?.content);
+          if (_destinoPerguntado && entities.attendance_id && /^\d+$/.test(String(entities.attendance_id)) && !/\d/.test(semMetadados(currentMessageText))) {
+            const _autD = autorizacaoDoRemarcar(currentMessageText, _ultimaJuliaD?.content);
+            if (_autD === "autoriza") {
+              console.log(`[Webhook] reagendar - "sim" à pergunta do destino — troca para ${_destinoPerguntado.dataISO} ${_destinoPerguntado.hhmm}`);
+              entities.reagendar_confirmed = true;
+              entities.date = _destinoPerguntado.dataISO;
+              entities.time = _destinoPerguntado.hhmm;
+            } else {
+              console.log(`[Webhook] reagendar - resposta à pergunta do destino não é aceite — nada remarcado`);
+              return { status: "needs_info", response: TEXTO_NAO_REMARQUEI, error: TEXTO_NAO_REMARQUEI, bypassAiRewrite: true, entities: { ...entities, date: "", time: "" } } as any;
+            }
+          }
+        }
         // ── Step 1: Need CPF to identify patient ──
         if (!entities.cpf && !entities.attendance_id) {
           return {
@@ -8190,6 +8214,31 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         }
 
         // Gate de carência no reagendar — REMOVIDO (16/08).
+
+        // A MENSAGEM ATUAL TEM DE AUTORIZAR A TROCA (10/11). Em 60 dias, 4 remarcações
+        // saíram em cima de "Isso é mão né?", "Consulta para meu marido Jose Roberto",
+        // "Convenio" e "Como ficou?": o classificador marcou reagendar_confirmed e a data e
+        // a hora vieram do contexto. O PUT só sai quando a mensagem traz número (hora, data,
+        // CPF) ou é um aceite; senão a Julia pergunta uma vez, com a data e a hora.
+        if (/^\d{4}-\d{2}-\d{2}$/.test(String(reschedIsoDate)) && /^\d{2}:\d{2}$/.test(String(reschedIsoTime))) {
+          const _ultimaJuliaP = [...(recentMessages || [])].reverse().find((m: any) => m?.role === "assistant");
+          const _autP = autorizacaoDoRemarcar(currentMessageText, _ultimaJuliaP?.content);
+          if (_autP !== "autoriza") {
+            console.log(`[Webhook] reagendar - "${String(currentMessageText || "").slice(0, 40)}" não é escolha nem aceite (${_autP}) — sem PUT`);
+            if (_autP === "nao_remarcar") {
+              return { status: "needs_info", response: TEXTO_NAO_REMARQUEI, error: TEXTO_NAO_REMARQUEI, bypassAiRewrite: true, entities: { ...entities, attendance_id: attId, date: "", time: "" } } as any;
+            }
+            const _pergDestino = textoConfirmaDestinoDoRemarcar(reschedIsoDate, reschedIsoTime);
+            return {
+              status: "needs_info",
+              response: _pergDestino,
+              error: _pergDestino,
+              bypassAiRewrite: true,
+              verifiedSchedule: true,
+              entities: { ...entities, attendance_id: attId, doctor_name: origDoctorName },
+            } as any;
+          }
+        }
 
         // FIX (Swagger 04/07): a rota e' /attendances/{id}/reschedule — o codigo
         // chamava com a ordem INVERTIDA (reschedule/{id}) e sempre 404ava.
