@@ -1206,6 +1206,27 @@ export const TEXTO_SEM_CONSULTA_FUTURA =
   "Não encontrei nenhuma consulta futura no seu CPF aqui no sistema. Vou passar para a nossa equipe conferir e te responder por aqui.";
 export const TEXTO_SEM_CONSULTA_PARA_CANCELAR =
   "Não encontrei nenhuma consulta futura no seu CPF para cancelar. Vou passar para a nossa equipe conferir e te responder por aqui.";
+// O AMIGO NÃO ACEITOU A TROCA DE UMA CONSULTA MARCADA PELA EQUIPE (10/11, André: 05/11
+// "Dia 23/11 as 9:20" e "23/11 as 9:40", 06/11 de novo — os três recusados com "O horário
+// selecionado não está disponível"). A consulta tinha um tipo que a API do robô não expõe
+// (478248); a lista veio da agenda da CONSULTA do mesmo médico e o PUT recusou todos.
+// "Alguém pegou antes — me diga outra data" era falso e virava laço (freio de repetição,
+// "Atendente", 2 h de espera). Quem remarca essa é a equipe, pela tela do Amigo. Casa a
+// PROMESSA_DE_HUMANO_RE de propósito: é a rede da promessa que transfere.
+export const TEXTO_REMARCACAO_NAO_ACEITA =
+  "Não consegui remarcar esse horário por aqui — o sistema da agenda não aceitou a troca para a sua consulta. 🙏 Vou passar para a nossa equipe remarcar para você.";
+
+/**
+ * A mensagem não traz destino nenhum — nem número, nem dia, nem período? Na resposta à
+ * confirmação, "Remarcar" e "Não conseguirei ir" começam pela lista dos próximos horários:
+ * a data e a hora que a recuperação de contexto trouxe da conversa de ontem não são a
+ * escolha de hoje (André, 06/11: "Remarcar" foi direto para o PUT com o 23/11 da véspera).
+ */
+export function semDestinoNoTexto(texto: unknown): boolean {
+  const t = semMetadados(texto);
+  if (/\d/.test(t)) return false;
+  return !/(?<![\p{L}])(?:amanh[ãa]|hoje|segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo|semana|m[êe]s|manh[ãa]|tarde|noite|cedo|janeiro|fevereiro|mar[çc]o|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)(?![\p{L}])/iu.test(t);
+}
 /** CPF sem cadastro: pede para conferir os números, sem prometer gente ainda. */
 export function textoCpfNaoEncontrado(cpf?: unknown): string {
   const d = String(cpf || "").replace(/\D/g, "");

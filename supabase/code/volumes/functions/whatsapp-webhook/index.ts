@@ -14,6 +14,7 @@ import {
   somaDiasISO,
   TEXTO_SEM_CONSULTA_FUTURA,
   TEXTO_SEM_CONSULTA_PARA_CANCELAR,
+  TEXTO_REMARCACAO_NAO_ACEITA,
   textoCpfNaoEncontrado,
   pedeHorarioMaisCedo,
   textoMesmaLista,
@@ -86,6 +87,7 @@ import {
   horaPedidaSemDia,
   ehPerguntaDeCobertura,
   ehTextoAtrasoPodeVir,
+  semDestinoNoTexto,
   convenioNaoEncontradoNaPergunta,
   pacienteDisseParticular,
   textoConvenioForaDaLista,
@@ -7559,6 +7561,10 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
 
 
       case "reagendar": {
+        // a lista de horários veio da agenda da CONSULTA porque o tipo desta consulta não
+        // aparece para o robô (ver "AGENDA VAZIA COM O TIPO DA CONSULTA") — decide o texto
+        // quando o Amigo recusa a troca (10/11, André)
+        let _agendaEmprestadaDaConsulta = false;
         // TROCAR DE MÉDICO não é remarcar a mesma consulta (13/10, Antonio): a equipe ajusta
         if (querTrocarDeMedico(currentMessageText || "")) {
           console.log(`[Webhook] reagendar - paciente quer trocar de médico — passando para a equipe`);
@@ -7880,6 +7886,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                   const _consId = _cons ? String((_cons as any).id || "") : "";
                   if (_consId && _consId !== origEventId) {
                     console.log(`[Webhook] reagendar - agenda vazia com o tipo da consulta (${origEventId}) — usando a agenda da CONSULTA (${_consId}) do mesmo médico`);
+                    _agendaEmprestadaDaConsulta = true;
                     const _calRes2 = await tryFetch(`calendar?place_id=${origPlaceId}&event_id=${_consId}&user_id=${origDoctorId}&company_id=${companyId}`, amigoToken);
                     const _cal2 = normalizeApiResponse(_calRes2) as Array<Record<string, unknown>>;
                     if (Array.isArray(_cal2)) {
@@ -8278,6 +8285,18 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         // PUT, isto só acontece se alguém pegou o horário entre a lista e a escolha (ou
         // se a agenda não pôde ser lida). O texto diz o que houve e o próximo passo.
         if (/n[ãa]o est[áa] dispon[ií]vel/i.test(JSON.stringify(reschedFinal.data || ""))) {
+          // CONSULTA MARCADA PELA EQUIPE (10/11, André): com a lista emprestada da agenda da
+          // CONSULTA, o Amigo recusou os três horários que ele escolheu. Não foi "alguém
+          // pegou antes" — pedir outra data só repetia a recusa. A equipe remarca.
+          if (_agendaEmprestadaDaConsulta) {
+            console.log(`[Webhook] reagendar - Amigo recusou a troca de consulta com tipo fora da API do robô — passando para a equipe`);
+            return {
+              status: "failed",
+              response: TEXTO_REMARCACAO_NAO_ACEITA,
+              error: "Amigo recusou o reagendamento: consulta marcada pela equipe (tipo fora da API do robô)",
+              bypassAiRewrite: true,
+            } as any;
+          }
           return {
             status: "failed",
             response: `Esse horário não está mais livre na agenda${origDoctorName ? ` do ${origDoctorName}` : ""} — alguém pegou antes. 🙏 Me diga outra data ou período que eu confiro os horários livres para você.`,
@@ -17082,6 +17101,14 @@ Deno.serve(async (req) => {
                 // a data/hora que o classificador copiou é a da consulta atual, não um destino
                 const _d = normalizeDateToISO(String(classification.date || "")) || "";
                 if (_d === String(_ciR.data_consulta)) { classification.date = ""; classification.time = ""; }
+                // SEM DESTINO NA MENSAGEM (10/11, André: "Remarcar" foi direto para o PUT com
+                // o 23/11 09:40 que a recuperação de contexto trouxe da conversa da véspera).
+                // "Remarcar" / "Não conseguirei ir" começam pela lista dos próximos horários.
+                else if (semDestinoNoTexto(_txtR) && (classification.date || classification.time)) {
+                  console.log(`[RemarcarConfirmacao] mensagem sem destino — descartando ${classification.date || "-"} ${classification.time || "-"} trazidos do contexto`);
+                  classification.date = "";
+                  classification.time = "";
+                }
               }
             }
           }
