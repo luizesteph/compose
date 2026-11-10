@@ -8215,11 +8215,12 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
 
         // Gate de carência no reagendar — REMOVIDO (16/08).
 
-        // A MENSAGEM ATUAL TEM DE AUTORIZAR A TROCA (10/11). Em 60 dias, 4 remarcações
-        // saíram em cima de "Isso é mão né?", "Consulta para meu marido Jose Roberto",
-        // "Convenio" e "Como ficou?": o classificador marcou reagendar_confirmed e a data e
-        // a hora vieram do contexto. O PUT só sai quando a mensagem traz número (hora, data,
-        // CPF) ou é um aceite; senão a Julia pergunta uma vez, com a data e a hora.
+        // A MENSAGEM ATUAL TEM DE AUTORIZAR A TROCA (10/11). Em 90 dias, 54 trocas foram
+        // enviadas ao Amigo; em 7 a mensagem não era escolha nem aceite ("Isso é mão né?",
+        // "Consulta para meu marido Jose Roberto", "Convenio", "Como ficou?", "Remarcar"…):
+        // o classificador marcou reagendar_confirmed e a data e a hora vieram do contexto.
+        // O PUT só sai quando a mensagem traz número (hora, data, CPF) ou é um aceite; senão
+        // a Julia pergunta uma vez, com a data e a hora. Esta trava só tira PUT.
         if (/^\d{4}-\d{2}-\d{2}$/.test(String(reschedIsoDate)) && /^\d{2}:\d{2}$/.test(String(reschedIsoTime))) {
           const _ultimaJuliaP = [...(recentMessages || [])].reverse().find((m: any) => m?.role === "assistant");
           const _autP = autorizacaoDoRemarcar(currentMessageText, _ultimaJuliaP?.content);

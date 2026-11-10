@@ -2457,11 +2457,12 @@ export function textoEncontreiConsulta(nomePaciente: string, medico: string, ini
 export const TEXTO_NAO_E_ESSA_CONSULTA =
   "Entendi! Me conta o que está diferente: é a consulta de outra pessoa, com outro médico ou em outra data? Se for de outra pessoa, me passa o CPF dela. 😊";
 // ─── O PUT DO REMARCAR PRECISA DE UMA ESCOLHA OU DE UM "SIM" (10/11) ────────────────
-// Em 60 dias, 4 remarcações foram executadas em cima de mensagem que não era escolha nem
+// Em 90 dias, 54 trocas foram enviadas ao Amigo; em 7 a mensagem não era escolha nem
 // aceite: "Isso é mão né?" (03/11), "Consulta para meu marido Jose Roberto" (07/10),
-// "Convenio" (25/09) e "Como ficou?" (01/10). O classificador marcou reagendar_confirmed e
-// a data e a hora vieram do contexto. Nas outras ~40, a mensagem trazia número (hora, data,
-// CPF) ou era um "sim". A regra: a mensagem ATUAL autoriza a troca quando traz número ou é
+// "Como ficou?" (01/10), "Convenio" (25/09), "Convênio Bradesco" (04/09), "Remarcar"
+// (06/11) e "Lucas miotto" (10/09). O classificador marcou reagendar_confirmed e a data e
+// a hora vieram do contexto. Nas outras 47, a mensagem trazia número (hora, data, CPF) ou
+// era um aceite. A regra: a mensagem ATUAL autoriza a troca quando traz número ou é
 // um aceite; senão a Julia pergunta uma vez ("posso remarcar … para dd/mm/aaaa às HH:MM?")
 // e o "sim" a essa pergunta faz a troca. "Não" ou qualquer outra coisa depois da pergunta
 // não remarca nada.
