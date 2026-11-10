@@ -86,6 +86,9 @@ import {
   horaPedidaSemDia,
   ehPerguntaDeCobertura,
   ehTextoAtrasoPodeVir,
+  convenioNaoEncontradoNaPergunta,
+  pacienteDisseParticular,
+  textoConvenioForaDaLista,
   textoConvenioAtendidoPosMarcacao,
   MOTIVO_ROBO,
   MINIMO_CONVERSA_DE_ROBO,
@@ -8451,6 +8454,34 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           };
         }
         const born = _bornISO;
+        // CONVÊNIO FORA DA LISTA NÃO VIRA PARTICULAR SEM O PACIENTE DIZER (10/11, Andréia
+        // 03/11: "plano MedSenior Black 5" → "Não encontrei o convênio…" → ela respondeu
+        // "Não há" e a consulta foi marcada como particular; cancelada no dia seguinte).
+        // Se a última fala da Julia foi "Não encontrei o convênio X no sistema", marcar
+        // como particular exige a palavra do paciente; senão, a Julia explica e pergunta.
+        {
+          const _ultJuliaConv = String([...(recentMessages || [])].reverse().find((m: any) => m?.role === "assistant")?.content || "");
+          const _convForaDaLista = convenioNaoEncontradoNaPergunta(_ultJuliaConv);
+          const _escolhaConv = stripAccents(String(entities.insurance_choice || "").toLowerCase()).trim();
+          const _iriaComoParticular = !_escolhaConv || _escolhaConv === "particular" || isNegativeInsuranceClaim(_escolhaConv);
+          if (_convForaDaLista && _iriaComoParticular && !pacienteDisseParticular(currentMessageText || "")) {
+            console.log(`[Webhook] cadastrar - convênio "${_convForaDaLista}" fora da lista e o paciente não disse "particular" — perguntando antes de marcar`);
+            const _txtFora = textoConvenioForaDaLista(
+              _convForaDaLista,
+              precoDaConsulta(customNotes),
+              String((_schedCtx as any)?.date || entities.date || ""),
+              String((_schedCtx as any)?.time || entities.time || ""),
+            );
+            return {
+              status: "needs_info",
+              response: _txtFora,
+              error: _txtFora,
+              bypassAiRewrite: true,
+              entities: entities,
+              ...(_hasSchedCtx ? { schedulingContext: _schedCtx } : {}),
+            } as any;
+          }
+        }
         // CONVÊNIO NÃO INFORMADO NÃO É PARTICULAR (13/10, Mayne: mandou nome, nascimento e
         // endereço, sem convênio; a Julia marcou "como particular" e ela era Bradesco).
         // Pergunta UMA vez; se a pergunta já foi feita e a resposta não trouxe convênio,

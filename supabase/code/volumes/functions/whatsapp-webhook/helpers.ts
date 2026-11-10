@@ -3186,6 +3186,38 @@ export function textoConvenioReembolsoPosMarcacao(convenio: string, preco: strin
   );
 }
 
+// CONVÊNIO QUE NÃO ESTÁ NA LISTA NÃO VIRA PARTICULAR SEM O PACIENTE DIZER (10/11).
+// Andréia, 03/11: pediu consulta "através do plano de saúde MedSenior Black 5". A Julia
+// respondeu "Não encontrei o convênio MedSenior Black 5 no sistema… escolha uma das opções…
+// se preferir particular, responda particular". Ela escreveu "Não há" — não há o plano DELA
+// na lista —, o classificador leu "particular" e a consulta foi marcada como particular;
+// no dia seguinte a equipe cancelou. Depois dessa pergunta, só a palavra do paciente
+// ("particular", "sem convênio", "reembolso") marca como particular; qualquer outra resposta
+// recebe a explicação e a pergunta.
+export function convenioNaoEncontradoNaPergunta(ultimaDaJulia: unknown): string | null {
+  const m = String(ultimaDaJulia ?? "").match(
+    /n[ãa]o\s+encontrei\s+o\s+conv[êe]nio\s+[*“”"'‘’]*([^*“”"'‘’\n]{2,60}?)[*“”"'‘’]*\s+no\s+sistema/i,
+  );
+  return m ? m[1].trim() : null;
+}
+
+/** O paciente ESCREVEU que é particular / sem convênio? (a palavra dele, não a leitura do classificador) */
+export function pacienteDisseParticular(texto: unknown): boolean {
+  const t = stripAccents(semMetadados(texto).toLowerCase());
+  return /\bparticular\b|\breembolso\b|\bnao\s+tenho\s+(?:conv|plano)|\bsem\s+(?:conv|plano)|\bdo\s+(?:meu\s+)?bolso\b/.test(t);
+}
+
+export function textoConvenioForaDaLista(convenio: string, preco: string | null, dataISO: string, hhmm: string): string {
+  const d = String(dataISO || "");
+  const data = /^\d{4}-\d{2}-\d{2}$/.test(d) ? `${d.slice(8, 10)}/${d.slice(5, 7)}` : "";
+  const quando = data ? ` o horário de ${data}${hhmm ? ` às ${hhmm}` : ""}` : " a consulta";
+  return (
+    `O convênio *${convenio}* não está entre os que a clínica atende. 🙏 ` +
+    `Sem convênio da lista, a consulta é *particular*${preco ? ` (${preco})` : ""}, e emitimos a nota fiscal para você pedir reembolso ao seu plano. ` +
+    `Quer que eu confirme${quando} como particular? Responda *particular* para confirmar — ou me diga outro convênio.`
+  );
+}
+
 // PERGUNTA DE COBERTURA LOGO DEPOIS DE MARCAR (10/11). "Vcs atendem Omint?" (Paula 04/11),
 // "Atendem plano Hapvida?" (Celso 03/11) e "Ele ainda atende convênio do Bradesco?" (Karen
 // 09/11) recebiam "Anotado! A consulta continua marcada… a atualização do convênio é com a
@@ -3194,7 +3226,8 @@ export function textoConvenioReembolsoPosMarcacao(convenio: string, preco: strin
 // planos é confirmado na hora; as outras seguem para o fluxo que responde sobre convênios.
 export function ehPerguntaDeCobertura(texto: unknown): boolean {
   const t = stripAccents(String(texto ?? "").toLowerCase());
-  return t.includes("?") || /\b(?:atende[mr]?|aceita[mr]?|cobre[m]?|trabalha[m]?\s+com)\b/.test(t);
+  // "Preciso da confirmação se o atendimento será pelo plano X" (Andréia 03/11) também pergunta
+  return t.includes("?") || /\b(?:atende[mr]?|aceita[mr]?|cobre[m]?|trabalha[m]?\s+com)\b|\b(?:sera|seria|vai\s+ser|e)\s+pelo\s+(?:plano|convenio)\b|\bconfirma\w*\s+se\b/.test(t);
 }
 
 export function textoConvenioAtendidoPosMarcacao(convenio: string, dataISO: string, hhmm: string): string {
