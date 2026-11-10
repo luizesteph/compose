@@ -484,7 +484,7 @@ const FISIO_PEDIDO_AMPLO_RE = new RegExp(
 // quem JÁ faz fisio aqui: desmarcar/remarcar/alterar a sessão, confirmar os dias,
 // "agendei uma sessão", "meus horários", "terminei as sessões", "já fiz"
 const FISIO_SESSAO_EM_CURSO_RE = new RegExp(
-  "\\b(?:(?:desmarc|remarc|cancel|alter|mud|troc)\\w*\\s+(?:a|as|o|os|minha|minhas|essa|essas|uma)?\\s*" + FISIO_SESSAO_NOME +
+  "\\b(?:(?:desmarc|remarc|cancel|alter|mud|troc)\\w*\\s+(?:a|as|o|os|minha|minhas|essa|essas|uma)?\\s*(?:(?:duas|dois|tr[eê]s|quatro|\\d{1,2})\\s+)?" + FISIO_SESSAO_NOME +
     "|confirm\\w*(?!\\s+se\\b)[\\s\\S]{0,60}\\b" + FISIO_SESSAO_NOME +
     "|" + FISIO_SESSAO_NOME + "[\\s\\S]{0,60}\\bconfirmad\\w*" +
     "|(?:marquei|agendei|tenho|fiz)\\s+(?:a\\s+|uma\\s+|as\\s+|minha\\s+|minhas\\s+|\\d+\\s+)?" + FISIO_SESSAO_NOME +
@@ -552,6 +552,21 @@ export function classificarPedidoDeFisioterapia(texto: unknown): IntencaoFisio {
   if (FISIO_CONVENIO_RE.test(t)) return "convenio";
   if (FISIO_FALAR_RE.test(t)) return "falar_com_fisio";
   return "agendar";
+}
+
+/**
+ * SESSÃO DE FISIOTERAPIA NÃO É CONSULTA (10/11). "Preciso remarcar a sessão de hoje"
+ * (Priscila 04 e 09/11), "preciso cancelar minha sessão", "nota fiscal das minhas
+ * sessões" eram classificados como remarcar/cancelar/consultar: a Julia pedia CPF e
+ * respondia "Não encontrei consultas futuras" — as sessões não ficam na agenda que ela
+ * enxerga. Em 90 dias foram 7 mensagens assim, nenhuma resolvida. Com "sessão" no texto
+ * e pedido de sessão em curso, nota fiscal ou pagamento, o caso é da equipe da fisio.
+ */
+export function pedidoSobreSessaoDeFisio(texto: unknown): boolean {
+  const t = String(texto ?? "");
+  if (!/(?<![\p{L}])sess(?:[aã]o|[oõ]es)(?![\p{L}])/iu.test(t)) return false;
+  const categoria = classificarPedidoDeFisioterapia(t);
+  return categoria === "sessao_em_curso" || categoria === "nota_fiscal" || categoria === "pagamento";
 }
 
 // SINAL DE FRUSTRAÇÃO — SEM CAIXA ALTA E SEM "!!" (caso Cristiano, 14/09) ─────
@@ -1032,6 +1047,27 @@ export function horaDoTexto(texto: unknown): string | null {
   m = t.match(/(?:^|\s)as\s+(\d{1,2})(?![\d/:;.,h])/);
   if (m) return ok(+m[1], 0);
   return null;
+}
+
+/**
+ * HORA PEDIDA AGORA, SEM DIA (10/11, Elaine 05–06/11). "Algum dia às 17hs", "17:00 hs",
+ * "Outra data as 17:00 hs", "Somente 17hs": a paciente pediu a hora sete vezes e recebeu
+ * cinco vezes a mesma lista — os 4 primeiros horários de cada dia — e "não há horário às
+ * 17h"; a equipe achou 16/11 às 17:00. Devolve a hora ("HH:MM") quando a mensagem atual
+ * diz a hora e NÃO diz o dia (data, dia da semana ou período de datas); senão, null — com
+ * dia dito, quem decide é o caminho de data + hora.
+ */
+export function horaPedidaSemDia(
+  mensagemAtual: unknown,
+  dia: { falouDeDia?: boolean; diaDaSemana?: number | null; temJanela?: boolean },
+): string | null {
+  if (dia.falouDeDia || dia.temJanela || (dia.diaDaSemana !== null && dia.diaDaSemana !== undefined)) return null;
+  const t = stripAccents(semMetadados(mensagemAtual).toLowerCase());
+  // "não consigo às 10h", "às 10 não posso": a hora é a que NÃO serve
+  if (/\bnao\s+(?:consigo|posso|vou|irei|conseguirei|poderei|da|vai\s+dar|tenho\s+como)\b/.test(t)) return null;
+  // faixa ou período não é hora exata: "a partir das 14", "depois das 16h", "até as 10", "de manhã"
+  if (/\b(?:a\s+partir|depois|antes|ate|apos|entre)\s+(?:d?[ao]s?\s+)?\d|\b(?:manha|tarde|noite|cedo|almoco)\b/.test(t)) return null;
+  return horaDoTexto(mensagemAtual);
 }
 
 /**
@@ -1826,6 +1862,8 @@ export function textoHorariosNaJanela(args: {
   agendaAte?: string;
   /** a lista é dos horários DEPOIS da janela pedida (15/10) — "os próximos", não "os primeiros" */
   depoisDoPedido?: boolean;
+  /** sem os dias pedidos em semana nenhuma: a lista é do PERÍODO pedido, em outros dias (10/11) */
+  noPeriodoOutrosDias?: boolean;
 }): string {
   const medico = String(args.medico || "o médico").trim() || "o médico";
   const per = args.periodo === "manha" ? " (manhã)" : args.periodo === "tarde" ? " (tarde)" : "";
@@ -1833,6 +1871,20 @@ export function textoHorariosNaJanela(args: {
   const dias = args.janela.rotuloDias || "";
   const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
   const rodape = "\n\nAlgum desses serve? Se preferir outra data ou período, é só me dizer.";
+  // DIA DA SEMANA SEM VAGA NENHUMA (10/11). A agenda que a Julia enxerga não tem as terças
+  // do Dr. Guilherme, as quartas do Dr. Hugo nem as quintas do Dr. Lucas — e a equipe marca
+  // nesses dias (17, 12 e 5 vezes em 45 dias). "Não há vaga às terças" era desmentido pela
+  // atendente minutos depois (Jadi 06/11, Verônica 05/11). O texto continua dizendo o que a
+  // Julia vê, e passa a dizer como chegar a quem vê a agenda inteira.
+  const rodapeDias = dias
+    ? `\n\nAlgum desses serve? Se precisar ser ${dias}, me diga *atendente*: a agenda completa fica com a nossa equipe.`
+    : rodape;
+  // SEM OS DIAS PEDIDOS, PRIMEIRO O QUE HÁ NO PERÍODO PEDIDO (10/11, Jadi: "semana que vem,
+  // terça" recebeu "na semana que vem não encontrei horário… 18/11" com 11/11 e 13/11 livres
+  // na própria semana que vem).
+  if (args.noPeriodoOutrosDias && rot && dias) {
+    return `Não encontrei horário com ${medico} ${dias}. ${cap(rot)}, em outros dias${per}:\n\n${args.corpo}${rodapeDias}`;
+  }
   if (args.depoisDoPedido && rot && args.nivel > 1 && !args.agendaAte) {
     return `${cap(rot)} não encontrei horário livre com ${medico}. Os próximos que encontrei depois disso${per}:\n\n${args.corpo}${rodape}`;
   }
@@ -1846,10 +1898,10 @@ export function textoHorariosNaJanela(args: {
     return `${cap(rot)} não encontrei horário livre com ${medico}${dias ? ` ${dias}` : ""}. Os primeiros que encontrei${dias ? ` ${dias}` : ""}${per}:\n\n${args.corpo}${rodape}`;
   }
   if (rot && dias) {
-    return `${cap(rot)} não encontrei horário livre com ${medico}, e nas próximas semanas não há vaga ${dias}. Os primeiros horários${per}:\n\n${args.corpo}${rodape}`;
+    return `${cap(rot)} não encontrei horário livre com ${medico}, e nas próximas semanas não há vaga ${dias}. Os primeiros horários${per}:\n\n${args.corpo}${rodapeDias}`;
   }
   if (dias) {
-    return `Nas próximas semanas não há vaga com ${medico} ${dias}${per}. Os primeiros horários${per}:\n\n${args.corpo}${rodape}`;
+    return `Nas próximas semanas não há vaga com ${medico} ${dias}${per}. Os primeiros horários${per}:\n\n${args.corpo}${rodapeDias}`;
   }
   return `${cap(rot) || "Nesse período"} não encontrei horário livre com ${medico}. Os primeiros que encontrei${per}:\n\n${args.corpo}${rodape}`;
 }

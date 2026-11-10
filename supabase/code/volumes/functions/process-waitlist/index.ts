@@ -14,6 +14,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 import { chamadaDeCronAutorizada } from "../_shared/cron.ts";
+import { FERIADOS } from "../_shared/confirmacao.ts";
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-cron-secret",
@@ -1301,7 +1302,13 @@ Deno.serve(async (req) => {
     nudgeErr ? `query FALHOU: ${nudgeErr.message}`.slice(0, 160) : `candidatos=${(nudgeCandidates || []).length}`,
   ];
 
-  for (const e of (nudgeCandidates || []) as any[]) {
+  // LEMBRETE SÓ EM DIA ÚTIL (10/11): de 03 a 09/11 saíram 5 no sábado e 1 no domingo. É
+  // só um "continua na lista" — sem vaga para oferecer, não há por que escrever com a
+  // clínica fechada. As OFERTAS de vaga (itens 1–3) continuam saindo todo dia.
+  const _diaDaSemanaSP = new Date(`${sp.todayISO}T12:00:00Z`).getUTCDay(); // 0 = domingo, 6 = sábado
+  const _lembreteHoje = _diaDaSemanaSP >= 1 && _diaDaSemanaSP <= 5 && !FERIADOS.has(sp.todayISO);
+  if (!_lembreteHoje) nudgeDebug.push("sem lembrete hoje: fim de semana ou feriado");
+  for (const e of (_lembreteHoje ? (nudgeCandidates || []) : []) as any[]) {
     try {
       // Nudge só se NUNCA avisado OU último aviso há 2+ dias. Filtro em JS (não no
       // .or() do PostgREST): evita ambiguidade de sintaxe com o timestamp E o caso

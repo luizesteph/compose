@@ -82,6 +82,8 @@ import {
   semMetadados,
   liderVivaDaRajada,
   pareceRoboDeAtendimento,
+  pedidoSobreSessaoDeFisio,
+  horaPedidaSemDia,
   MOTIVO_ROBO,
   MINIMO_CONVERSA_DE_ROBO,
   JANELA_CONVERSA_DE_ROBO_H,
@@ -5413,8 +5415,19 @@ async function executeAction(
                 // — o Dr. Guilherme fechou aquela semana — recebeu de novo 21/10, ANTES do que
                 // ele pediu; a Glaucia achou 03/11 e 04/11). Sem vaga na janela, os próximos
                 // horários DEPOIS dela; só se não houver nenhum depois, os primeiros.
+                // SEM OS DIAS PEDIDOS, PRIMEIRO O PERÍODO PEDIDO (10/11, Jadi 06/11: "semana que
+                // vem, terça" — sem terça em semana nenhuma, saía "na semana que vem não
+                // encontrei horário… 18/11", com 11/11 e 13/11 livres na própria semana que vem).
+                let _noPeriodoOutrosDias = false;
+                if (_nivel === 3 && _jb && _temPeriodo && _temDias) {
+                  const _noPeriodo = _montarLista(filtrarDatasPelaJanela(availableIso, _jb, { semDias: true }));
+                  if (_noPeriodo.length > 0) {
+                    datesWithSlots = _noPeriodo;
+                    _noPeriodoOutrosDias = true;
+                  }
+                }
                 let _depoisDoPedido = false;
-                if (_jb && _nivel > 1) {
+                if (_jb && _nivel > 1 && !_noPeriodoOutrosDias) {
                   const _datasJ = ((_jb.datas || []) as string[]).slice().sort();
                   const _corte = _datasJ.length ? _datasJ[_datasJ.length - 1] : (_jb.fim || _jb.inicio || "");
                   if (_corte) {
@@ -5455,6 +5468,7 @@ async function executeAction(
                         corpo: body,
                         agendaAte: _agendaNaoAberta ? _ultimaAberta : undefined,
                         depoisDoPedido: _depoisDoPedido,
+                        noPeriodoOutrosDias: _noPeriodoOutrosDias,
                       })
                     : header + body + footer;
                   // Sem vaga no prazo pedido (janela não atendida) ou "tem antes?": os outros
@@ -7970,7 +7984,18 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               const _adiar = !!origStart && !_antecipar && querAdiar(_msgsDoPaciente);
               if (_adiar) console.log(`[Webhook] reagendar - paciente quer ADIAR — só horários depois de ${origStart}`);
               const _agoraRe = agoraSP();
-              const _tentarData = (d: string): void => {
+              // HORA PEDIDA AGORA, SEM DIA (10/11, Elaine 05–06/11: pediu 17h sete vezes; a
+              // lista mostrava os 4 primeiros horários de cada dia — 14:20 a 15:20 — e a
+              // resposta era "não há horário às 17h"; a equipe achou 16/11 17:00). Quando a
+              // mensagem atual diz a hora e não diz o dia, as datas mostradas são as que TÊM
+              // essa hora; se nenhuma tem, a resposta diz isso antes da lista normal.
+              const _horaPedidaAgora = (entities as any).remarcar_da_confirmacao ? null : horaPedidaSemDia(currentMessageText || "", {
+                falouDeDia: _falouDeDia,
+                diaDaSemana: _diaPedido,
+                temJanela: !!(_janelaRe && (_janelaRe.inicio || _janelaRe.datas || _janelaRe.diasDaSemana)),
+              });
+              let _horaNaLista: "achou" | "nao_achou" | "" = "";
+              const _tentarData = (d: string, soAHora?: string): void => {
                 const dow = getWeekday(d);
                 if (dow === 0 || dow === 6) return; // skip weekends
                 let slots = slotsMap.get(d) || [];
@@ -7978,8 +8003,12 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                 slots = slots.filter((t) => !slotJaPassou(d, t, _agoraRe));
                 if (_antecipar) slots = slots.filter((t) => antesDaConsultaAtual(d, t, origStart));
                 if (_adiar) slots = slots.filter((t) => !antesDaConsultaAtual(d, t, origStart) && `${d} ${t}` !== String(origStart).replace("T", " ").slice(0, 16));
-                if (periodFilter === "manha") slots = slots.filter((t) => t < "12:00");
-                if (periodFilter === "tarde") slots = slots.filter((t) => t >= "12:00");
+                if (soAHora) {
+                  slots = slots.filter((t) => t === soAHora); // a hora pedida manda; o período herdado não corta
+                } else {
+                  if (periodFilter === "manha") slots = slots.filter((t) => t < "12:00");
+                  if (periodFilter === "tarde") slots = slots.filter((t) => t >= "12:00");
+                }
                 if (slots.length === 0) return;
                 datesWithSlots.push({
                   date: d,
@@ -7987,7 +8016,15 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                   slots: slots.slice(0, MAX_SLOTS_PER_DATE),
                 });
               };
-              for (const d of candidateDates) {
+              if (_horaPedidaAgora) {
+                for (const d of candidateDates) {
+                  if (datesWithSlots.length >= MAX_DATES) break;
+                  _tentarData(d, _horaPedidaAgora);
+                }
+                _horaNaLista = datesWithSlots.length > 0 ? "achou" : "nao_achou";
+                console.log(`[Webhook] reagendar - hora pedida agora (${_horaPedidaAgora}), sem dia: ${datesWithSlots.length} data(s) com essa hora`);
+              }
+              for (const d of _horaNaLista === "achou" ? [] : candidateDates) {
                 if (datesWithSlots.length >= MAX_DATES) break;
                 _tentarData(d);
               }
@@ -8020,9 +8057,11 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                     // Asked time not available — list real options
                     const periodLabel =
                       periodFilter === "manha" ? " (manhã)" : periodFilter === "tarde" ? " (tarde)" : "";
-                    const header = `O horário ${wantedTime} não está livre. Estes são os horários reais disponíveis com ${origDoctorName || "o médico"}${periodLabel}:\n\n`;
+                    const header = _horaNaLista === "achou"
+                      ? `Em ${formatDateLabel(wantedDate)} o horário ${wantedTime} não está livre. Às ${wantedTime} com ${origDoctorName || "o médico"} tenho estas datas:\n\n`
+                      : `O horário ${wantedTime} não está livre. Estes são os horários reais disponíveis com ${origDoctorName || "o médico"}${periodLabel}:\n\n`;
                     const body = datesWithSlots.map((p) => `${p.label}: ${p.slots.join(", ")}`).join("\n");
-                    const footer = "\n\nQual data e horário prefere?";
+                    const footer = _horaNaLista === "achou" ? "\n\nQual data prefere?" : "\n\nQual data e horário prefere?";
                     const fullMsg = header + body + footer;
                     if (supabaseClient && clinicTokenId && origDoctorId) {
                       await lockPresentedSlots(supabaseClient, clinicTokenId, origDoctorId, datesWithSlots, senderPhone || "");
@@ -8042,13 +8081,19 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                   const _daConfirmacao = !!(entities as any).remarcar_da_confirmacao && !_semVagaNoPedido && (!entities.date || _ehAConsultaAtual);
                   const header = _daConfirmacao
                     ? cabecalhoRemarcarDaConfirmacao(origStart, origDoctorName)
+                    : _horaNaLista === "achou"
+                    ? `Às ${_horaPedidaAgora} com ${origDoctorName || "o médico"} tenho estas datas:\n\n`
+                    : _horaNaLista === "nao_achou"
+                    ? `Não encontrei horário às ${_horaPedidaAgora} com ${origDoctorName || "o médico"} nas datas abertas da agenda. Os horários que tenho${periodLabel}:\n\n`
                     : _ehAConsultaAtual
                     ? `Essa é a data e o horário da sua consulta atual com ${origDoctorName || "o médico"}. Para mudar, estes são os horários reais disponíveis${periodLabel}:\n\n`
                     : _semVagaNoPedido
                       ? `Nas datas que você pediu não há horário livre com ${origDoctorName || "o médico"}${periodLabel}. Os próximos são:\n\n`
                       : `Confirmei aqui na agenda do ${origDoctorName || "médico"}${periodLabel}. Estes são os horários reais para reagendar:\n\n`;
                   const body = datesWithSlots.map((p) => `${p.label}: ${p.slots.join(", ")}`).join("\n");
-                  const footer = _daConfirmacao ? RODAPE_REMARCAR_DA_CONFIRMACAO : "\n\nQual data e horário prefere?";
+                  const footer = _daConfirmacao
+                    ? RODAPE_REMARCAR_DA_CONFIRMACAO
+                    : _horaNaLista === "achou" ? "\n\nQual data prefere?" : "\n\nQual data e horário prefere?";
                   const fullMsg = header + body + footer;
                   if (supabaseClient && clinicTokenId && origDoctorId) {
                     await lockPresentedSlots(supabaseClient, clinicTokenId, origDoctorId, datesWithSlots, senderPhone || "");
@@ -8058,7 +8103,8 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                     response: fullMsg,
                     error: fullMsg,
                     verifiedSchedule: true,
-                    ...(_daConfirmacao ? { bypassAiRewrite: true } : {}),
+                    // a lista da hora pedida sai literal: reescrita, virava "não há horário às 17h"
+                    ...(_daConfirmacao || _horaNaLista ? { bypassAiRewrite: true } : {}),
                     entities: { ...entities, attendance_id: attId, doctor_name: origDoctorName },
                   } as any;
                 }
@@ -17014,6 +17060,14 @@ Deno.serve(async (req) => {
       (globalThis as any).__currentConversationId = conversationId;
 
       // Execute action (now with supabase client and clinicTokenId for doctor_settings filtering)
+      // SESSÃO DE FISIOTERAPIA NÃO É CONSULTA (10/11, Priscila: "Preciso remarcar a sessão
+      // de hoje" → remarcar → CPF → "Não encontrei consultas futuras"). Sessão em curso,
+      // nota fiscal e pagamento de sessão vão para o fluxo da fisio (equipe), não para a
+      // agenda de consultas.
+      if (["reagendar", "cancelar", "consultar"].includes(String(classification.intent || "")) && pedidoSobreSessaoDeFisio(finalMessage || "")) {
+        console.log(`[Webhook] ${classification.intent} sobre SESSÃO de fisioterapia — seguindo como solicitar_fisioterapia`);
+        classification.intent = "solicitar_fisioterapia";
+      }
       // CONSULTA COM O MÉDICO NÃO É FISIOTERAPIA (07/10, Renilson; pedido do dono): o
       // classificador manda para a fisio quem cita "fisio" na frase, mas "retorno",
       // "marcar consulta", "encaixe" com o médico é agendamento.
