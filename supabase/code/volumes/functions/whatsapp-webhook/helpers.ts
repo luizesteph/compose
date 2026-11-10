@@ -2192,11 +2192,18 @@ export function consultaParaOutraPessoa(textosDoPaciente: unknown[] | null | und
   return null;
 }
 
-/** O CPF apareceu digitado pelo paciente em alguma mensagem? (Senão veio do cache ou do telefone.) */
+/** O CPF apareceu digitado pelo paciente em alguma mensagem? (Senão veio do cache ou do telefone.)
+ *
+ *  O COMENTÁRIO DE METADADOS NÃO É FALA DO PACIENTE (10/11, Karina/Leandro, Carlos e
+ *  Camila/José Rodolfo): o histórico chega com "<!-- intent=agendar cpf=… -->" colado em
+ *  cada fala — é o CPF que o CLASSIFICADOR achou (cache, telefone do dono), não o que a
+ *  pessoa digitou. Lido junto, todo CPF parecia "digitado" e a consulta "para o meu
+ *  marido" ia para o cadastro de quem escrevia: 3 marcações no paciente errado de 03 a
+ *  09/11. O comentário sai antes de procurar os dígitos. */
 export function cpfDigitadoNaConversa(cpf: unknown, textos: unknown[] | null | undefined): boolean {
   const d = String(cpf ?? "").replace(/\D/g, "");
   if (d.length !== 11) return false;
-  return (textos || []).some((t) => String(t ?? "").replace(/\D/g, "").includes(d));
+  return (textos || []).some((t) => String(t ?? "").replace(/<!--[\s\S]*?-->/g, " ").replace(/\D/g, "").includes(d));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

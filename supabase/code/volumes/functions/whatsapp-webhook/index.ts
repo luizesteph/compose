@@ -17072,6 +17072,9 @@ Deno.serve(async (req) => {
       }
       // NOME DEPOIS DO "CPF NÃO ENCONTRADO" (20/10, Renata e Kris): a Julia ofereceu "me diga
       // o nome completo que eu passo para a equipe" e o nome foi engolido como CPF repetido.
+      // 10/11 (Daiana/Tarcisio, Kyscila): o texto da 2ª falha ("Não localizei o cadastro por
+      // esse CPF de novo… me mande o nome completo") também pede o nome — e o nome que vinha
+      // depois dele caía no modelo ("localizei seu cadastro pelo nome", "qual data?").
       let _cadastroPeloNome = "";
       if (conversationId && pareceNomeCompleto(finalMessage || "")) {
         try {
@@ -17083,7 +17086,7 @@ Deno.serve(async (req) => {
             .order("created_at", { ascending: false })
             .limit(1)
             .maybeSingle();
-          if (_ultN && String(_ultN.ai_intent || "") !== "manual_reply" && /^Não encontrei cadastro com/.test(String(_ultN.message_text || "")) &&
+          if (_ultN && String(_ultN.ai_intent || "") !== "manual_reply" && /^(Não encontrei cadastro com|Não localizei o cadastro por esse CPF)/.test(String(_ultN.message_text || "")) &&
             Date.now() - Date.parse(String(_ultN.created_at)) < 30 * 60_000) {
             console.log(`[CadastroPeloNome] nome depois do CPF não encontrado — equipe procura pelo nome`);
             _cadastroPeloNome = String(finalMessage || "").trim().replace(/\s+/g, " ");
