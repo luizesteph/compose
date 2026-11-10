@@ -17,6 +17,9 @@
 // "Recebi seu pedido de encaixe!" — por isso a exceção depois do "ainda".
 export const URGENCIA_AGENDA_RE = /\b(encaix(e|ar|amento)|hoje\s+ainda(?!\s+(?:[ée]|eh|est[áa]|era|foi|n[ãa]o|estou)(?![\p{L}]))|hoje\s+mesmo|agora\s+mesmo)\b/iu;
 
+const ENCAIXE_RECUSADO_RE =
+  /(?<![\p{L}])n[aã]o\s+(?:quero|queremos|preciso|precisa|precisamos|necessito|gostaria)\s+(?:mais\s+)?(?:de\s+|do\s+)?(?:um\s+|o\s+|nenhum\s+)?encaix(?:e|ar|amento)(?![\p{L}])/giu;
+
 export const URGENCY_PATTERNS: RegExp[] = [
   /\b(emerg[eê]nc[íi]a|urg[eê]ncia|urgente)\b/i,
   /\b(p[\s.]*s[\s.]*|pronto[\s-]?socorro)\b/i,
@@ -159,9 +162,12 @@ export function parseWaitlistPeriod(text: string): "manha" | "tarde" | "qualquer
   return null;
 }
 
-export const WAITLIST_KEYWORD_RE = /\blista\s+d?e?\s*espera\b/i;
+// "FILA de espera" é a mesma lista (10/11, Maria Luisa 09/11: "poderia me colocar na fila
+// de espera?" virou unknown, o modelo prometeu "vou te incluir" e ela não entrou). Em 90
+// dias a expressão apareceu 3 vezes, as 3 falando da lista de espera.
+export const WAITLIST_KEYWORD_RE = /\b(?:lista|fila)\s+d?e?\s*espera\b/i;
 export const WAITLIST_LEAVE_RE =
-  /\b(sair?|saia|remover?|retirar?|tirar?|cancelar?)\b[\s\S]{0,30}?\blista\s+d?e?\s*espera\b|\blista\s+d?e?\s*espera\b[\s\S]{0,20}?\b(sair|remover|cancelar|tirar)\b/i;
+  /\b(sair?|saia|remover?|retirar?|tirar?|cancelar?)\b[\s\S]{0,30}?\b(?:lista|fila)\s+d?e?\s*espera\b|\b(?:lista|fila)\s+d?e?\s*espera\b[\s\S]{0,20}?\b(sair|remover|cancelar|tirar)\b/i;
 // Aceite/recusa da OFERTA de vaga. Recusa testa PRIMEIRO ("não quero" contém
 // "quero"). Aceite: curto e sem dígitos — "quero marcar com Dr. X às 15h" tem
 // outra intenção e segue o fluxo normal de classificação.
@@ -192,7 +198,7 @@ export function isClosingThanks(text: string): boolean {
   // semana abreviado ("até 6f", "até 2af") continua sendo despedida.
   const semDiaAbreviado = norm.replace(/\b\d\s*[aª]?\s*f(?:eira)?\b/g, " ");
   if (/\d/.test(semDiaAbreviado)) return false;
-  if (/\blista\s+d?e?\s*espera\b/.test(norm)) return false;
+  if (/\b(?:lista|fila)\s+d?e?\s*espera\b/.test(norm)) return false;
   if (/\b(dor|dores|doendo|doi|doeu|inchad\w*|machuc\w*)\b/.test(norm)) return false;
   return !/\b(consulta|horario|agendar|agenda|marcar|desmarcar|encaixe|gostaria|online|on\s*line)\b/.test(norm);
 }
@@ -376,6 +382,14 @@ function padraoDeUrgenciaDispara(p: RegExp, i: number, t: string): boolean {
   // em 2024… vou viajar NESTA QUINTA e preciso de uma receita em inglês dizendo que tenho
   // placas e pinos" recebeu "procure um pronto-socorro" duas vezes).
   if (p.source.includes("fratur") && FRATURA_ANTIGA_RE.test(t) && (URGENCIA_ADMINISTRATIVA_RE.test(t) || /declara\p{L}*/iu.test(t)) && !_DOR_NA_FRASE_RE.test(t)) return false;
+  // "NÃO QUERO ENCAIXE NÃO" É RECUSA (10/11, Dani 09/11: virou "Recebi seu pedido de
+  // encaixe!" + fila). Só a afirmação ("não quero/não preciso de encaixe"); a pergunta
+  // ("não teria um encaixe?", "não tem nenhum encaixe antes?") continua sendo pedido —
+  // em 90 dias eram 19 pedidos assim e 1 recusa.
+  if (p === URGENCIA_AGENDA_RE && !t.includes("?")) {
+    const semRecusa = t.replace(ENCAIXE_RECUSADO_RE, " ");
+    if (semRecusa !== t && !URGENCIA_AGENDA_RE.test(semRecusa)) return false;
+  }
   // o padrão "não consigo/aguento" só vale com verbo clínico depois do "consigo"
   if (p.source.includes("consigo|aguento") && NAO_CONSIGO_DE_AGENDA_RE.test(t)) {
     // "não aguento" continua urgente mesmo falando de horário — é dor, não agenda
@@ -953,7 +967,8 @@ export function mensagemCitaHora(texto: unknown, hhmm: unknown): boolean {
   if (!m) return false;
   const h = String(parseInt(m[1], 10));
   const mm = m[2];
-  const t = String(texto || "").toLowerCase();
+  // sem o comentário de metadados: "time=17:00" é do classificador, não do paciente (10/11)
+  const t = semMetadados(texto).toLowerCase();
   // 15:40 / 15h40 / 15.40 / 15 h 40 — o 0 à esquerda é opcional ("08:40" ou "8:40")
   const comMinuto = new RegExp(`(?<![\\d/])0?${h}\\s*[:h.]\\s*${mm}(?!\\d)`);
   if (comMinuto.test(t)) return true;
@@ -993,11 +1008,11 @@ export function horaEscolhidaPeloPaciente(textosDoPaciente: string[], textosDaJu
 }
 
 export function horaDoTexto(texto: unknown): string | null {
-  const t = stripAccents(String(texto || "").toLowerCase());
+  const t = stripAccents(semMetadados(texto).toLowerCase());
   const ok = (h: number, m: number): string | null =>
     h >= 6 && h <= 21 && m >= 0 && m <= 59 ? `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}` : null;
-  // 15:40 · 9;40 (tecla vizinha)
-  let m = t.match(/(?<![\d/])(\d{1,2})\s*[:;]\s*(\d{2})(?!\d)/);
+  // 15:40 · 9;40 (tecla vizinha) · 9::20 (tecla repetida)
+  let m = t.match(/(?<![\d/])(\d{1,2})\s*[:;]{1,2}\s*(\d{2})(?!\d)/);
   if (m) return ok(+m[1], +m[2]);
   // 10.40hs · 9,20 hs — só com o "h" depois (sem ele é data ou valor)
   m = t.match(/(?<![\d/.,])(\d{1,2})[.,](\d{2})\s*h(?:rs?|s|oras?)?(?![a-z\d])/);
@@ -1912,7 +1927,8 @@ export function podeCancelarSemPerguntar(a: {
     const t = stripAccents(String(a.atual ?? "").toLowerCase()).trim();
     return !/^n(?:ao|a)\b/.test(t) && _SIM_AO_CANCELAR_RE.test(t);
   }
-  const anteriores = (a.anterioresDoPaciente || []).map((x) => String(x ?? "")).slice(-6).reverse();
+  // sem o comentário de metadados: "intent=cancelar" não é o paciente pedindo (10/11)
+  const anteriores = (a.anterioresDoPaciente || []).map((x) => semMetadados(x)).slice(-6).reverse();
   for (const t of anteriores) {
     const p = lerPedidoDeCancelar(t);
     if (p === "cancelar") return true;
@@ -2192,6 +2208,56 @@ export function consultaParaOutraPessoa(textosDoPaciente: unknown[] | null | und
   return null;
 }
 
+// LOTE DE MENSAGENS: A MAIS VELHA PENDENTE É A LÍDER VIVA DA MINHA RAJADA? (10/11)
+// Kyscila, 09/11 08h59: quatro mensagens em 12 s. As quatro execuções travaram 7 s e
+// acordaram juntas, com a mais velha a 25 s — acima do corte de "zumbi" (24 s). As três
+// seguidoras "assumiram" o lote de uma líder viva, cada uma juntou as quatro mensagens e
+// saíram quatro respostas diferentes em 5 s. Rajada = pendentes em sequência com menos de
+// `silencioMs` entre uma e a próxima. Quem está na rajada da mais velha é processada por
+// ela — a menos que ela já tenha passado do teto de espera com folga (aí a execução dela
+// morreu e vale assumir).
+export function liderVivaDaRajada(a: {
+  pendentes: Array<{ id?: unknown; created_at?: unknown }> | null | undefined;
+  meuId: unknown;
+  agoraMs: number;
+  silencioMs: number;
+  esperaMaxMs: number;
+  folgaMs?: number;
+}): boolean {
+  const p = [...(a.pendentes || [])]
+    .map((m) => ({ id: String(m?.id ?? ""), t: Date.parse(String(m?.created_at ?? "")) }))
+    .filter((m) => m.id && Number.isFinite(m.t))
+    .sort((x, y) => x.t - y.t);
+  const i = p.findIndex((m) => m.id === String(a.meuId ?? ""));
+  if (i <= 0) return false; // sou a mais velha, ou não estou entre as pendentes
+  for (let k = 1; k <= i; k++) {
+    if (p[k].t - p[k - 1].t >= a.silencioMs) return false; // a rajada quebrou antes de mim
+  }
+  return a.agoraMs - p[0].t <= a.esperaMaxMs + (a.folgaMs ?? 20_000);
+}
+
+// FALA DO PACIENTE × METADADOS (10/11). O histórico que o webhook monta
+// (`fetchConversationHistory`) cola em cada fala do paciente um comentário com o que o
+// CLASSIFICADOR extraiu: "<!-- intent=cancelar cpf=… date=… time=… -->". Serve ao modelo;
+// não é o que a pessoa escreveu. Toda checagem de "o paciente disse X?" feita sobre esse
+// texto lia também o comentário, e três proteções deixavam de funcionar:
+//   • consulta "para o meu marido" marcada no cadastro de quem escrevia (CPF "digitado");
+//   • "Não conseguirei ir" + CPF cancelando sem perguntar ("intent=cancelar" lido como
+//     pedido — 5 dos 52 cancelamentos em 60 dias, a Silvia de 29/10 entre eles);
+//   • hora que só o classificador achou indo para o PUT do remarcar (13 de 115 em 45 dias).
+// Quem decide pelo que o paciente disse usa `falasDoPaciente`/`semMetadados`.
+
+/** Tira o comentário de metadados ("<!-- intent=… cpf=… -->") colado na fala. */
+export function semMetadados(texto: unknown): string {
+  return String(texto ?? "").replace(/<!--[\s\S]*?-->/g, " ").trim();
+}
+
+/** As falas do PACIENTE no histórico, na ordem, só com o que ele escreveu. */
+export function falasDoPaciente(historico: unknown): string[] {
+  const lista = Array.isArray(historico) ? (historico as Array<Record<string, unknown> | null | undefined>) : [];
+  return lista.filter((m) => m?.role === "user").map((m) => semMetadados(m?.content));
+}
+
 /** O CPF apareceu digitado pelo paciente em alguma mensagem? (Senão veio do cache ou do telefone.)
  *
  *  O COMENTÁRIO DE METADADOS NÃO É FALA DO PACIENTE (10/11, Karina/Leandro, Carlos e
@@ -2203,7 +2269,7 @@ export function consultaParaOutraPessoa(textosDoPaciente: unknown[] | null | und
 export function cpfDigitadoNaConversa(cpf: unknown, textos: unknown[] | null | undefined): boolean {
   const d = String(cpf ?? "").replace(/\D/g, "");
   if (d.length !== 11) return false;
-  return (textos || []).some((t) => String(t ?? "").replace(/<!--[\s\S]*?-->/g, " ").replace(/\D/g, "").includes(d));
+  return (textos || []).some((t) => semMetadados(t).replace(/\D/g, "").includes(d));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

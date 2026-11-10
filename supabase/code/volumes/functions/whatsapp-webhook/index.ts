@@ -78,6 +78,9 @@ import {
   textoDoLimiteDeAtendimentos,
   consultaParaOutraPessoa,
   cpfDigitadoNaConversa,
+  falasDoPaciente,
+  semMetadados,
+  liderVivaDaRajada,
   consultaDeHojeJaPassou,
   textoConsultaJaPassou,
   TEXTO_CONFIRMACAO_NAO_REGISTRADA,
@@ -4052,7 +4055,7 @@ async function executeAction(
         // dono do telefone e não vale: a Julia segura o horário e pede nome completo e
         // CPF de quem vai ser atendido. A mensagem mais recente decide ("agora é para mim").
         const _textosDoPaciente = [
-          ...(recentMessages || []).filter((m: any) => m?.role === "user").map((m: any) => String(m?.content || "")),
+          ...falasDoPaciente(recentMessages),
           String(currentMessageText || ""),
         ];
         const _paraOutra = consultaParaOutraPessoa(_textosDoPaciente);
@@ -7083,9 +7086,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         // e oferece remarcar. Sai literal — o modelo não pode transformar a pergunta em
         // "cancelei".
         {
-          const _doPaciente = (recentMessages || [])
-            .filter((m: any) => m?.role === "user")
-            .map((m: any) => String(m?.content || ""));
+          const _doPaciente = falasDoPaciente(recentMessages);
           const _ultimaDaJulia =
             [...(recentMessages || [])].reverse().find((m: any) => m?.role === "assistant")?.content || "";
           if (
@@ -7714,13 +7715,17 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         const _horaAlvo = entities.time ? (normalizeTimeToHHMM(entities.time) || entities.time) : "";
         // A vaga que a lista de espera ofereceu e o paciente aceitou ("quero") vale como
         // hora escolhida por ele (29/09): sem isso o aceite virava a lista inteira.
+        // 10/11: só o que o paciente ESCREVEU (`falasDoPaciente`) — o histórico traz
+        // "time=HH:MM" do classificador num comentário, e a hora que ele nunca disse ia
+        // para o PUT (13 de 115 remarcações em 45 dias). "17;00" e "9::20" também valem.
+        const _horaAlvoHHMM = String(_horaAlvo || "").padStart(5, "0");
         const _horaCitadaPeloPaciente = !!_horaAlvo && [
           String(currentMessageText || ""),
-          ...(recentMessages || []).filter((m: any) => m?.role === "user").map((m: any) => String(m?.content || "")),
+          ...falasDoPaciente(recentMessages),
           ...(recentMessages || [])
             .filter((m: any) => m?.role === "assistant" && /Abriu uma vaga com/.test(String(m?.content || "")))
             .map((m: any) => String(m?.content || "")),
-        ].some((t) => mensagemCitaHora(t, _horaAlvo));
+        ].some((t) => mensagemCitaHora(t, _horaAlvo) || horaDoTexto(t) === _horaAlvoHHMM);
         let origDoctorName = entities.doctor_name || "";
         let origStart = "";   // "YYYY-MM-DD HH:MM" da consulta que vai ser remarcada
 
@@ -7920,7 +7925,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               // "adiantar um pouco?" → "13/10… 20/10"). Lê as últimas mensagens dele: o
               // pedido costuma vir antes do CPF e da hora.
               const _msgsDoPaciente = [
-                ...(recentMessages || []).filter((m: any) => m?.role === "user").map((m: any) => String(m?.content || "")).slice(-5),
+                ...falasDoPaciente(recentMessages).slice(-5),
                 String(currentMessageText || ""),
               ];
               const _antecipar = !!origStart && querAntecipar(_msgsDoPaciente);
@@ -8145,7 +8150,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           // CPF e só um atendimento andou, a Julia diz quem foi e quem não foi, e
           // chama gente. Falhar alto em vez de falhar baixo.
           const _cpfsNaConversa = new Set<string>();
-          for (const _t of [String(currentMessageText || ""), ...(recentMessages || []).map((m: any) => String(m?.content || ""))]) {
+          for (const _t of [String(currentMessageText || ""), ...(recentMessages || []).map((m: any) => semMetadados(m?.content))]) {
             for (const _m of _t.matchAll(/\d{3}\.?\d{3}\.?\d{3}-?\d{2}/g)) {
               const _d = _m[0].replace(/\D/g, "");
               if (isValidCpf(_d)) _cpfsNaConversa.add(_d);
@@ -12991,8 +12996,30 @@ Deno.serve(async (req) => {
           // Safety net: if the "oldest pending" is a zombie (older than 30s and clearly
           // abandoned by a previous early-return guard), take over instead of exiting.
           const oldestAgeMs = Date.now() - new Date(pendingMessages[0].created_at).getTime();
-          const ZOMBIE_CUTOFF_MS = BATCH_QUIET_MS * 3; // 30s
-          if (oldestAgeMs > ZOMBIE_CUTOFF_MS) {
+          const ZOMBIE_CUTOFF_MS = BATCH_QUIET_MS * 3; // 24s
+          // JÁ FUI JUNTADA / LÍDER VIVA (10/11, Kyscila: quatro respostas à mesma rajada).
+          // (1) Se a minha linha não está mais pendente, outra execução já levou o meu
+          //     texto (batched) ou assumiu o lote: processar de novo é resposta dobrada.
+          // (2) A mais velha da MINHA rajada não é zumbi só por ter 24 s — a rajada pode
+          //     ter durado isso, ou as execuções travaram. Ela me processa.
+          if (!pendingMessages.some((m: any) => m.id === messageId)) {
+            console.log(`[Webhook] Batching: msg ${messageId} não está mais pendente (outra execução já a juntou) — saindo.`);
+            return new Response(JSON.stringify({ status: "batched", message: "Already taken by another execution" }), {
+              status: 200,
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+          }
+          const _liderViva = liderVivaDaRajada({
+            pendentes: pendingMessages,
+            meuId: messageId,
+            agoraMs: Date.now(),
+            silencioMs: BATCH_QUIET_MS,
+            esperaMaxMs: BATCH_MAX_MS,
+          });
+          if (oldestAgeMs > ZOMBIE_CUTOFF_MS && _liderViva) {
+            console.log(`[Webhook] Batching: ${oldestPendingId} tem ${Math.round(oldestAgeMs / 1000)}s mas é a líder da minha rajada — não é zumbi.`);
+          }
+          if (oldestAgeMs > ZOMBIE_CUTOFF_MS && !_liderViva) {
             console.log(
               `[Webhook] Batching: zombie pending msg ${oldestPendingId} (${Math.round(oldestAgeMs / 1000)}s old) — taking over as oldest.`,
             );
