@@ -84,6 +84,9 @@ import {
   pareceRoboDeAtendimento,
   pedidoSobreSessaoDeFisio,
   horaPedidaSemDia,
+  ehPerguntaDeCobertura,
+  ehTextoAtrasoPodeVir,
+  textoConvenioAtendidoPosMarcacao,
   MOTIVO_ROBO,
   MINIMO_CONVERSA_DE_ROBO,
   JANELA_CONVERSA_DE_ROBO_H,
@@ -17088,6 +17091,7 @@ Deno.serve(async (req) => {
       // 30 min, cadastro e convênio não marcam nada: a data fica, a equipe atualiza.
       let _convenioPosMarcacao: { date: string; time: string } | null = null;
       let _reembolsoPosMarcacao: { convenio: string; date: string; time: string } | null = null;
+      let _atendidoPosMarcacao: { convenio: string; date: string; time: string } | null = null;
       if (
         conversationId &&
         ["cadastrar", "agendar", "consultar_convenios", "reagendar"].includes(String(classification.intent || "")) &&
@@ -17103,6 +17107,17 @@ Deno.serve(async (req) => {
             console.log(`[ConvenioPosMarcacao] pergunta sobre ${_reembolsoPosMarc} (reembolso) — resposta pronta`);
             _reembolsoPosMarcacao = { convenio: _reembolsoPosMarc, date: _mrConv.date, time: _mrConv.time };
             classification.intent = "unknown";
+          } else if (_mrConv && convenioAtendidoPerguntado(finalMessage || "")) {
+            // 10/11 (Paula: "Vcs atendem Omint?" → "Anotado!… é com a nossa equipe"): convênio
+            // atendido em todos os planos é confirmado na hora, sem fila
+            const _convAtendido = convenioAtendidoPerguntado(finalMessage || "") as string;
+            console.log(`[ConvenioPosMarcacao] pergunta sobre ${_convAtendido} (atendido) — resposta pronta`);
+            _atendidoPosMarcacao = { convenio: _convAtendido, date: _mrConv.date, time: _mrConv.time };
+            classification.intent = "unknown";
+          } else if (_mrConv && classification.intent === "consultar_convenios" && ehPerguntaDeCobertura(finalMessage || "")) {
+            // 10/11 (Karen: "Ele ainda atende convênio do Bradesco?", Celso: "Atendem plano
+            // Hapvida?"): é PERGUNTA — o consultar_convenios responde sem marcar nada
+            console.log(`[ConvenioPosMarcacao] pergunta de cobertura logo depois de marcar — o consultar_convenios responde`);
           } else if (_mrConv) {
             console.log(`[ConvenioPosMarcacao] ${classification.intent} logo depois de marcar (${_mrConv.date} ${_mrConv.time}) — não marca de novo`);
             _convenioPosMarcacao = _mrConv;
@@ -18236,11 +18251,16 @@ Deno.serve(async (req) => {
         if (_propostaComercial) replyText = TEXTO_PROPOSTA_COMERCIAL;
         if (_procedimentoLiberado) replyText = TEXTO_PROCEDIMENTO_LIBERADO;
         if (_raioXNoLocal) replyText = TEXTO_RAIO_X_NO_LOCAL;
-        if (_atrasoSobAtendente) replyText = TEXTO_ATRASO_PARA_RECEPCAO;
+        // 10/11 (Osvaldo 04/11: 15 min de atraso com a ficha aberta foi para a recepção): o
+        // "pode vir" do atraso de até 20 min, calculado pela ação, não é trocado
+        if (_atrasoSobAtendente && !ehTextoAtrasoPodeVir(actionResult?.response)) replyText = TEXTO_ATRASO_PARA_RECEPCAO;
         if (_domiciliar) replyText = TEXTO_SEM_ATENDIMENTO_DOMICILIAR;
         if (_procedimento) replyText = TEXTO_PROCEDIMENTO_COM_EQUIPE;
         if (_rxTipoEquipe && _rxTipo) replyText = textoRaioXTipoEquipe(_rxTipo);
         if (_cadastroPeloNome) replyText = textoCadastroPeloNome(_cadastroPeloNome);
+        if (_atendidoPosMarcacao) {
+          replyText = textoConvenioAtendidoPosMarcacao(_atendidoPosMarcacao.convenio, _atendidoPosMarcacao.date, _atendidoPosMarcacao.time);
+        }
         if (_reembolsoPosMarcacao) {
           replyText = textoConvenioReembolsoPosMarcacao(_reembolsoPosMarcacao.convenio, precoDaConsulta(clinicRef?.custom_notes), _reembolsoPosMarcacao.date, _reembolsoPosMarcacao.time);
         }

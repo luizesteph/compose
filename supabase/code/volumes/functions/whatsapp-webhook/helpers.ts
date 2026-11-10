@@ -3186,6 +3186,26 @@ export function textoConvenioReembolsoPosMarcacao(convenio: string, preco: strin
   );
 }
 
+// PERGUNTA DE COBERTURA LOGO DEPOIS DE MARCAR (10/11). "Vcs atendem Omint?" (Paula 04/11),
+// "Atendem plano Hapvida?" (Celso 03/11) e "Ele ainda atende convênio do Bradesco?" (Karen
+// 09/11) recebiam "Anotado! A consulta continua marcada… a atualização do convênio é com a
+// nossa equipe" — texto de quem INFORMA o convênio, não de quem pergunta — e iam para a fila
+// (a Karen ficou o dia sem resposta). Pergunta tem resposta: o convênio atendido em todos os
+// planos é confirmado na hora; as outras seguem para o fluxo que responde sobre convênios.
+export function ehPerguntaDeCobertura(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  return t.includes("?") || /\b(?:atende[mr]?|aceita[mr]?|cobre[m]?|trabalha[m]?\s+com)\b/.test(t);
+}
+
+export function textoConvenioAtendidoPosMarcacao(convenio: string, dataISO: string, hhmm: string): string {
+  const d = String(dataISO || "");
+  const data = /^\d{4}-\d{2}-\d{2}$/.test(d) ? `${d.slice(8, 10)}/${d.slice(5, 7)}` : d;
+  return (
+    `Atendemos ${convenio}, sim. 😊 Sua consulta${data ? ` de ${data}${hhmm ? ` às ${hhmm}` : ""}` : ""} continua marcada. ` +
+    `Se ela foi marcada como particular e você quer usar o convênio, me diga *atendente*.`
+  );
+}
+
 /** "Estou tentando agendar mas dá erro", "o sistema dá erro", "o link não abre" (20/10, M7sato e Marcelo). */
 export function siteDeuErro(texto: unknown): boolean {
   const t = stripAccents(String(texto ?? "").toLowerCase());
@@ -3254,6 +3274,12 @@ export function textoAtrasoPodeVir(horaConsulta: string | null, minutos: number)
     return `Obrigada por avisar! 😊 Pode vir com calma — sua consulta é às ${horaConsulta}, você chega a tempo.`;
   }
   return `Obrigada por avisar! 🙏 Pode vir — até 20 minutos de atraso o médico consegue te atender${horaConsulta ? ` (sua consulta é às ${horaConsulta})` : ""}. Venha com calma e segurança.`;
+}
+
+/** A resposta é o "pode vir" do atraso de até 20 min? (10/11: com a ficha aberta, o texto
+ *  da recepção passava por cima dele — Osvaldo 04/11, 15 min de atraso, foi para a fila.) */
+export function ehTextoAtrasoPodeVir(texto: unknown): boolean {
+  return /^Obrigada por avisar! \S+ Pode vir/u.test(String(texto ?? ""));
 }
 
 /** O modelo disse "parece urgente" logo depois de a Julia mandar a lista (20/10, Bruna). */
