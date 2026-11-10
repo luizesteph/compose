@@ -179,7 +179,13 @@ Deno.serve(async (req: Request) => {
   const servicePath = `/home/deno/functions/${nome}`;
   const limite = LIMITES[nome] || LIMITE_PADRAO;
 
-  try {
+  // O WORKER QUE SE APOSENTA NO MEIO (10/11). Cada worker vive até o limite de tempo dele;
+  // a requisição que chegava no instante da aposentadoria recebia "request cannot be
+  // handled because the worker has already retired" e virava 500. De 06 a 09/11 foram 17,
+  // todas de crons (que repetem no minuto seguinte) — no whatsapp-webhook seria a mensagem
+  // de um paciente perdida sem rastro. Agora tenta de novo, até 2 vezes: na nova tentativa
+  // o runtime cria um worker novo. Qualquer outro erro sobe como sempre.
+  const criarEChamar = async (): Promise<Response> => {
     const ambiente = Deno.env.toObject();
     const worker = await EdgeRuntime.userWorkers.create({
       servicePath,
@@ -190,6 +196,20 @@ Deno.serve(async (req: Request) => {
       envVars: Object.keys(ambiente).map((k) => [k, ambiente[k]]),
     });
     return await worker.fetch(req);
+  };
+  const aposentou = (e: unknown): boolean => /already retired/i.test(String((e as Error)?.message || e));
+  const TENTATIVAS_APOS_APOSENTADORIA = 2;
+
+  try {
+    for (let tentativa = 0; ; tentativa++) {
+      try {
+        return await criarEChamar();
+      } catch (e) {
+        if (tentativa >= TENTATIVAS_APOS_APOSENTADORIA || !aposentou(e)) throw e;
+        console.error(`[main] worker de "${nome}" se aposentou no meio da requisição — tentando de novo (${tentativa + 1}/${TENTATIVAS_APOS_APOSENTADORIA})`);
+        await new Promise((r) => setTimeout(r, 80));
+      }
+    }
   } catch (e) {
     const msg = (e as Error).message || String(e);
     // Mensagem específica para o erro que mais confunde: função que não existe no
