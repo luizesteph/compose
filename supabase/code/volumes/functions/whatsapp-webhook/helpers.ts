@@ -2208,6 +2208,31 @@ export function consultaParaOutraPessoa(textosDoPaciente: unknown[] | null | und
   return null;
 }
 
+// ROBÔ DE ATENDIMENTO DO OUTRO LADO (URA/SAC) — 08/07 (Ultrafarma) e 10/11 (CREMESP).
+// Nenhum paciente escreve "sou o assistente virtual" nem "digite o número da opção".
+// A URA do CREMESP (04 para 05/11) mandou 163 mensagens a cada 30 min; a Julia respondeu
+// 48 vezes e passou 3 vezes para a fila, porque as frases dela não estavam aqui
+// ("selecione a *opção desejada*", "Visualizar Menu", "ainda não captei nenhuma
+// resposta", "como você não está respondendo, vou finalizar"). Em 90 dias as frases
+// novas só aparecem nesse número.
+const ROBO_DE_ATENDIMENTO_RE =
+  /\b(sou\s+(o|a)\s+assistente\s+virtual|atendimento\s+eletr[oô]nico|digite\s+(o\s+n[uú]mero|uma?\s+op[cç][aã]o)|escolha\s+uma\s+op[cç][aã]o|selecione\s+uma\s+das\s+op[cç][oõ]es|protocolo\s+de\s+atendimento\s+n[uú]?|central\s+de\s+atendimento\s+da)\b/i;
+const ROBO_DE_ATENDIMENTO_URA_RE =
+  /selecione\s+a\s+\*?op[cç][aã]o\s+desejada|visualizar\s+menu|preciso\s+que\s+voc[eê]\s+escolha\s+uma\s+op[cç][aã]o|ainda\s+n[aã]o\s+captei\s+nenhuma\s+resposta|como\s+voc[eê]\s+n[aã]o\s+est[aá]\s+respondendo,?\s+vou\s+finalizar|reiniciar\s+o\s+atendimento,?\s+[eé]\s+s[oó]\s+enviar/i;
+
+/** A mensagem tem assinatura de robô de atendimento (e não cita a Julia nem a CBT)? */
+export function pareceRoboDeAtendimento(texto: unknown): boolean {
+  const t = String(texto ?? "");
+  if (!t || /\b(julia|cbt)\b/i.test(t)) return false;
+  return ROBO_DE_ATENDIMENTO_RE.test(t) || ROBO_DE_ATENDIMENTO_URA_RE.test(t);
+}
+
+/** Motivo gravado quando a Julia cala para um robô — a contagem por conversa lê este texto. */
+export const MOTIVO_ROBO = "outro robô";
+/** Quantas mensagens de robô em `JANELA_CONVERSA_DE_ROBO_H` fazem a conversa inteira ser dele. */
+export const MINIMO_CONVERSA_DE_ROBO = 2;
+export const JANELA_CONVERSA_DE_ROBO_H = 6;
+
 // LOTE DE MENSAGENS: A MAIS VELHA PENDENTE É A LÍDER VIVA DA MINHA RAJADA? (10/11)
 // Kyscila, 09/11 08h59: quatro mensagens em 12 s. As quatro execuções travaram 7 s e
 // acordaram juntas, com a mais velha a 25 s — acima do corte de "zumbi" (24 s). As três

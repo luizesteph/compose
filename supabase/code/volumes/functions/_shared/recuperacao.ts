@@ -35,7 +35,31 @@ export function ehPerguntaDeAgenda(m: { ai_intent?: string | null; action_status
 export function recusouSeguir(texto: unknown): boolean {
   const t = String(texto ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
   if (!t.trim()) return false;
-  return /\bnao\s+vou\s+(?:prosseguir|seguir|continuar|marcar|agendar|querer)\b|\bnao\s+(?:quero|preciso)\s+(?:mais\s+)?(?:marcar|agendar|a\s+consulta|consulta)\b|\bdesisto\b|\bdesist(?:i|ir)\s+(?:da|de)\b|\b(?:consegui|marquei|vou\s+(?:tentar|procurar|marcar))\s+(?:em\s+|n[ao]\s+)?outr[oa]\s+(?:lugar|clinica|medico|local)\b|\bnao\s+tenho\s+(?:mais\s+)?interesse\b|^\s*nao,?\s+obrigad[oa]s?\b/.test(t);
+  return /\bnao\s+vou\s+(?:prosseguir|seguir|continuar|marcar|agendar|querer)\b|\bnao\s+(?:quero|preciso)\s+(?:mais\s+)?(?:marcar|agendar|a\s+consulta|consulta)\b|\bdesisto\b|\bdesist(?:i|ir)\s+(?:da|de)\b|\b(?:consegui|marquei|vou\s+(?:tentar|procurar|marcar))\s+(?:em\s+|n[ao]\s+)?outr[oa]\s+(?:lugar|clinica|medico|local)\b|\bnao\s+tenho\s+(?:mais\s+)?interesse\b|^\s*nao,?\s+obrigad[oa]s?\b/.test(t) ||
+    // "Por ora não, obrigada" (10/11, Daniela 05/11: respondeu assim a "Quer que eu veja um
+    // horário?" e 4 h depois recebeu "Vi que você perguntou sobre valores…"). Só com o
+    // agradecimento junto — "agora não" solto continua não contando.
+    /\b(?:por\s+ora|por\s+enquanto|no\s+momento|agora|hoje)\s+nao\b[\s,.!]*(?:muito\s+)?(?:obrigad|grat[oa]\b|valeu|agradec)/.test(t);
+}
+
+/** Quantos minutos ANTES do caso uma recusa ainda vale (10/11, Oscar 05/11: "Não vou
+ *  agendar grato" às 10h10, a Julia se despediu às 10h11 — e a despedida virou o "caso";
+ *  a recusa, de um minuto antes, não era lida). */
+export const RECUSA_ANTES_DO_CASO_MIN = 15;
+
+/**
+ * O preço para pôr no follow-up de quem perguntou o valor (10/11, Thiago 04/11: a
+ * pergunta ficou calada pela ficha aberta e o follow-up dizia "vi que você perguntou
+ * sobre valores" sem dizer o valor). Só quando a pergunta é da CONSULTA e não cita outro
+ * serviço — nutróloga, fisioterapia, infiltração, exame e cirurgia têm outro preço.
+ */
+export function precoParaARecuperacao(pergunta: unknown, notasDaClinica: unknown): string | null {
+  const t = String(pergunta ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  if (!t.trim()) return null;
+  if (/nutr|fisio|infiltra|aplicac|cirurg|onda|exame|raio|\brx\b|resson|tomograf|sess[ao]|procedimento|ultrass|laudo/.test(t)) return null;
+  if (!/consulta|ortoped|\bvalor\b|\bpreco\b|quanto/.test(t)) return null;
+  const m = String(notasDaClinica ?? "").match(/Consulta\s+Particular\s+com\s+Ortopedistas:?\**:?\s*(R\$\s*\d[\d.]*(?:,\d{2})?)/i);
+  return m ? m[1].replace(/\s+/g, " ") : null;
 }
 
 /**
@@ -60,7 +84,7 @@ export function falaDeProcedimento(texto: unknown): boolean {
  *   - a falha não é chamada de "instabilidade": desde 19/09 muita falha é "não
  *     achei consulta", horário ocupado ou o teto do Amigo, não queda de sistema.
  */
-export function textoDaRecuperacao(categoria: string, linkDoSite?: string | null): string {
+export function textoDaRecuperacao(categoria: string, linkDoSite?: string | null, precoDaConsulta?: string | null): string {
   const link = linkDoSite ? `\n\nSe preferir, é só clicar aqui para agendar online:\n${linkDoSite}` : "";
   if (categoria === "falha_agendamento") {
     return (
@@ -72,6 +96,12 @@ export function textoDaRecuperacao(categoria: string, linkDoSite?: string | null
     return (
       "Oi! 👋 Ficou faltando fechar o seu agendamento aqui com a gente. " +
       `Se ainda quiser marcar, me diga o médico ou o dia que prefere que eu vejo os horários de novo. 😊${link}`
+    );
+  }
+  if (precoDaConsulta) {
+    return (
+      `Oi! 👋 Vi que você perguntou sobre valores mais cedo: a consulta particular com nossos ortopedistas é ${precoDaConsulta}, com direito a retorno em até 30 dias. ` +
+      `Se quiser marcar, me diga o médico ou o que você está sentindo que eu já verifico os horários.${link}`
     );
   }
   return (

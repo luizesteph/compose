@@ -14,7 +14,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 import { chamadaDeCronAutorizada } from "../_shared/cron.ts";
 import { situacaoDoTicket } from "../_shared/zpro.ts";
-import { CATEGORIA_ABANDONO, ehPerguntaDeAgenda, falaDeProcedimento, recusouSeguir, textoDaRecuperacao } from "../_shared/recuperacao.ts";
+import { CATEGORIA_ABANDONO, ehPerguntaDeAgenda, falaDeProcedimento, recusouSeguir, RECUSA_ANTES_DO_CASO_MIN, precoParaARecuperacao, textoDaRecuperacao } from "../_shared/recuperacao.ts";
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-cron-secret",
@@ -443,7 +443,7 @@ Deno.serve(async (req) => {
 
   const { data: dueRows } = await supabase
     .from("lost_conversions")
-    .select("id, clinic_token_id, conversation_id, phone, patient_name, category, detected_at, clinic_tokens:clinic_token_id (avanceai_base_url, avanceai_api_id, avanceai_bearer_token, avanceai_active_channel, user_id, lost_recovery_enabled, recovery_enabled)")
+    .select("id, clinic_token_id, conversation_id, phone, patient_name, category, evidence, detected_at, clinic_tokens:clinic_token_id (avanceai_base_url, avanceai_api_id, avanceai_bearer_token, avanceai_active_channel, user_id, lost_recovery_enabled, recovery_enabled)")
     .eq("status", "pending")
     .lte("followup_due_at", nowIso)
     .order("followup_due_at", { ascending: true }) // FIFO: linha presa não afoga as demais
@@ -504,7 +504,9 @@ Deno.serve(async (req) => {
           .select("message_text")
           .eq("conversation_id", r.conversation_id)
           .eq("direction", "incoming")
-          .gte("created_at", r.detected_at)
+          // 10/11: a recusa de até 15 min ANTES do caso também vale (Oscar: "Não vou
+          // agendar grato" um minuto antes da despedida da Julia, que virou o "caso")
+          .gte("created_at", new Date(Date.parse(r.detected_at) - RECUSA_ANTES_DO_CASO_MIN * 60_000).toISOString())
           .limit(40);
         if ((_depois || []).some((f: { message_text?: string }) => recusouSeguir(f.message_text))) {
           await supabase.from("lost_conversions").update({ status: "skipped_declined", updated_at: nowIso }).eq("id", r.id);
@@ -577,7 +579,15 @@ Deno.serve(async (req) => {
       // responder/confirmar com a afirmativa (orphan-ACK a silenciaria como
       // confirmação externa) e sem datas/horários (anti-alucinação).
       const widgetUrl = await getWidgetUrl(r.clinic_token_id);
-      const msg = textoDaRecuperacao(r.category, widgetUrl);
+      // 10/11: quem perguntou o valor DA CONSULTA recebe o valor (lido do script da clínica)
+      let _precoDaRec: string | null = null;
+      if (r.category === "pergunta_preco") {
+        try {
+          const { data: _ci } = await supabase.from("clinic_info").select("custom_notes").eq("clinic_token_id", r.clinic_token_id).maybeSingle();
+          _precoDaRec = precoParaARecuperacao(r.evidence, (_ci as { custom_notes?: string } | null)?.custom_notes);
+        } catch { /* sem o preço, sai o texto de sempre */ }
+      }
+      const msg = textoDaRecuperacao(r.category, widgetUrl, _precoDaRec);
 
       const send = await sendWhats(target.creds, r.phone, msg, target.channelId);
       if (!send.ok) {

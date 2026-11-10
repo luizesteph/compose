@@ -288,6 +288,16 @@ export interface LiberadoParaAviso {
   feita_em: string | null;
 }
 
+/** Fala escrita por alguém da equipe: resposta manual ou assinada "*Nome*:". */
+export function ehFalaDaEquipe(m: { ai_intent?: unknown; message_text?: unknown } | null | undefined): boolean {
+  return String(m?.ai_intent ?? "") === "manual_reply" || /^\s*\*[^*\n]{1,40}\*:/.test(String(m?.message_text ?? ""));
+}
+
+/** Gravado em `aviso_erro` quando o aviso não sai porque a equipe já está com o paciente
+ *  (10/11, Omar 09/11: liberado na sexta, a atendente combinou a data pelo chat no mesmo
+ *  dia e o aviso "já pode agendar" saiu na segunda). O painel mostra "Aviso não saiu". */
+export const MOTIVO_EQUIPE_JA_ATENDE = "Não enviado: a equipe já falou com o paciente depois da liberação";
+
 /** Só quem tem certeza de nome e médico, guia em dia e nada marcado ainda */
 export function recebeAviso(l: LiberadoParaAviso, hojeISO: string): boolean {
   if (l.casamento !== "exato" || l.aviso_enviado_em || l.agendado_para || l.feita_em) return false;

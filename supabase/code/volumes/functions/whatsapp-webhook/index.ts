@@ -81,6 +81,10 @@ import {
   falasDoPaciente,
   semMetadados,
   liderVivaDaRajada,
+  pareceRoboDeAtendimento,
+  MOTIVO_ROBO,
+  MINIMO_CONVERSA_DE_ROBO,
+  JANELA_CONVERSA_DE_ROBO_H,
   consultaDeHojeJaPassou,
   textoConsultaJaPassou,
   TEXTO_CONFIRMACAO_NAO_REGISTRADA,
@@ -391,6 +395,38 @@ async function postLLM(init: RequestInit, timeoutMs: number): Promise<Response> 
     bodyFallback = bodyFallback.split(LLM_MODEL).join(LLM_MODEL_FALLBACK);
   }
   return await fetchWithTimeout(LLM_GATEWAY, { ...init, body: bodyFallback }, timeoutMs);
+}
+
+// 429/5xx NA CLASSIFICAÇÃO NÃO PODE DEIXAR O PACIENTE SEM RESPOSTA (10/11).
+// Amanda, 03/11 09:03: "Gostaria de agendar uma consulta… Porto Seguro" → "AI gateway
+// error: 429" → mensagem marcada como falha e ninguém respondeu por 50 min. A resposta
+// (generateAIResponse) já repete em outro modelo; a classificação subia o erro direto.
+// Agora: repete uma vez depois de 1,5 s e, se o gateway insistir, tenta o modelo
+// reserva. Cada passo vai para o log — a cota estourada não fica escondida. Erro que
+// não é de cota nem de queda (400, 401, 402…) sobe como sempre.
+async function postLLMComRepeticao(init: RequestInit, timeoutMs: number): Promise<Response> {
+  const _repetivel = (r: Response) => r.status === 429 || r.status >= 500;
+  let resposta = await postLLM(init, timeoutMs);
+  if (resposta.ok || !_repetivel(resposta)) return resposta;
+  console.error(`[LLM] classificação: ${resposta.status} do gateway — repetindo em 1,5 s`);
+  await new Promise((r) => setTimeout(r, 1500));
+  resposta = await postLLM(init, timeoutMs);
+  if (resposta.ok || !_repetivel(resposta)) return resposta;
+  console.error(`[LLM] classificação: ${resposta.status} de novo — tentando o modelo reserva "${LLM_MODEL_FALLBACK}"`);
+  let bodyReserva = String(init.body || "");
+  try {
+    const parsed = JSON.parse(bodyReserva);
+    parsed.model = LLM_MODEL_FALLBACK;
+    bodyReserva = JSON.stringify(parsed);
+  } catch {
+    bodyReserva = bodyReserva.split(LLM_MODEL).join(LLM_MODEL_FALLBACK);
+  }
+  try {
+    return await fetchWithTimeout(LLM_GATEWAY, { ...init, body: bodyReserva }, timeoutMs);
+  } catch (e) {
+    console.error(`[LLM] classificação: modelo reserva também falhou (${(e as Error).message})`);
+    return resposta;
+  }
 }
 
 async function nomesForaDoRodizio(
@@ -2125,7 +2161,7 @@ NUNCA classifique como falar_com_atendente: "ok", "obrigada", "obrigado", "aguar
   // um gateway travado pendurava o webhook até o wall-clock (p99=548s no 23/06).
   let response: Response;
   try {
-  response = await postLLM({
+  response = await postLLMComRepeticao({
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -13401,13 +13437,41 @@ Deno.serve(async (req) => {
       // escreve "sou o assistente virtual" ou "digite o número da opção". Responder
       // geraria loop bot-com-bot. Skip silencioso com motivo auditável.
       {
-        const _botSig =
-          /\b(sou\s+(o|a)\s+assistente\s+virtual|atendimento\s+eletr[oô]nico|digite\s+(o\s+n[uú]mero|uma?\s+op[cç][aã]o)|escolha\s+uma\s+op[cç][aã]o|selecione\s+uma\s+das\s+op[cç][oõ]es|protocolo\s+de\s+atendimento\s+n[uú]?|central\s+de\s+atendimento\s+da)\b/i;
-        if (messageStr && _botSig.test(messageStr) && !/\b(julia|cbt)\b/i.test(messageStr)) {
-          console.log(`[BotGuard] ⛔ Mensagem tem assinatura de robô de SAC — não respondendo (anti bot-loop)`);
+        // CONVERSA COM ROBÔ (10/11, URA do CREMESP: 48 respostas e 3 passagens para a
+        // fila numa noite). A URA alterna textos e só parte deles tem assinatura; se esta
+        // conversa já teve 2 mensagens de robô nas últimas 6 h, a próxima também é dele.
+        const _assinaturaDeRobo = !!messageStr && pareceRoboDeAtendimento(messageStr);
+        let _conversaDeRobo = false;
+        if (messageStr && conversationId && !_assinaturaDeRobo) {
+          try {
+            const _desdeRobo = new Date(Date.now() - JANELA_CONVERSA_DE_ROBO_H * 60 * 60_000).toISOString();
+            const { count: _robos } = await supabase
+              .from("webhook_messages")
+              .select("id", { count: "exact", head: true })
+              .eq("conversation_id", conversationId)
+              .eq("direction", "incoming")
+              .eq("action_status", "skipped")
+              .like("action_error", `%${MOTIVO_ROBO}%`)
+              .gte("created_at", _desdeRobo);
+            _conversaDeRobo = (_robos || 0) >= MINIMO_CONVERSA_DE_ROBO;
+          } catch (e) {
+            console.log(`[BotGuard] contagem da conversa falhou (não bloqueante): ${(e as Error).message}`);
+          }
+        }
+        if (_assinaturaDeRobo || _conversaDeRobo) {
+          console.log(
+            _assinaturaDeRobo
+              ? `[BotGuard] ⛔ Mensagem tem assinatura de robô de SAC — não respondendo (anti bot-loop)`
+              : `[BotGuard] ⛔ Conversa com robô (${MINIMO_CONVERSA_DE_ROBO}+ mensagens de URA em ${JANELA_CONVERSA_DE_ROBO_H} h) — não respondendo`,
+          );
           await supabase
             .from("webhook_messages")
-            .update({ action_status: "skipped", action_error: "Mensagem de outro robô (SAC/URA) — anti bot-loop" })
+            .update({
+              action_status: "skipped",
+              action_error: _assinaturaDeRobo
+                ? "Mensagem de outro robô (SAC/URA) — anti bot-loop"
+                : "Conversa com outro robô (SAC/URA) — anti bot-loop",
+            })
             .eq("id", messageId);
           return new Response(JSON.stringify({ status: "skipped", reason: "bot_to_bot_guard" }), {
             status: 200,

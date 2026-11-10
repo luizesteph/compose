@@ -26,7 +26,7 @@ import {
   linhasDaAgenda,
   podeAvisarAgora,
   prepararAgenda,
-  recebeAviso,
+  recebeAviso, ehFalaDaEquipe, MOTIVO_EQUIPE_JA_ATENDE,
   textoAvisoDeLiberacao,
   type LinhaDaAgenda,
 } from "../_shared/liberados.ts";
@@ -314,6 +314,31 @@ async function enviarUmAviso(supabase: any, clinica: any, grupos: any[][]) {
       .gte("created_at", desde)
       .limit(1);
     if (falou?.length) continue;
+    // A EQUIPE JÁ ESTÁ COM ELE (10/11, Omar): se alguém da equipe escreveu ao paciente
+    // depois da liberação, o agendamento está com ela — o aviso não sai, e a linha fica
+    // marcada para não ser reavaliada a cada rodada (só 5 grupos por rodada).
+    const _liberadoEm = grupo.map((l) => String(l.liberado_em || "")).filter(Boolean).sort()[0];
+    if (_liberadoEm) {
+      const { data: _saidas } = await supabase
+        .from("webhook_messages")
+        .select("ai_intent, message_text")
+        .eq("clinic_token_id", clinica.id)
+        .eq("direction", "outgoing")
+        .in("sender_phone", getPhoneVariants(telefone))
+        .gte("created_at", _liberadoEm)
+        .order("created_at", { ascending: false })
+        .limit(60);
+      if ((_saidas || []).some(ehFalaDaEquipe)) {
+        const _agora = new Date().toISOString();
+        await supabase
+          .from("infiltracao_liberados")
+          .update({ aviso_enviado_em: _agora, aviso_erro: MOTIVO_EQUIPE_JA_ATENDE, updated_at: _agora })
+          .in("id", grupo.map((l) => l.id))
+          .is("aviso_enviado_em", null);
+        console.log(`[Liberados] aviso não enviado a ...${telefone.slice(-4)}: a equipe já falou com o paciente depois da liberação`);
+        continue;
+      }
+    }
     if ((await situacaoDoTicket(canal, telefone)) !== "livre") continue;
 
     // marca ANTES de enviar: envio que falha não repete (lição do lembrete do link, 25/09)
