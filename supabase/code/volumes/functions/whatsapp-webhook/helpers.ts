@@ -208,6 +208,71 @@ export function isClosingThanks(text: string): boolean {
   return !/\b(consulta|horario|agendar|agenda|marcar|desmarcar|encaixe|gostaria|online|on\s*line)\b/.test(norm);
 }
 
+// ─── "OK" / "OBRIGADO" DEPOIS DE UMA RESPOSTA SEM PERGUNTA (13/11) ─────────────
+// Teste com 95 mensagens reais (Flash 3.7, Hydrogen 4 e Haiku 5.5 erram igual): "Ok"
+// depois de "Fico no aguardo… me avise qual dos dois" virou agendar e a Julia repetiu
+// a pergunta (Noemi 20/10); "Ok Combinado" depois de "sua consulta está marcada para
+// amanhã" e "Obrigado" depois de "seu horário foi mantido" viraram confirmar e foram ao
+// Amigo. Só reconhecimento, sem número nem pergunta, logo depois de uma fala que não
+// pergunta nada, não é pedido — o modelo responde sem ação.
+const _ACK_SO_RE =
+  /^(?:ok+|okay|oks|blz|beleza|ta bom|ta bem|ta certo|ta otimo|combinado|certo|certinho|entendi|entendido|perfeito|otimo|show|aguardo|fico no aguardo|eu aguardo|tudo bem|tudo certo|maravilha|joia)(?: (?:ok+|combinado|obrigad[oa]s?|aguardo|eu aguardo|entao|valeu|grat[oa]|perfeito|certo|tudo bem|fico no aguardo))*$/;
+
+/** A mensagem é só "ok", "combinado", "obrigada" e afins (sem número, sem pergunta)? */
+export function soAckOuAgradecimento(texto: unknown): boolean {
+  const bruto = semMetadados(texto).trim();
+  if (!bruto || bruto.length > 60 || /[?\d]/.test(bruto)) return false;
+  if (isClosingThanks(bruto)) return true;
+  const t = stripAccents(bruto.toLowerCase())
+    .replace(/[\p{Extended_Pictographic}\p{Emoji_Modifier}\u200d\ufe0f]/gu, " ")
+    .replace(/[!.,;:]+/g, " ").replace(/\s+/g, " ").trim();
+  return _ACK_SO_RE.test(t);
+}
+
+/**
+ * A última fala da clínica espera resposta? Pergunta, lembrete de confirmação ("Responda
+ * SIM"), oferta da lista de espera ("Me diga *quero*") e pedido de escolha esperam: ali o
+ * "ok" pode ser resposta. Uma afirmação ("está marcada", "fico no aguardo") não espera.
+ */
+export function falaEsperaResposta(texto: unknown): boolean {
+  const t = stripAccents(semMetadados(texto).toLowerCase());
+  if (!t.trim()) return true;
+  if (t.includes("?")) return true;
+  // oferta sem "?" também espera ("Se quiser, posso te colocar na lista de espera")
+  return /\b(responda|me diga|digite|escolha|confirme|me confirma|me responde|me envie|me mande|me passa|se quiser|se preferir|posso te|posso colocar|posso incluir|posso marcar|posso seguir)\b/.test(t);
+}
+
+/**
+ * O "ok"/"obrigado" desta mensagem vem logo depois de uma fala da clínica que não pergunta
+ * nada? `historico` é o histórico da conversa (role user/assistant), com ou sem a própria
+ * mensagem no fim; o que veio depois da última fala da clínica tem de ser só reconhecimento
+ * (rajada "Ok Combinado" / "Combinado"). Pergunta do paciente ainda sem resposta ("Tem algum
+ * outro horário na quarta?" + "Obrigada") não entra: ali a conversa continua.
+ */
+export function ackDepoisDeAfirmacao(mensagem: unknown, historico: ReadonlyArray<{ role?: string; content?: unknown }>): boolean {
+  if (!soAckOuAgradecimento(mensagem)) return false;
+  const h = Array.isArray(historico) ? historico : [];
+  let i = h.length - 1;
+  while (i >= 0 && h[i]?.role !== "assistant") {
+    if (h[i]?.role === "user" && !soAckOuAgradecimento(h[i]?.content)) return false;
+    i--;
+  }
+  if (i < 0) return false;
+  return !falaEsperaResposta(h[i]?.content);
+}
+
+// ─── ATESTADO E DECLARAÇÃO SÃO DA EQUIPE (13/11) ──────────────────────────────
+// "O médico consegue me dar o atestado do dia?" virou agendar nos três modelos testados
+// (Flash, Hydrogen e Haiku em 2 de 3). Quem emite é o médico e quem responde é a equipe.
+export function pedidoDeAtestado(texto: unknown): boolean {
+  const t = stripAccents(semMetadados(texto).toLowerCase());
+  if (!t.trim() || t.length > 300) return false;
+  if (!/\b(atestado|atestados|declaracao de (comparecimento|presenca|horas))\b/.test(t)) return false;
+  // escolha de horário junto ("Pode ser terça feira às 14 então… ele dá atestado?") é agenda
+  if (horaDoTexto(t) || /\b(segunda|terca|quarta|quinta|sexta)(-feira| feira)?\b/.test(t)) return false;
+  return !/\b(marcar|agendar|remarcar|desmarcar|cancelar|horario|horarios|vaga|encaixe|disponivel|disponibilidade)\b/.test(t);
+}
+
 // ─── Feriados / dias fechados (10/07) ───────────────────────────────────────
 // A clínica cadastra os dias fechados (feriado, emenda) no painel; a Julia avisa
 // o fechamento com a data de reabertura. Reabertura = próximo dia que NÃO está
@@ -3220,18 +3285,24 @@ export function textoPrecoNutrologa(preco: string): string {
  */
 export function pareceNomeCompleto(texto: unknown): boolean {
   let t = String(texto ?? "").trim().replace(/\s+/g, " ");
-  t = t.replace(/^(paciente|nome|o nome [ée]|meu nome [ée]|nome completo)[:\s]+/i, "");
+  t = t.replace(/^(paciente|nome|o nome [ée]|meu nome [ée]|nome completo|aqui [ée]h?( a| o)?|sou( a| o)?|est[aá] no nome d[eao])[:\s]+/i, "");
   if (!t || t.length > 70 || /\d|\?|@/.test(t)) return false;
   const palavras = t.split(" ");
   if (palavras.length < 2 || palavras.length > 7) return false;
   if (!palavras.every((p) => /^[\p{L}'.-]+$/u.test(p))) return false;
   const n = stripAccents(t.toLowerCase());
   if (/\b(obrigad|ok|sim|nao|quero|tem|vc|voce|agenda|amanha|hoje|quinta|sexta|segunda|terca|quarta|consulta|horario|conseguiu|localizar|bom|boa|dia|tarde|noite|por favor|certo|isso)\b/.test(n)) return false;
+  // FRASE NÃO É NOME (13/11, Lara: "essa é a carteirinha" virou "localizar o cadastro de
+  // *essa é a carteirinha*"). Verbo "é", demonstrativo, possessivo e papel não aparecem
+  // em nome de gente; "de/da/do/dos" e "e" entre nomes continuam valendo. "meu nome",
+  // "convênio X" e "para minha filha Fulana" ficam: trazem o nome junto (replay de 60 dias).
+  if (/(^|\s)(é|está|são)(\s|$)/i.test(t)) return false;
+  if (/\b(essa|esse|esta|este|isto|aqui|segue|seguem|carteirinha|foto|imagem|documento|documentos|pedido|laudo|exame|exames|guia|atestado|receita)\b/.test(n)) return false;
   return palavras.filter((p) => p.replace(/[^\p{L}]/gu, "").length >= 2).length >= 2;
 }
 
 export function textoCadastroPeloNome(nome: string): string {
-  const n = String(nome || "").trim().replace(/^(paciente|nome)[:\s]+/i, "");
+  const n = String(nome || "").trim().replace(/^(paciente|nome|o nome [ée]|meu nome [ée]|nome completo|aqui [ée]h?( a| o)?|sou( a| o)?|est[aá] no nome d[eao])[:\s]+/i, "");
   return `Obrigada! Vou passar para a nossa equipe localizar o cadastro de *${n}* e seguir com o seu pedido — elas te respondem por aqui. 🙏`;
 }
 
@@ -3364,7 +3435,15 @@ export function perguntaEspecialidadeDoMedico(texto: unknown): boolean {
 /** "enviei a carteirinha", "a carteirinha que enviei" (20/10, Mercia). A Julia não lê imagem. */
 export function falaDeCarteirinhaEnviada(texto: unknown): boolean {
   const t = stripAccents(String(texto ?? "").toLowerCase());
-  return /\b(enviei|mandei|te\s+mandei|ja\s+mandei|ja\s+enviei)\s+(a\s+|uma\s+)?(foto\s+da\s+)?carteirinha\b|\bcarteirinha\s+que\s+(eu\s+)?(enviei|mandei)\b/.test(t);
+  return /\b(enviei|mandei|te\s+mandei|ja\s+mandei|ja\s+enviei)\s+(a\s+|uma\s+)?(foto\s+da\s+)?carteirinha\b|\bcarteirinha\s+que\s+(eu\s+)?(enviei|mandei)\b/.test(t) ||
+    // 13/11 (Lara): "essa é a carteirinha", "segue a carteirinha", "aqui está a carteirinha"
+    /\b(essa|esta|aqui)\s+(e|eh|esta)\s+(a\s+)?(foto\s+da\s+)?(minha\s+)?carteirinha\b|\bsegue\s+(a\s+)?(foto\s+da\s+)?(minha\s+)?carteirinha\b|\b(aqui|ai)\s+(esta|vai)\s+(a\s+)?(foto\s+da\s+)?(minha\s+)?carteirinha\b/.test(t);
+}
+
+/** Falar da carteirinha não é cancelar, remarcar nem confirmar — salvo se a mensagem pede isso. */
+export function carteirinhaSemPedidoDeAgenda(texto: unknown): boolean {
+  const t = stripAccents(semMetadados(texto).toLowerCase());
+  return falaDeCarteirinhaEnviada(t) && !/(cancel|desmarc|remarc|reagend|confirm|mudar|trocar|adiar|antecip)/.test(t);
 }
 export const TEXTO_CARTEIRINHA_SEM_LEITURA =
   "Eu não consigo abrir imagens por aqui. 🙏 Me diga o nome do plano que está escrito na carteirinha (por exemplo: Top Nacional, Nacional III, Especial 100) que eu confiro na hora.";

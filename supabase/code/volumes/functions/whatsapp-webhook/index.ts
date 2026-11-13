@@ -92,6 +92,9 @@ import {
   ehPerguntaDeCobertura,
   ehTextoAtrasoPodeVir,
   semDestinoNoTexto,
+  ackDepoisDeAfirmacao,
+  carteirinhaSemPedidoDeAgenda,
+  pedidoDeAtestado,
   convenioNaoEncontradoNaPergunta,
   pacienteDisseParticular,
   textoConvenioForaDaLista,
@@ -16020,6 +16023,32 @@ Deno.serve(async (req) => {
               `[Webhook] ⚙️ Fallback deterministico: intent "${classification.intent}" -> "reagendar" (sinal de remarcar consulta existente)`,
             );
             classification.intent = "reagendar";
+          }
+        }
+
+        // === O QUE O MODELO ERRA EM QUALQUER VERSÃO (13/11) ===
+        // Teste com 95 mensagens reais em três modelos (Flash 3.7, Hydrogen 4, Haiku 5.5):
+        // os três erram igual estes casos, então a correção é aqui, não na troca de modelo.
+        // (1) "Ok" / "Obrigado" logo depois de uma fala que não pergunta nada não é pedido
+        //     (Noemi 20/10: a Julia repetiu a pergunta; David 10/11 e Alex 03/11: confirmação
+        //     enviada ao Amigo sem ninguém pedir). Replay 60 dias: 15 mensagens mudam.
+        // (2) "Essa é a carteirinha" não é cancelar/remarcar/confirmar (Lara 10/11) — vira o
+        //     texto da carteirinha (a Julia não lê imagem).
+        // (3) Atestado/declaração é da equipe (os três modelos chamavam de agendar).
+        {
+          const _itC = String(classification.intent || "");
+          if (["agendar", "reagendar", "cancelar", "confirmar", "cadastrar", "consultar", "identificar_por_nome"].includes(_itC) &&
+            ackDepoisDeAfirmacao(finalMessage || "", conversationHistory || [])) {
+            console.log(`[Webhook] "${String(finalMessage || "").slice(0, 30)}" é só reconhecimento depois de uma fala sem pergunta — ${_itC} → unknown (sem ação)`);
+            classification.intent = "unknown";
+            classification.reagendar_confirmed = false;
+          } else if (["cancelar", "confirmar", "reagendar"].includes(_itC) && carteirinhaSemPedidoDeAgenda(finalMessage || "")) {
+            console.log(`[Webhook] mensagem sobre a carteirinha classificada como ${_itC} — unknown`);
+            classification.intent = "unknown";
+            classification.reagendar_confirmed = false;
+          } else if (["agendar", "consultar", "confirmar", "reagendar", "cadastrar", "unknown"].includes(_itC) && pedidoDeAtestado(finalMessage || "")) {
+            console.log(`[Webhook] pedido de atestado (${_itC}) — fica com a equipe`);
+            classification.intent = "falar_com_atendente";
           }
         }
 
