@@ -255,6 +255,8 @@ import {
   AttendantUser,
   TransferResult,
   parseVacationNames,
+  parseSubstitutas,
+  substitutaDe,
   fetchOnlineAttendants,
   sendTypingIndicator,
   sendAvanceaiReply,
@@ -10330,6 +10332,19 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                   break;
                 }
               }
+            }
+          }
+
+          // QUEM COBRE AS FÉRIAS (16/11): o que ia para a atendente de férias (pedido pelo
+          // nome, regra de cirurgia, palavra-chave) vai para a substituta. Conta como regra:
+          // se a substituta estiver offline, segue para a fila sem perguntar ao paciente
+          // por outra pessoa — ele não pediu a substituta.
+          if (requestedName) {
+            const _substituta = substitutaDe(requestedName, vacationNames, parseSubstitutas(customNotes));
+            if (_substituta) {
+              console.log(`[Webhook] falar_com_atendente - "${requestedName}" fora (férias/ausente) → substituta "${_substituta}"`);
+              requestedName = _substituta;
+              routingRuleMatched = true;
             }
           }
 

@@ -34,9 +34,53 @@ export function parseVacationNames(customNotes?: string | null): string[] {
       if (limpo) nomes.push(limpo);
     }
   };
-  capturar(/Atendentes\s+de\s+F[eé]rias\s*:\s*([^\n]+)/i);
-  capturar(/Atendentes\s+Ausentes(?:\s+Hoje)?\s*:\s*([^\n]+)/i);
+  // `[ \t]*` e não `\s*` depois dos dois-pontos (16/11): com a linha vazia, `\s*` pulava a
+  // quebra de linha e lia a LINHA SEGUINTE como lista de férias — a "Substitutas de Férias:
+  // Vânia → Lidiane" tiraria a própria Lidiane do rodízio.
+  capturar(/Atendentes\s+de\s+F[eé]rias[ \t]*:[ \t]*([^\n]+)/i);
+  capturar(/Atendentes\s+Ausentes(?:\s+Hoje)?[ \t]*:[ \t]*([^\n]+)/i);
   return nomes;
+}
+
+// QUEM COBRE AS FÉRIAS (16/11/2026, pedido do dono: "nessas duas semanas, tudo que foi
+// indicado para a Vânia, encaminha para Lidiane"). Linha no script da clínica:
+//   "Substitutas de Férias: Vânia → Lidiane"   (também aceita "->" e várias, por vírgula)
+// Só vale enquanto a titular está de férias ou ausente hoje: quando ela volta e sai da
+// lista de férias, a linha fica inerte. Sem isso, com a Vânia de férias, quem falava de
+// cirurgia ou pedia a Vânia pelo nome ouvia "Não encontrei uma atendente com o nome Vânia"
+// (o filtro de férias a tira da lista antes de procurar o nome): 47 mensagens de cirurgia e
+// 52 pedidos pelo nome em 30 dias.
+export function parseSubstitutas(customNotes?: string | null): Array<{ de: string; para: string }> {
+  if (!customNotes) return [];
+  const m = customNotes.match(/Substitutas?\s+de\s+F[eé]rias[ \t]*:[ \t]*([^\n]+)/i);
+  if (!m) return [];
+  const limpar = (s: string) => stripAccents(s.replace(/[*_`.;]/g, "").trim().toLowerCase());
+  const pares: Array<{ de: string; para: string }> = [];
+  for (const parte of m[1].split(",")) {
+    const [de, para] = parte.split(/\s*(?:→|->|=>)\s*/);
+    if (de && para && limpar(de) && limpar(para)) pares.push({ de: limpar(de), para: limpar(para) });
+  }
+  return pares;
+}
+
+/**
+ * Para quem vai o que era da atendente `nome`, se ela está fora (`fora`, nomes já
+ * normalizados como em parseVacationNames). Devolve null quando ela não está fora, quando
+ * não tem substituta, ou quando a substituta também está fora.
+ */
+export function substitutaDe(
+  nome: string | null | undefined,
+  fora: string[],
+  substitutas: Array<{ de: string; para: string }>,
+): string | null {
+  const n = stripAccents(String(nome || "").trim().toLowerCase());
+  if (!n || fora.length === 0 || substitutas.length === 0) return null;
+  const casa = (a: string, b: string) => a === b || a.startsWith(b + " ") || b.startsWith(a + " ");
+  if (!fora.some((f) => casa(n, f))) return null;
+  const par = substitutas.find((s) => casa(n, s.de));
+  if (!par) return null;
+  if (fora.some((f) => casa(par.para, f))) return null;
+  return par.para;
 }
 
 function extractTicketIdForTransfer(raw: any): string | null {
