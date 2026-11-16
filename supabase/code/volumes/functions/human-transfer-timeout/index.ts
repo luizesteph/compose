@@ -40,6 +40,7 @@ import {
   MARCA_RESGATADA,
 } from "../_shared/atendimento.ts";
 import { classificarUrgencia } from "../whatsapp-webhook/helpers.ts";
+import { atendenteDesativada } from "../whatsapp-webhook/avanceai.ts";
 
 import { chamadaDeCronAutorizada } from "../_shared/cron.ts";
 const corsHeaders = {
@@ -66,15 +67,7 @@ async function fetchOnlineAttendants(baseUrl: string, apiId: string, bearerToken
     else if (Array.isArray(data?.data)) users = data.data;
     let nonAdmin = users.filter((u) => String((u as any).profile || (u as any).role || "").toLowerCase() !== "admin");
     // Drop users disabled/inactive in AvanceAI
-    nonAdmin = nonAdmin.filter((u: any) => {
-      if (u.active === false) return false;
-      if (u.enabled === false) return false;
-      if (u.disabled === true) return false;
-      if (u.deletedAt) return false;
-      const st = String(u.status || "").toLowerCase();
-      if (st === "disabled" || st === "inactive" || st === "blocked") return false;
-      return true;
-    });
+    nonAdmin = nonAdmin.filter((u: any) => !atendenteDesativada(u));
     // Drop vacationing attendants
     if (excludeNames.length > 0) {
       nonAdmin = nonAdmin.filter((u) => {

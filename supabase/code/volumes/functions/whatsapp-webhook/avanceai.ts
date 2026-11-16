@@ -181,6 +181,23 @@ export function readOnlineFlag(raw: unknown): boolean | null {
   return null; // formato desconhecido → não interfere
 }
 
+// Atendente desativada no Z-PRO (16/11/2026, Gláucia afastada). O listUsers do Z-PRO marca
+// quem foi desativado com `inactive: true` (conferido ao vivo); as quatro cópias antigas do
+// filtro só olhavam active/enabled/disabled/status, que o Z-PRO não manda — a desativada
+// continuava no rodízio, no pedido pelo nome e na tela "Atendentes de hoje". Regra única:
+// webhook, human-transfer-timeout e list-attendants chamam esta função.
+export function atendenteDesativada(u: unknown): boolean {
+  if (!u || typeof u !== "object") return false;
+  const x = u as Record<string, unknown>;
+  if (x.inactive === true) return true;
+  if (x.active === false) return true;
+  if (x.enabled === false) return true;
+  if (x.disabled === true) return true;
+  if (x.deletedAt) return true;
+  const st = String(x.status ?? "").toLowerCase();
+  return st === "disabled" || st === "inactive" || st === "blocked";
+}
+
 export async function fetchOnlineAttendants(
   baseUrl: string,
   apiId: string,
@@ -213,15 +230,7 @@ export async function fetchOnlineAttendants(
       return profile !== "admin";
     });
     // Filter out users disabled/inactive in AvanceAI (Z-PRO disabled flag varies by field name)
-    nonAdmin = nonAdmin.filter((u: any) => {
-      if (u.active === false) return false;
-      if (u.enabled === false) return false;
-      if (u.disabled === true) return false;
-      if (u.deletedAt) return false;
-      const st = String(u.status || "").toLowerCase();
-      if (st === "disabled" || st === "inactive" || st === "blocked") return false;
-      return true;
-    });
+    nonAdmin = nonAdmin.filter((u) => !atendenteDesativada(u));
     // Filter vacation list (matches by normalized name substring/exact)
     const vacationExcluded: string[] = [];
     const excludeNames = (opts?.excludeNames || []).filter(Boolean);

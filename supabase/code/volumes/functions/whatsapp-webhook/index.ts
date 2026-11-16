@@ -257,6 +257,7 @@ import {
   parseVacationNames,
   parseSubstitutas,
   substitutaDe,
+  atendenteDesativada,
   fetchOnlineAttendants,
   sendTypingIndicator,
   sendAvanceaiReply,
@@ -10209,15 +10210,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           });
 
           // Filter out users disabled/inactive in AvanceAI (Mardila desabilitada no Z-PRO etc.)
-          users = users.filter((u: any) => {
-            if (u.active === false) return false;
-            if (u.enabled === false) return false;
-            if (u.disabled === true) return false;
-            if (u.deletedAt) return false;
-            const st = String(u.status || "").toLowerCase();
-            if (st === "disabled" || st === "inactive" || st === "blocked") return false;
-            return true;
-          });
+          users = users.filter((u: any) => !atendenteDesativada(u));
 
           // Filter out attendants marked as on vacation in custom_notes
           const vacationNames = await nomesForaDoRodizio(supabaseClient, clinicTokenId, customNotes);

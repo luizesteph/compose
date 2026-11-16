@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { atendenteDesativada } from "../whatsapp-webhook/avanceai.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -85,7 +86,7 @@ Deno.serve(async (req) => {
       .map((u) => ({
         id: u?.id,
         name: String(u?.name || "").trim(),
-        active: !(u?.active === false || u?.enabled === false || u?.disabled === true || ["disabled", "inactive", "blocked"].includes(String(u?.status || "").toLowerCase())),
+        active: !atendenteDesativada(u),
         online: u?.online !== false && String(u?.status || "").toLowerCase() !== "offline",
       }))
       .filter((u) => u.name);
