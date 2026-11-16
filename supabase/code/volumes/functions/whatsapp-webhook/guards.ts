@@ -5,6 +5,7 @@
 // (fim de semana / fora do expediente) e dedup de respostas quase-identicas.
 // Extraido byte a byte do index.ts — comportamento identico. Sem @ts-nocheck.
 import { stripAccents, PROMESSA_DE_HUMANO_RE, MARCA_LIBERACAO_CONFERIDA } from "./helpers.ts";
+import { ehOrigemDoSite } from "../_shared/origem.ts";
 import { FRASE_ENCERRAMENTO, pertoDoEncerramento, expedienteAberto, fraseForaDoExpediente } from "../_shared/atendimento.ts";
 
 export function normalizeForSimilarity(s: string): string {
@@ -557,7 +558,7 @@ export async function marcacaoRecenteDaConversa(
       .limit(10);
     for (const linha of (data || []) as Array<Record<string, unknown>>) {
       const e = (linha.ai_entities && typeof linha.ai_entities === "object" ? linha.ai_entities : {}) as Record<string, unknown>;
-      if (opts?.incluirSite && ["widget", "widget_julia"].includes(String(linha.booking_source || ""))) {
+      if (opts?.incluirSite && ehOrigemDoSite(linha.booking_source)) {
         const site = /^Agendamento via widget:.*\bem\s+(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})/.exec(String(linha.message_text || ""));
         if (site) return { date: site[1], time: site[2] };
       }
@@ -1028,4 +1029,104 @@ export function semNomeDeAtendente(
 /** A instrução que a Julia recebeu traz a liberação conferida no PDF Visco? */
 export function temLiberacaoConferida(...textos: unknown[]): boolean {
   return textos.some((t) => String(t ?? "").includes(MARCA_LIBERACAO_CONFERIDA));
+}
+
+// ───────────────────────────────────────
+// O MODELO SÓ AFIRMA O QUE A AÇÃO FEZ (15/11/2026)
+// ───────────────────────────────────────
+// Dani (11/11 07:54): escreveu "Sair" depois de recusar uma vaga da lista de espera. A
+// mensagem virou `unknown`, nenhuma ação rodou e o modelo respondeu "Removi você da lista
+// de espera do Dr. Cristian". Ela continuou na fila e recebeu mais quatro ofertas. A mesma
+// família aparece em quase todo relatório desde setembro: "vou te incluir na fila",
+// "localizei seu cadastro pelo nome", "já deixei a equipe avisada", "Verifiquei seu
+// cadastro e está tudo certo" depois de o paciente só dizer o nome (11 em 60 dias).
+//
+// Regra: cada verbo de coisa feita tem uma ação que o sustenta (intenção + resultado). Sem
+// ela, a frase sai — ou a resposta inteira vira a passagem para a equipe, que a rede da
+// promessa cumpre de verdade. Marcação e remarcação ficam com a guarda de confirmação
+// falsa, que já olha a marcação recente. Replay em 5.804 respostas de 60 dias: 17 mudam,
+// as 17 afirmações falsas.
+export const TEXTO_ACAO_NAO_FEITA =
+  "Isso eu não consigo resolver por aqui. 🙏 Vou passar para a nossa equipe, que cuida disso com você.";
+
+type AcaoDaMensagem = { intent: string; status: string };
+type RegraDeAfirmacao = {
+  nome: string;
+  re: RegExp;
+  /** a ação desta mensagem sustenta a frase? */
+  sustenta: (a: AcaoDaMensagem) => boolean;
+  /** "frase": tira só a frase; "tudo": a resposta inteira vira a passagem para a equipe */
+  troca: "frase" | "tudo";
+};
+
+const _CONSULTA_AO_CADASTRO = new Set(["agendar", "cadastrar", "reagendar", "confirmar", "consultar", "cancelar", "entrar_lista_espera", "solicitar_infiltracao"]);
+const REGRAS_DE_AFIRMACAO: RegraDeAfirmacao[] = [
+  {
+    nome: "saiu_da_lista",
+    re: /\b(removi|retirei|tirei|exclui)\b[^.!?]{0,40}\b(lista|fila)\b|\bvoce (nao esta mais|ja saiu|saiu) (na|da) (lista|fila)\b/,
+    sustenta: (a) => a.intent === "sair_lista_espera",
+    troca: "tudo",
+  },
+  {
+    nome: "entrou_na_lista",
+    re: /\b(coloquei|inclui|adicionei|inseri)\b[^.!?]{0,50}\b(lista|fila) de espera\b|\b(vou|irei) (te |lhe |voce )?(colocar|incluir|adicionar|inserir)[^.!?]{0,40}\b(lista|fila) de espera\b/,
+    sustenta: (a) => ["entrar_lista_espera", "confirmar_periodo_espera", "recusar_vaga_espera"].includes(a.intent),
+    troca: "tudo",
+  },
+  {
+    nome: "cancelou",
+    re: /\b(cancelei|desmarquei)\b/,
+    sustenta: (a) => a.intent === "cancelar" && a.status === "success",
+    troca: "tudo",
+  },
+  {
+    nome: "cadastro",
+    re: /(?<!\bnao )\b(localizei|encontrei|achei)\b[^.!?]{0,30}\bcadastro\b|\bverifiquei (o |seu |teu )?cadastro\b|\b(atualizei|alterei|corrigi)\b[^.!?]{0,40}\b(cadastro|convenio|plano|dados|telefone|email)\b/,
+    sustenta: (a) => _CONSULTA_AO_CADASTRO.has(a.intent),
+    troca: "frase",
+  },
+  {
+    nome: "avisou_equipe",
+    re: /\b(avisei|informei|comuniquei|notifiquei)\b[^.!?]{0,40}\b(equipe|recepcao|medico|doutor|dr|atendente)\b|\b(equipe|recepcao)\b[^.!?]{0,20}\bja esta (ciente|avisada|informada)\b/,
+    sustenta: (a) => a.intent === "falar_com_atendente" || /^transferred/.test(a.status),
+    troca: "tudo",
+  },
+  {
+    nome: "enviou",
+    re: /\b(enviei|mandei)\b[^.!?]{0,40}\b(e-?mail|documento|guia|laudo|nota fiscal|recibo|atestado|boleto|receita)\b/,
+    sustenta: () => false,
+    troca: "tudo",
+  },
+];
+
+/** Qual afirmação a resposta faz sem a ação por trás? null = nenhuma. */
+export function afirmacaoSemAcao(resposta: unknown, acao: AcaoDaMensagem): RegraDeAfirmacao | null {
+  const t = stripAccents(String(resposta ?? "").toLowerCase());
+  if (!t) return null;
+  for (const regra of REGRAS_DE_AFIRMACAO) if (!regra.sustenta(acao) && regra.re.test(t)) return regra;
+  return null;
+}
+
+/** Aplica a regra: tira a frase que afirma, ou troca a resposta pela passagem para a equipe. */
+export function semAfirmacaoDeAcaoNaoFeita(resposta: string, acao: AcaoDaMensagem): string {
+  let texto = resposta;
+  for (let volta = 0; volta < 4; volta++) {
+    const regra = afirmacaoSemAcao(texto, acao);
+    if (!regra) return texto;
+    if (regra.troca === "tudo") return TEXTO_ACAO_NAO_FEITA;
+    const partes = texto.split(/(?<=[.!?✅])(\s+)/);
+    const fica = partes.filter((p) => /^\s+$/.test(p) || !regra.re.test(stripAccents(p.toLowerCase())));
+    texto = fica.join("").replace(/\s{2,}/g, " ").trim();
+    if (texto.replace(/[^\p{L}]/gu, "").length < 12) return "Como posso te ajudar? 😊";
+  }
+  return texto;
+}
+
+/** Aviso ao modelo quando a mensagem não executou nada: a origem da afirmação falsa. */
+export const AVISO_NENHUMA_ACAO =
+  "- ⚠️ NESTA MENSAGEM O SISTEMA NÃO EXECUTOU NENHUMA AÇÃO: nada foi marcado, remarcado, cancelado nem confirmado; ninguém entrou ou saiu de lista de espera; nenhum cadastro foi localizado, verificado ou alterado; nenhum documento foi enviado e a equipe NÃO foi avisada. É PROIBIDO dizer que fez qualquer uma dessas coisas, e também prometer que vai fazer e voltar (\"já te confirmo\", \"vou verificar e te aviso\"). Se o paciente pediu algo assim, diga que vai passar para a nossa equipe.";
+
+/** A ação desta mensagem não fez nada no sistema? (dúvida respondida pelo modelo, ou só o nome recebido) */
+export function nenhumaAcaoFoiFeita(acao: AcaoDaMensagem): boolean {
+  return acao.status === "unknown_intent" || acao.intent === "unknown" || acao.intent === "identificar_por_nome";
 }

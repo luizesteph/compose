@@ -361,6 +361,25 @@ export function textoCancelado(i: Pick<ItemDaInsistencia, "data_consulta" | "hor
     `Se quiser marcar para outro dia, é só escrever aqui. 😊`;
 }
 
+/**
+ * A consulta de que a mensagem de confirmação fala, quando o telefone só tem UMA em aberto
+ * (15/11). Quem responde à confirmação já tem a consulta identificada pelo número dela —
+ * cancelar e confirmar seguem sem CPF. De 10 a 15/11, quatro pacientes com consulta no dia
+ * seguinte ouviram "Não encontrei cadastro com o CPF…": a ficha tinha sido feita pela equipe
+ * sem CPF, ou com outro. Com duas consultas em aberto no mesmo telefone (mãe e filho, dois
+ * médicos), devolve null: o fluxo segue pedindo o CPF para não agir na consulta errada.
+ * Linha já cancelada ou remarcada não conta.
+ */
+export function consultaUnicaDaMensagem<T extends { attendance_id?: unknown; status?: unknown }>(
+  linhas: T[] | null | undefined,
+): T | null {
+  const abertas = (linhas || []).filter((r) =>
+    Number(r?.attendance_id) > 0 && !["cancelada", "remarcada"].includes(String(r?.status || "")));
+  if (!abertas.length) return null;
+  const consultas = new Set(abertas.map((r) => String(r.attendance_id)));
+  return consultas.size === 1 ? abertas[0] : null;
+}
+
 /** Filtro de médico do teste: todas as palavras do filtro no nome (sem acento, sem caixa). Filtro vazio = todos. */
 export function medicoDoFiltro(nomeMedico: unknown, filtro: string | null | undefined): boolean {
   const n = (s: unknown) => String(s ?? "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\s+/g, " ").trim();

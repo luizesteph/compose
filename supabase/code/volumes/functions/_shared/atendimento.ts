@@ -141,10 +141,14 @@ export function prazoDaDevolucao(a: {
   conversaAtiva: boolean;
   prazoPadrao?: number;
   prazoEstendido?: number;
+  /** atendentes de férias ou ausentes hoje: perdem o prazo estendido do caso longo */
+  foraDaClinica?: readonly string[] | null;
 }): number {
   const padrao = Math.max(Number(a.prazoPadrao) || 0, PRAZO_DEVOLUCAO_MIN);
   const estendido = Math.max(Number(a.prazoEstendido) || 0, PRAZO_DEVOLUCAO_CASO_LONGO_MIN);
-  const base = prazoDeRespostaEmMinutos(a.nomeAtendente, padrao, estendido);
+  const base = atendenteDeCasoLongo(a.nomeAtendente) && !atendenteDeCasoLongo(a.nomeAtendente, a.foraDaClinica)
+    ? padrao
+    : prazoDeRespostaEmMinutos(a.nomeAtendente, padrao, estendido);
   if (base === estendido) return estendido;
   return a.conversaAtiva ? Math.max(base, PRAZO_DEVOLUCAO_CONVERSA_ATIVA_MIN) : base;
 }
@@ -208,10 +212,16 @@ export function desdeJanelaCasoLongo(agoraMs: number = Date.now()): string {
  * Aceita a grafia do Z-PRO ("VÂNIA", "Lidiane Souza") e a da classificação
  * ("vania").
  */
-export function atendenteDeCasoLongo(nome: unknown): string | null {
+export function atendenteDeCasoLongo(nome: unknown, foraDaClinica?: readonly string[] | null): string | null {
   const n = _normalizarCurta(typeof nome === "string" ? nome : "");
   if (!n) return null;
   const primeiro = n.split(/\s+/)[0];
+  // FÉRIAS (15/11/2026): a Vânia avisou os pacientes que sai em 16/11 por duas semanas e que
+  // a Lidiane acompanha os casos. Com ela fora, a regra do caso longo seguraria o paciente
+  // com uma atendente que não está — sem transferir, sem devolver à fila e sem resgate.
+  // Quem está de férias (linha "Atendentes de Férias:" do script) ou ausente hoje (painel)
+  // não é dona de caso longo: a mensagem segue para a fila, como a de qualquer atendente.
+  if ((foraDaClinica || []).some((f) => _normalizarCurta(String(f || "")).split(/\s+/)[0] === primeiro)) return null;
   return Object.prototype.hasOwnProperty.call(ATENDENTES_DE_CASO_LONGO, primeiro)
     ? ATENDENTES_DE_CASO_LONGO[primeiro]
     : null;
@@ -748,10 +758,12 @@ export function decidirResgate(a: {
   mensagens: MensagemParaResgate[];
   donoEhAdmin?: boolean;
   donoNome?: string | null;
+  /** atendentes de férias ou ausentes hoje: o ticket delas não é caso longo */
+  foraDaClinica?: readonly string[] | null;
 }): DecisaoDeResgate {
   if (!(Number(a.prazoMin) > 0)) return { resgatar: false, motivo: "desligado" };
   if (a.donoEhAdmin) return { resgatar: false, motivo: "dono_admin" };
-  if (atendenteDeCasoLongo(a.donoNome)) return { resgatar: false, motivo: "caso_longo" };
+  if (atendenteDeCasoLongo(a.donoNome, a.foraDaClinica)) return { resgatar: false, motivo: "caso_longo" };
   const ms = [...(a.mensagens || [])].sort((x, y) => Date.parse(x.created_at) - Date.parse(y.created_at));
   let ultimaFala = -1;
   ms.forEach((m, i) => {
@@ -837,4 +849,41 @@ export function decidirResgate(a: {
   if (_NOME_DE_ATENDENTE_RE.test(texto)) return { resgatar: false, motivo: "falou_com_a_atendente" };
   if (!pareceNovaPergunta(texto)) return { resgatar: false, motivo: "nao_e_pergunta" };
   return { resgatar: true, ids: presas.map((p) => p.id), texto, desde: primeira.created_at };
+}
+
+// ───────────────────────────────────────
+// QUEM ESTÁ FORA DA CLÍNICA HOJE (15/11/2026)
+// ───────────────────────────────────────
+// Duas fontes, as mesmas do rodízio de transferência: a linha "Atendentes de Férias: …" (ou
+// "Atendentes Ausentes: …") do script da clínica e as ausências do dia marcadas no painel.
+export function nomesDeFeriasNoScript(customNotes: unknown): string[] {
+  const texto = String(customNotes ?? "");
+  const nomes: string[] = [];
+  for (const re of [/Atendentes\s+de\s+F[eé]rias\s*:[ \t]*([^\n]+)/i, /Atendentes\s+Ausentes(?:\s+Hoje)?\s*:[ \t]*([^\n]+)/i]) {
+    const m = texto.match(re);
+    if (!m) continue;
+    for (const parte of m[1].split(",")) {
+      const limpo = _normalizarCurta(parte.replace(/[*_`.;]/g, ""));
+      if (limpo) nomes.push(limpo);
+    }
+  }
+  return nomes;
+}
+
+/** Atendentes de férias ou ausentes hoje. Falha de leitura devolve [] (a regra antiga). */
+export async function atendentesForaHoje(supabase: any, clinicTokenId: string | null | undefined): Promise<string[]> {
+  if (!supabase || !clinicTokenId) return [];
+  try {
+    const hoje = new Date().toLocaleDateString("sv-SE", { timeZone: "America/Sao_Paulo" });
+    const [{ data: info }, { data: ausencias }] = await Promise.all([
+      supabase.from("clinic_info").select("custom_notes").eq("clinic_token_id", clinicTokenId).limit(1),
+      supabase.from("attendant_absences").select("attendant_name").eq("clinic_token_id", clinicTokenId).eq("absent_date", hoje),
+    ]);
+    return [
+      ...nomesDeFeriasNoScript(info?.[0]?.custom_notes),
+      ...((ausencias || []) as Array<{ attendant_name?: string }>).map((r) => _normalizarCurta(String(r.attendant_name || ""))).filter(Boolean),
+    ];
+  } catch {
+    return [];
+  }
 }

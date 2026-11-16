@@ -121,6 +121,14 @@ import {
   perguntaEspecialidadeDoMedico,
   falaDeCarteirinhaEnviada,
   TEXTO_CARTEIRINHA_SEM_LEITURA,
+  pedeParaEsperar,
+  TEXTO_FICO_NO_AGUARDO,
+  pedeSairNoContextoDaLista,
+  pedeOutroMedico,
+  INTENCOES_DA_LISTA_DE_ESPERA,
+  TEM_CPF_RE,
+  autorizaConfirmarPresenca,
+  ultimaFalaDaClinica,
   horaDaConsultaDeHoje,
   minutosDeAtraso,
   textoAtrasoPodeVir,
@@ -212,6 +220,7 @@ import type { JanelaDeDatas } from "./helpers.ts";
 import { tryFetch } from "./amigoApi.ts";
 import {
   atendenteDeCasoLongo,
+  atendentesForaHoje,
   cobraRetorno,
   COBRANCA_DONA_CALADA_MIN,
   COBRANCA_SEM_NOVA_IDA_MIN,
@@ -226,8 +235,9 @@ import {
   quandoAEquipeResponde,
   relogioDaGuarda,
 } from "../_shared/atendimento.ts";
+import { FILTRO_ORIGEM_DO_SITE, FILTRO_ORIGEM_DO_SITE_NO_OR } from "../_shared/origem.ts";
 import { liberadoVaiParaAtendente, INTENT_AVISO_DE_LIBERACAO } from "../_shared/liberados.ts";
-import { chaveDoTelefone, ehSimDeConfirmacao, ehCancelamentoClaro, textoConfirmado, textoCancelado, HORAS_VALIDADE_DO_SIM, querRemarcarNaConfirmacao, cabecalhoRemarcarDaConfirmacao, MARCA_REMARCAR_DA_CONFIRMACAO, RODAPE_REMARCAR_DA_CONFIRMACAO, textoRemarcadaDaConfirmacao } from "../_shared/confirmacao.ts";
+import { chaveDoTelefone, ehSimDeConfirmacao, ehCancelamentoClaro, textoConfirmado, textoCancelado, consultaUnicaDaMensagem, HORAS_VALIDADE_DO_SIM, querRemarcarNaConfirmacao, cabecalhoRemarcarDaConfirmacao, MARCA_REMARCAR_DA_CONFIRMACAO, RODAPE_REMARCAR_DA_CONFIRMACAO, textoRemarcadaDaConfirmacao } from "../_shared/confirmacao.ts";
 import { canalVivo, enviarTexto } from "../_shared/zpro.ts";
 import { LLM_MODEL, LLM_MODEL_FALLBACK, LLM_MODEL_RESPOSTA, LLM_GATEWAY, ehErroDeModeloDesconhecido, llmApiKey, llmHeaders, LLM_USAGE_INCLUDE, custoDaChamada } from "../_shared/llm.ts";
 import { STT_ENDPOINT, STT_MODEL, STT_LANGUAGE, STT_RESPONSE_FORMAT, sttApiKey } from "../_shared/stt.ts";
@@ -252,6 +262,9 @@ import {
   respostaFoiFalha,
   corrigirLinkDoMapa,
   naoConfirmaAutorizacao,
+  semAfirmacaoDeAcaoNaoFeita,
+  nenhumaAcaoFoiFeita,
+  AVISO_NENHUMA_ACAO,
   semNomeDeAtendente,
   temLiberacaoConferida,
   avisoDeEncerramento,
@@ -337,7 +350,7 @@ async function agendarFechamentoPosAgradecimento(
       .select("id")
       .eq("conversation_id", conversationId)
       .gte("created_at", desde24h)
-      .or("and(ai_intent.in.(agendar,reagendar,cadastrar,confirmar),action_status.eq.success),booking_source.eq.widget")
+      .or(`and(ai_intent.in.(agendar,reagendar,cadastrar,confirmar),action_status.eq.success),${FILTRO_ORIGEM_DO_SITE_NO_OR}`)
       .limit(1);
     if (!booking || booking.length === 0) return false;
     const quando = new Date(Date.now() + 90 * 1000).toISOString();
@@ -882,7 +895,7 @@ async function registrarRespostaDeVagaSobAtendente(
   // ("não quero" contém "quero"), aceite é curto e sem dígitos ("quero marcar
   // dia 12 às 15h" é outra intenção e não pode virar aceite silencioso).
   const recusa = WAITLIST_DECLINE_RE.test(t) && t.length <= 60 && !t.includes("?");
-  const aceite = !recusa && WAITLIST_ACCEPT_RE.test(t) && t.length <= 40 && !/\d/.test(t);
+  const aceite = !recusa && WAITLIST_ACCEPT_RE.test(t) && t.length <= 40 && !/[\d?]/.test(t) && !pedeParaEsperar(t);
   if (!aceite && !recusa) return "";
   try {
     const { data: pend } = await sb
@@ -7035,6 +7048,14 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           attId = "";
         }
 
+        // A consulta veio da mensagem de confirmação (15/11): a pergunta de antes do PUT e a
+        // resposta de depois dizem a data, a hora e o médico dela.
+        const _daConfirmacaoC = (entities as any).consulta_da_confirmacao as
+          { linha?: string; data?: string; hora?: string; inicio?: string; medico?: string } | null;
+        if (attId && _daConfirmacaoC?.inicio) {
+          _attEscolhido = { id: attId, start_date: _daConfirmacaoC.inicio, user: { name: _daConfirmacaoC.medico || "" } };
+        }
+
         // 15/10 (Matias): o CPF não tem cadastro — não é "não achei consulta futura"
         let _cpfSemCadastroCanc = false;
         if (!attId && entities.cpf) {
@@ -7226,6 +7247,21 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               });
             } catch (_e) { /* non-blocking */ }
           }
+          if (_daConfirmacaoC?.linha && _daConfirmacaoC.data && supabaseClient) {
+            try {
+              await supabaseClient.from("confirmacao_insistencia")
+                .update({ status: "cancelada", motivo: "pedido do paciente na conversa — cancelada no Amigo" })
+                .eq("id", _daConfirmacaoC.linha);
+            } catch (_e) { /* não bloqueia a resposta */ }
+            return {
+              status: "success",
+              response: textoCancelado(
+                { data_consulta: _daConfirmacaoC.data, hora: _daConfirmacaoC.hora || "", medico_nome: _daConfirmacaoC.medico || "" },
+                getTodayISO_SP(),
+              ),
+              bypassAiRewrite: true,
+            } as any;
+          }
           return { status: "success", response: `Agendamento ${attId} cancelado com sucesso` };
         }
         // Texto pronto (02/10, Alyne: "tivemos uma instabilidade" duas vezes seguidas).
@@ -7263,6 +7299,13 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         if (attId && !/^\d+$/.test(attId)) {
           console.log("[Webhook] Invalid attendance_id (not numeric), falling back to CPF lookup: " + attId);
           attId = "";
+        }
+        // A consulta veio da mensagem de confirmação (15/11): o paciente e o texto da resposta
+        // saem dela, sem busca por CPF.
+        const _daConfirmacao = (entities as any).consulta_da_confirmacao as { linha?: string; inicio?: string; medico?: string } | null;
+        if (attId && /^\d+$/.test(String((entities as any).patient_id_da_consulta || ""))) {
+          confirmPatientId = String((entities as any).patient_id_da_consulta);
+          if (_daConfirmacao?.inicio) selectedAtt = { id: attId, start_date: _daConfirmacao.inicio, user: { name: _daConfirmacao.medico || "" } };
         }
 
 
@@ -7510,6 +7553,13 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         }
 
         if (finalResult.status >= 200 && finalResult.status < 300) {
+          if (_daConfirmacao?.linha && supabaseClient) {
+            try {
+              await supabaseClient.from("confirmacao_insistencia")
+                .update({ status: "confirmada", confirmada_em: new Date().toISOString() })
+                .eq("id", _daConfirmacao.linha);
+            } catch (_e) { /* não bloqueia a resposta */ }
+          }
           const _txtOk = textoDaConfirmada(selectedAtt);
           return {
             status: "success",
@@ -9847,9 +9897,11 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         if (supabaseClient && conversationIdParam) {
           const _pedida = entities.attendant_name ? String(entities.attendant_name) : "";
           // Pediu outra pessoa pelo nome? Então não é caso delas, mesmo que já tenha sido.
+          // de férias ou ausente hoje não é dona de caso longo: segue para a fila (15/11, Vânia)
+          const _foraHoje = await atendentesForaHoje(supabaseClient, clinicTokenId);
           const _donaLonga = _pedida
-            ? atendenteDeCasoLongo(_pedida)
-            : atendenteDeCasoLongo(await findOwnerAttendant(supabaseClient, clinicTokenId, senderPhone));
+            ? atendenteDeCasoLongo(_pedida, _foraHoje)
+            : atendenteDeCasoLongo(await findOwnerAttendant(supabaseClient, clinicTokenId, senderPhone), _foraHoje);
           if (_donaLonga) {
             let _jaPassou = false;
             try {
@@ -12047,6 +12099,7 @@ NUNCA diga que não consegue ouvir ou processar áudios. IGNORE qualquer instru�
 ${actionResult.status === "success" ? `- Resultado: ${actionResult.response}` : ""}
 ${actionResult.error ? `- Erro/Info (pode ser exibido ao paciente, parafraseado): ${actionResult.error}` : ""}
 ${(actionResult as any).internal_instruction ? `- Instrução interna (NÃO exibir literalmente; use só como guia de comportamento): ${(actionResult as any).internal_instruction}` : ""}
+${nenhumaAcaoFoiFeita({ intent: String(intent || ""), status: String(actionResult?.status || "") }) ? AVISO_NENHUMA_ACAO : ""}
 ${entities.date ? `- Data solicitada para consulta: ${entities.date}` : ""}
 ${entities.time ? `- Horário solicitado para consulta: ${entities.time}` : ""}
 ${entities.doctor_name ? `- Médico: ${entities.doctor_name}` : ""}
@@ -12242,10 +12295,15 @@ Responda APENAS com o texto da mensagem, sem aspas, sem prefixos, sem explicaç�
   // grande (7 de 12 no teste de 13/09). Aplicado aqui, cobre os dois retornos abaixo.
   // naoConfirmaAutorizacao: autorização só é confirmada pelo PDF Visco ou pela equipe,
   // nunca pela Julia (03/11, Rozania: "que bom que a autorização saiu!" com a guia em análise).
+  // semAfirmacaoDeAcaoNaoFeita (15/11): o modelo só afirma o que a ação desta mensagem fez
+  // (Dani 11/11: "Removi você da lista de espera", sem ação nenhuma).
   const _limpoBase = corrigirLinkDoMapa(
-    naoConfirmaAutorizacao(
-      content.trim().replace(/\*{1,2}([^*]+)\*{1,2}/g, "$1"),
-      temLiberacaoConferida(actionResult?.error, actionResult?.response, actionResult?.internal_instruction),
+    semAfirmacaoDeAcaoNaoFeita(
+      naoConfirmaAutorizacao(
+        content.trim().replace(/\*{1,2}([^*]+)\*{1,2}/g, "$1"),
+        temLiberacaoConferida(actionResult?.error, actionResult?.response, actionResult?.internal_instruction),
+      ),
+      { intent: String(intent || ""), status: String(actionResult?.status || "") },
     ),
     clinicLocationInfo?.google_maps_link,
   );
@@ -15227,6 +15285,31 @@ Deno.serve(async (req) => {
         }
       }
 
+      // === "SAIR" EM RESPOSTA A UMA MENSAGEM DA LISTA DE ESPERA (15/11, Dani) ===
+      // Vem ANTES da urgência: "Nao posso Sair" em resposta a uma vaga não é emergência.
+      if (!keywordForcedIntent && conversationId && pedeSairNoContextoDaLista(finalMessage || "")) {
+        try {
+          const { data: _ultDaLista } = await supabase
+            .from("webhook_messages")
+            .select("ai_intent, created_at")
+            .eq("conversation_id", conversationId)
+            .eq("direction", "outgoing")
+            .order("created_at", { ascending: false })
+            .limit(1);
+          const _u = _ultDaLista?.[0] as { ai_intent?: string | null; created_at?: string } | undefined;
+          if (
+            _u && (INTENCOES_DA_LISTA_DE_ESPERA as readonly string[]).includes(String(_u.ai_intent || "")) &&
+            Date.now() - Date.parse(String(_u.created_at)) < 48 * 60 * 60_000 &&
+            (await isWaitlistEnabled(supabase, clinicTokenId))
+          ) {
+            console.log(`[Webhook] ⚡ "${String(finalMessage || "").slice(0, 30)}" em resposta a ${_u.ai_intent} — sair_lista_espera`);
+            keywordForcedIntent = { intent: "sair_lista_espera", attendant_name: "" };
+          }
+        } catch (e) {
+          console.log(`[Waitlist] sair no contexto: erro (non-blocking): ${(e as Error).message}`);
+        }
+      }
+
       // === URGENCY DETECTION (P-relatorio 23/06 Conv. 35 Fabiano) ===
       // Termos de emergencia/crise/dor aguda interrompem o fluxo de agendamento e
       // forçam transferencia humana IMEDIATA. Caso Fabiano: relatou "crise na lombar"
@@ -16050,6 +16133,26 @@ Deno.serve(async (req) => {
             console.log(`[Webhook] pedido de atestado (${_itC}) — fica com a equipe`);
             classification.intent = "falar_com_atendente";
           }
+
+          // (4) 15/11 — "Só um minuto por favor" (<paciente> 13/11: virou "sim" e a consulta foi
+          //     marcada). Quem pede tempo não escolheu, não aceitou nem pediu nada: nenhuma
+          //     ação, e a Julia diz que espera. Replay 60 dias: 14 mensagens.
+          const _msgAtual = String(finalMessage || "");
+          if (["agendar", "reagendar", "cancelar", "confirmar", "cadastrar", "consultar", "unknown"].includes(String(classification.intent || "")) &&
+            _msgAtual.length <= 50 && !/[\d?]/.test(_msgAtual) && pedeParaEsperar(_msgAtual)) {
+            console.log(`[Webhook] "${_msgAtual.slice(0, 30)}" pede tempo — ${classification.intent} → unknown (sem ação)`);
+            classification.intent = "unknown";
+            classification.reagendar_confirmed = false;
+            (classification as any).__pedeTempo = true;
+          }
+          // (5) 15/11 — a confirmação de presença só sai com pedido de confirmar (ver
+          //     autorizaConfirmarPresenca): "Por gentileza", "Já está agendado", "envio exame" e
+          //     o "Ok" que confirmou a consulta a que a paciente não iria. CPF sempre segue.
+          if (classification.intent === "confirmar" && !TEM_CPF_RE.test(_msgAtual) &&
+            !autorizaConfirmarPresenca(_msgAtual, ultimaFalaDaClinica(conversationHistory || []))) {
+            console.log(`[Webhook] "${_msgAtual.slice(0, 30)}" não pede confirmação — confirmar → unknown (nada vai ao Amigo)`);
+            classification.intent = "unknown";
+          }
         }
 
         // === BRADESCO EFETIVO IV: MÉDICO ÚNICO (regra do dono, 31/08) ===
@@ -16164,8 +16267,9 @@ Deno.serve(async (req) => {
           // Pergunta não é recusa (27/09, Luiz Flávio: "Nao tinha confirmado sexta às 9?"
           // virou "Passei essa vaga para o próximo" com a oferta já vencida).
           const _wlDecline = WAITLIST_DECLINE_RE.test(_wlTxt) && _wlTxt.length <= 60 && !_wlTxt.includes("?");
-          const _wlAccept = !_wlDecline && WAITLIST_ACCEPT_RE.test(_wlTxt) && _wlTxt.length <= 40 && !/\d/.test(_wlTxt);
-          if ((_wlAccept || _wlDecline) && conversationId && clinicTokenId && phone) {
+          const _wlAccept = !_wlDecline && WAITLIST_ACCEPT_RE.test(_wlTxt) && _wlTxt.length <= 40 && !/[\d?]/.test(_wlTxt) && !pedeParaEsperar(_wlTxt);
+          // quem pediu para SAIR da lista ("Nao posso Sair", 12/11) não é só recusa desta vaga
+          if ((_wlAccept || _wlDecline) && classification.intent !== "sair_lista_espera" && conversationId && clinicTokenId && phone) {
             // ACEITE TARDIO (caso Marcia 21/07): "quero" 51min DEPOIS da oferta expirar
             // caía no LLM → reagendar vazio → fallback ("pode me confirmar o médico?").
             // Agora a entry WAITING com a última vaga ofertada guardada também conta —
@@ -16389,17 +16493,33 @@ Deno.serve(async (req) => {
           try {
             const _kc = chaveDoTelefone(phone);
             if (_kc) {
-              const { data: _ci } = await supabase
+              const { data: _cis } = await supabase
                 .from("confirmacao_insistencia")
-                .select("patient_id, data_consulta")
+                .select("id, patient_id, data_consulta, attendance_id, hora, medico_nome, status")
                 .eq("clinic_token_id", clinicTokenId)
                 .eq("telefone_chave", _kc)
                 .gt("attendance_id", 0)
                 .gte("data_consulta", getTodayISO_SP())
                 .not("enviada_em", "is", null)
                 .order("enviada_em", { ascending: false })
-                .limit(1)
-                .maybeSingle();
+                .limit(5);
+              const _ci = (_cis || [])[0] as any;
+              // A CONSULTA DA MENSAGEM JÁ ESTÁ IDENTIFICADA (15/11): cancelar e confirmar seguem
+              // pelo número dela, sem CPF — ver consultaUnicaDaMensagem (_shared/confirmacao.ts).
+              const _unica = consultaUnicaDaMensagem((_cis || []) as any[]) as any;
+              if (_unica && !classification.attendance_id &&
+                ["cancelar", "confirmar"].includes(String(classification.intent || ""))) {
+                classification.attendance_id = String(_unica.attendance_id);
+                (classification as any).patient_id_da_consulta = String(_unica.patient_id || "");
+                (classification as any).consulta_da_confirmacao = {
+                  linha: String(_unica.id),
+                  data: String(_unica.data_consulta),
+                  hora: String(_unica.hora || "").slice(0, 5),
+                  inicio: `${String(_unica.data_consulta)}T${String(_unica.hora || "").slice(0, 5)}`,
+                  medico: String(_unica.medico_nome || ""),
+                };
+                console.log(`[MensagemAutomatica] ${classification.intent} da consulta ${_unica.attendance_id} (${_unica.data_consulta} ${_unica.hora}) — sem CPF`);
+              }
               if (_ci?.patient_id) {
                 const { data: _lp } = await supabase
                   .from("local_patients")
@@ -16845,15 +16965,15 @@ Deno.serve(async (req) => {
           }
         }
 
-        const outroMedicoRegex =
-          /\b(outro\s*(m[eé]dico|doutor|dr|profissional)|qualquer\s*(m[eé]dico|doutor|dr|profissional|um)|pode\s*ser\s*outro|tanto\s*faz|n[aã]o\s*tenho\s*prefer[eê]ncia|mais\s*r[aá]pido\s*poss[ií]vel)\b/i;
+        // 15/11: a regra saiu para pedeOutroMedico (helpers.ts) e passou a ler "outro
+        // ortopedista" / "outro especialista" (Rosana 12/11, perdida)
         // "tanto faz o DIA" fala do dia, nao do médico (28/08). O regex acima casa
         // "tanto faz" e limpava o médico — o oposto do que a paciente pediu: ela
         // queria manter o Dr. Luiz Gustavo e abrir a data.
         const _tantoFazEhSobreODia =
           /\b(tanto\s*faz|qualquer|nao\s*tenho\s*prefer[eê]ncia|n[aã]o\s*tenho\s*prefer[eê]ncia)\b[\s\S]{0,12}\b(dia|data|hor[aá]rio)\b/i
             .test(finalMessage);
-        if (outroMedicoRegex.test(finalMessage) && !_tantoFazEhSobreODia) {
+        if (pedeOutroMedico(finalMessage) && !_tantoFazEhSobreODia) {
           console.log(
             `[Webhook] "Outro médico" detected in message. Clearing doctor_name="${classification.doctor_name}" and subspecialty="${classification.subspecialty}" to trigger multi-doctor search.`,
           );
@@ -17436,6 +17556,7 @@ Deno.serve(async (req) => {
           _waitlist_period_texto: (classification as any)._waitlist_period_texto,
           // Remarcar na resposta à confirmação (29/10): consulta e paciente já conhecidos
           patient_id_da_consulta: (classification as any).patient_id_da_consulta || "",
+          consulta_da_confirmacao: (classification as any).consulta_da_confirmacao || null,
           remarcar_da_confirmacao: (classification as any).remarcar_da_confirmacao || "",
           // Telefone no cadastro de outra pessoa (30/09): não buscar CPF pelo telefone
           sem_cpf_pelo_telefone: _telefoneDeOutraPessoa,
@@ -17934,7 +18055,7 @@ Deno.serve(async (req) => {
                 .like("message_text", "Agendamento via widget:%")
                 // só a linha que o SITE gravou (booking_source é do servidor): um paciente
                 // que digitar "Agendamento via widget: …" não libera data nem hora
-                .in("booking_source", ["widget", "widget_julia"])
+                .like("booking_source", FILTRO_ORIGEM_DO_SITE)
                 .gte("created_at", new Date(Date.now() - 30 * 60 * 1000).toISOString())
                 .order("created_at", { ascending: false })
                 .limit(1);
@@ -18401,6 +18522,8 @@ Deno.serve(async (req) => {
         if (_reembolsoPosMarcacao) {
           replyText = textoConvenioReembolsoPosMarcacao(_reembolsoPosMarcacao.convenio, precoDaConsulta(clinicRef?.custom_notes), _reembolsoPosMarcacao.date, _reembolsoPosMarcacao.time);
         }
+        // PEDIU TEMPO (15/11): "Só um minuto", "vou ver e te falo" — a Julia espera, sem repetir a pergunta.
+        if ((classification as any).__pedeTempo) replyText = TEXTO_FICO_NO_AGUARDO;
         // CARTEIRINHA ENVIADA (20/10, Mercia): a Julia não lê imagem — diz isso e pede o plano.
         if (falaDeCarteirinhaEnviada(finalMessage || "") && ["consultar_convenios", "unknown", "agendar", "cadastrar"].includes(String(classification.intent || "")) && !/\batendemos\b/i.test(replyText)) {
           console.log(`[Carteirinha] paciente diz que enviou a carteirinha — pedindo o nome do plano`);

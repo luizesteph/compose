@@ -173,6 +173,24 @@ export function parseWaitlistPeriod(text: string): "manha" | "tarde" | "qualquer
 export const WAITLIST_KEYWORD_RE = /\b(?:lista|fila)\s+d?e?\s*espera\b/i;
 export const WAITLIST_LEAVE_RE =
   /\b(sair?|saia|remover?|retirar?|tirar?|cancelar?)\b[\s\S]{0,30}?\b(?:lista|fila)\s+d?e?\s*espera\b|\b(?:lista|fila)\s+d?e?\s*espera\b[\s\S]{0,20}?\b(sair|remover|cancelar|tirar)\b/i;
+// SAIR DA LISTA, DITO EM RESPOSTA A UMA MENSAGEM DA LISTA (15/11/2026)
+// Dani (11/11): depois de recusar uma vaga escreveu só "Sair" — a mensagem anterior dizia
+// 'Para sair da lista, é só dizer "sair da lista de espera"'. Sem a palavra "lista" virou
+// dúvida, o modelo respondeu "Removi você" e ela ficou na fila: mais quatro ofertas, e o
+// "Nao posso Sair" do dia seguinte foi lido como urgência ("procure um pronto-socorro").
+// Quando a última mensagem da clínica é da lista de espera, estas palavras curtas saem da
+// lista. Em 05/10 (Milena) o mesmo pedido tinha sido tratado só para a frase com "lista".
+export const INTENCOES_DA_LISTA_DE_ESPERA = [
+  "waitlist_offer", "waitlist_nudge", "waitlist_expired", "recusar_vaga_espera", "entrar_lista_espera", "confirmar_periodo_espera",
+] as const;
+const _SAIR_NO_CONTEXTO_DA_LISTA_RE =
+  /\b(sair|me tira|me tire|tira|tirar|remove|remover|retira|retirar|desisto|desistir|para(r)? de (me )?(mandar|enviar|avisar|chamar)|pare de (me )?(mandar|enviar|avisar)|nao (quero|preciso) mais|nao precisa mais|nao (me )?(mande|envie|avise|mandem|enviem|avisem) mais|cancela(r)? (a |essa |minha )?(lista|espera|fila))\b/;
+
+export function pedeSairNoContextoDaLista(texto: unknown): boolean {
+  const t = stripAccents(semMetadados(texto).toLowerCase()).replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+  return t.length > 0 && t.length <= 80 && _SAIR_NO_CONTEXTO_DA_LISTA_RE.test(t);
+}
+
 // Aceite/recusa da OFERTA de vaga. Recusa testa PRIMEIRO ("não quero" contém
 // "quero"). Aceite: curto e sem dígitos — "quero marcar com Dr. X às 15h" tem
 // outra intenção e segue o fluxo normal de classificação.
@@ -943,7 +961,7 @@ export async function fetchWithTimeout(
 // "vou verificar os próximos horários… e já te apresento as opções" (Gabriel Longo, 27/10)
 // e nada veio: 1 vez em 4.351 respostas de 30 dias, esta — a rede transfere.
 export const PROMESSA_DE_HUMANO_RE =
-  /(vou|estou|irei|já\s+(vou|estou))\s+(te\s+)?(transferir|transferindo|passar|passando|encaminhar|encaminhando|chamar|chamando|acionar|acionando|avisar|avisando|pedir)(?![\p{L}])|j[áa]\s+(te\s+)?(avisei|acionei|pedi|passei|chamei|transferi|notifiquei|encaminhei)(?![\p{L}])|(foi|foram)\s+(acionad|notificad|avisad)[oa]s?(?![\p{L}])|(uma\s+)?(atendente|colega|pessoa\s+da\s+equipe)\s+(vai|ir[áa])\s+(te\s+)?(atender|responder|continuar|ajudar|falar)(?![\p{L}])|nossa\s+equipe\s+(vai|ir[áa])\s+(te\s+)?(atender|responder|entrar\s+em\s+contato|continuar)(?![\p{L}])|vou\s+(verificar|confirmar|checar|conferir|ver)\s+(isso\s+)?com\s+(a\s+)?(nossa\s+)?(equipe|atendente|recep[çc][ãa]o|colega)(?![\p{L}])|(nossa\s+)?equipe\s+j[áa]\s+est[áa]\s+(verificando|vendo|analisando|conferindo)(?![\p{L}])|j[áa]\s+te\s+(retorno|informo|respondo)(?![\p{L}])|te\s+retorno\s+(em\s+(breve|seguida|instantes)|assim\s+que|com\s+a\s+confirma)|vou\s+(finalizar|concluir|fechar|efetuar)\s+(o\s+|a\s+)?(seu\s+|sua\s+)?(agendamento|consulta|marca[çc][ãa]o|reserva)(?![\p{L}])|vou\s+(verificar|checar|consultar|buscar|procurar|olhar|conferir)\s[^.!?\n]{0,80}\b(e\s+)?j[áa]\s+te\s+(apresento|passo|envio|mando|mostro)(?![\p{L}])/iu;
+  /(vou|estou|irei|já\s+(vou|estou))\s+(te\s+)?(transferir|transferindo|passar|passando|encaminhar|encaminhando|chamar|chamando|acionar|acionando|avisar|avisando|pedir)(?![\p{L}])|j[áa]\s+(te\s+)?(avisei|acionei|pedi|passei|chamei|transferi|notifiquei|encaminhei)(?![\p{L}])|(foi|foram)\s+(acionad|notificad|avisad)[oa]s?(?![\p{L}])|(uma\s+)?(atendente|colega|pessoa\s+da\s+equipe)\s+(vai|ir[áa])\s+(te\s+)?(atender|responder|continuar|ajudar|falar)(?![\p{L}])|nossa\s+equipe\s+(vai|ir[áa])\s+(te\s+)?(atender|responder|entrar\s+em\s+contato|continuar)(?![\p{L}])|vou\s+(verificar|confirmar|checar|conferir|ver)\s+(isso\s+)?com\s+(a\s+)?(nossa\s+)?(equipe|atendente|recep[çc][ãa]o|colega)(?![\p{L}])|(nossa\s+)?equipe\s+j[áa]\s+est[áa]\s+(verificando|vendo|analisando|conferindo)(?![\p{L}])|j[áa]\s+te\s+(retorno|informo|respondo|confirmo|aviso|falo|digo)(?![\p{L}])|te\s+retorno\s+(em\s+(breve|seguida|instantes)|assim\s+que|com\s+a\s+confirma)|vou\s+(finalizar|concluir|fechar|efetuar)\s+(o\s+|a\s+)?(seu\s+|sua\s+)?(agendamento|consulta|marca[çc][ãa]o|reserva)(?![\p{L}])|vou\s+(verificar|checar|consultar|buscar|procurar|olhar|conferir)\s[^.!?\n]{0,80}\b(e\s+)?(j[áa]\s+te\s+(apresento|passo|envio|mando|mostro)|(te\s+)?confirmo\s+por\s+aqui)(?![\p{L}])/iu;
 
 // ─── CONVÊNIO NO TEXTO (17/08) ──────────────────────────────────────────────
 // Pedido do dono: "você continua marcando as consultas como particular. As
@@ -1152,6 +1170,19 @@ export function horaPedidaSemDia(
  * no médico antigo grudado e o freio de repetição transferiu. Resposta curta de
  * "tanto faz" à pergunta da preferência = buscar em todos os da especialidade.
  */
+// PEDIU OUTRO MÉDICO — OU QUALQUER UM (15/11/2026)
+// Rosana (12/11 09:01): dor no cotovelo, "Nao teria outro ortopedista pra hoje?". A regra
+// só conhecia "outro médico/doutor/profissional": a Julia repetiu a agenda do mesmo médico,
+// caiu em "não estou conseguindo te ajudar" e a paciente resolveu em outro lugar. Mesmo
+// pedido sem resposta em 27/10 (Renata, Guilherme) e 04/11 (Pedro, Jéssica, Ana Paula).
+// "tanto faz o DIA" continua falando do dia: quem chama confere antes de limpar o médico.
+const _OUTRO_MEDICO_RE =
+  /\b(outr[oa]s?\s*(medic[oa]s?|doutor(a|es)?|dr[a]?|profissiona(l|is)|ortopedistas?|especialistas?)|qualquer\s*(medic[oa]|doutor[a]?|dr[a]?|profissional|ortopedista|especialista|um)|pode\s*ser\s*outro|tanto\s*faz|nao\s*tenho\s*preferencia|mais\s*rapido\s*possivel|(com\s+)?quem\s+(tiver|estiver)\s+(disponivel|vaga|horario|livre))\b/;
+
+export function pedeOutroMedico(texto: unknown): boolean {
+  return _OUTRO_MEDICO_RE.test(stripAccents(semMetadados(texto).toLowerCase()));
+}
+
 export function semPreferenciaDeMedico(mensagem: unknown, ultimaPerguntaDaJulia: unknown): boolean {
   const perg = stripAccents(String(ultimaPerguntaDaJulia || "").toLowerCase());
   if (!/preferencia por algum|qual (?:deles|delas|dos dois|das duas)|com qual (?:deles|delas|dos dois)|qual (?:medico|profissional|especialista) (?:voce )?prefere/.test(perg)) return false;
@@ -2075,6 +2106,8 @@ export function podeCancelarSemPerguntar(a: {
   if (agora === "remarcar") return false;
   if (String(a.ultimaDaJulia ?? "").includes(PERGUNTA_CANCELAR_MARCA)) {
     const t = stripAccents(String(a.atual ?? "").toLowerCase()).trim();
+    // pergunta e pedido de tempo ("Ok, vou ver e te falo") não são o "sim" (15/11)
+    if (t.includes("?") || pedeParaEsperar(t)) return false;
     return !/^n(?:ao|a)\b/.test(t) && _SIM_AO_CANCELAR_RE.test(t);
   }
   // sem o comentário de metadados: "intent=cancelar" não é o paciente pedindo (10/11)
@@ -2549,7 +2582,8 @@ export function autorizacaoDoRemarcar(mensagem: unknown, ultimaSaidaDaJulia: unk
   const jaPerguntei = _PERGUNTA_DESTINO_DO_REMARCAR_RE.test(String(ultimaSaidaDaJulia ?? ""));
   // Pergunta não é aceite, e aceite com "não" no meio também não ("Este horário eu não
   // consigo, mas agradeço" — resposta real a uma vaga da lista de espera, 05/11).
-  if (!/\?/.test(bruto) && !/(?<![a-z])(?:nao|nunca|nem|infelizmente)(?![a-z])/.test(t)) {
+  // "Ok, vou ver e te falo" começa com "ok" e não é aceite: quem pede tempo não autoriza (15/11)
+  if (!/\?/.test(bruto) && !pedeParaEsperar(bruto) && !/(?<![a-z])(?:nao|nunca|nem|infelizmente)(?![a-z])/.test(t)) {
     if (_ACEITE_DO_REMARCAR_RE.test(t)) return "autoriza";
     // "quero", "quero sim", "quero esse" aceitam; "quero remarcar", "quero outro dia",
     // "quero sair da lista" não
@@ -2908,12 +2942,109 @@ export function ehPerguntaConfirmaPaciente(texto: unknown): boolean {
   return /Esse CPF está no cadastro de \*[^*]+\*\. Posso confirmar a consulta[\s\S]*\?\s*$/.test(String(texto ?? ""));
 }
 
-export function respostaAPerguntaDoPaciente(texto: unknown): "sim" | "nao" | null {
-  const t = String(texto ?? "").trim();
-  if (!t || t.length > 60) return null;
-  if (/^\s*(n[ãa]o|nao|n)\b/i.test(t)) return "nao";
-  if (/^\s*(sim|s|isso|isso mesmo|correto|certo|exato|[ée]\s+(sim|ela|ele|para\s+ela|para\s+ele)|pode|pode\s+confirmar|confirmo|confirma|ok|é)\b/i.test(t)) return "sim";
+// ────────────────────────────────────────────────────────────────
+// UM LEITOR SÓ PARA "SIM" E "NÃO" (15/11/2026)
+// ────────────────────────────────────────────────────────────────
+// <paciente> (13/11 13:50): à pergunta "Posso confirmar a consulta (27/11 às 10:20…) para
+// <paciente>?" ela respondeu "Só um minuto por favor" — e a consulta foi marcada. O leitor
+// antigo aceitava a letra "s" sozinha seguida de \b, e \b do JavaScript não conhece
+// acento: em "Só", o "ó" vale como fim de palavra. "Sábado pode ser?", "São duas
+// consultas", "Sério?" e "Pode ser outro dia?" também eram "sim"; "Nós vamos" era "não".
+// Havia sete leitores de aceite no código, cada um com a sua expressão.
+//
+// Regra deste leitor: só é "sim" ou "não" quando a mensagem INTEIRA é isso (com
+// cumprimento e cortesia em volta). Pergunta, condição, pedido de espera e qualquer
+// assunto a mais dão null — e null nunca autoriza marcação, troca nem cancelamento.
+// Conferido em 215 respostas reais (15/08 a 15/11) às perguntas de sim ou não da Julia.
+const _RS_SIM =
+  "(?:s+i+m+|s|ss|isso(?: mesmo| ai)?|exat[oa](?:mente)?|corret[oa]|cert[oa]|certinho|certissimo|pode(?: sim| ser| confirmar| marcar| agendar| fechar| remarcar| trocar| cancelar| desmarcar)?" +
+  "|confirm[oa]|confirmad[oa]|confirmar|ok+|okay|okey|blz|beleza|claro(?: que sim)?|com certeza|positivo|perfeito|fechado|fechou|combinado|quero(?: sim)?|aceito" +
+  "|e (?:sim|isso|ess[ae]|el[ae]|para el[ae]|pra el[ae]|a mesma|o mesmo|eu)|ess[ae](?: mesm[ao])?|sou eu(?: mesm[ao])?|eu mesm[ao]|a propria|o proprio|otimo|ta (?:bom|otimo|certo)|esta (?:bom|otimo|certo)|tudo (?:bem|certo)|show|maravilha)";
+const _RS_NAO =
+  "(?:n+a+o+|n|nn|negativo|nao e(?: el[ae]| ess[ae]| isso| eu)?|nao sou eu|agora nao|ainda nao|melhor nao|nao quero(?: mais)?|nao pode|nao precisa|nao posso|nao consigo|nao da|deixa(?: pra la| quieto)?|errado|incorreto)";
+const _RS_CORTESIA = "(?:por favor|pfv|pfvr|por gentileza|obrigad[oa]s?|obg|brigad[oa]|muito obrigad[oa]|valeu|grat[oa]|julia|querida|moca|doutora|dra|dr|sr|sra|amor|linda|anjo)";
+const _RS_ABERTURA = "(?:oi+|ola+|opa|bom dia|boa tarde|boa noite|ah|entao|olha|bem)";
+const _RS_SIM_RE = new RegExp(`^(?:${_RS_ABERTURA} )*${_RS_SIM}(?: (?:${_RS_SIM}|${_RS_CORTESIA}))*$`);
+const _RS_NAO_RE = new RegExp(`^(?:${_RS_ABERTURA} )*${_RS_NAO}(?: (?:${_RS_NAO}|${_RS_CORTESIA}))*$`);
+const _RS_ESPERA_RE =
+  /\b(so um (minuto|momento|instante|segundo|pouco|minutinho|momentinho)|(um|1) (minuto|momento|instante|segundo|minutinho|momentinho)|aguarde|aguarda ai|espere|espera(r)? (ai|um pouco|so um)|pera|perai|pera ai|ja (te )?(falo|respondo|retorno|volto|aviso|confirmo|digo)|vou (ver|verificar|confirmar|checar|pensar|conversar|falar|perguntar|olhar|conferir)|estou vendo|deixa eu (ver|verificar|confirmar|pensar|olhar|conferir)|te (aviso|falo|retorno|confirmo|respondo)|depois (eu )?(te )?(falo|aviso|confirmo|vejo|respondo|entro em contato))\b/;
+
+/** Minúsculas, sem acento, sem pontuação nem emoji: o texto como os leitores de resposta o comparam. */
+function _rsNormal(texto: unknown): string {
+  return stripAccents(semMetadados(texto).toLowerCase())
+    .replace(/[^a-z0-9 ]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** "Só um minuto", "vou ver e te falo", "aguarde": o paciente pediu tempo, não respondeu. */
+export function pedeParaEsperar(texto: unknown): boolean {
+  // "Fico no aguardo" não entra: ali quem espera é o paciente
+  return _RS_ESPERA_RE.test(_rsNormal(texto));
+}
+
+/** A resposta curta a uma pergunta de sim ou não. Ver o comentário acima. */
+export function respostaSimOuNao(texto: unknown): "sim" | "nao" | null {
+  const bruto = semMetadados(texto).trim().replace(/^\s*(?:oi+e?|ol[aá]+|opa)?[\s,!.]*(?:tudo\s+)?(?:bem|bom|joia|certo)\s*\?+\s*/i, "");
+  if (!bruto || bruto.length > 60 || bruto.includes("?")) return null;
+  if (/^[\s\p{Extended_Pictographic}\p{Emoji_Modifier}\u200d\ufe0f]+$/u.test(bruto)) {
+    if (/👎/u.test(bruto)) return "nao";
+    return /[👍✅👌]/u.test(bruto) ? "sim" : null;
+  }
+  const t = _rsNormal(bruto);
+  if (!t) return null;
+  if (_RS_NAO_RE.test(t)) return "nao";
+  if (_RS_SIM_RE.test(t)) return "sim";
   return null;
+}
+
+// A CONFIRMAÇÃO DE PRESENÇA SÓ SAI COM PEDIDO DE CONFIRMAR (15/11/2026)
+// Em 60 dias, 88 confirmações foram mandadas ao Amigo pelo fluxo comum (fora do "SIM" à
+// mensagem da véspera) e em cerca de 20 a mensagem não pedia isso: "Por gentileza", "Já
+// está agendado", "Esse mesmo", "até", "envio exame", "é minha carteirinha do convênio",
+// "bradesco saúde top nacional plus", "devo chegar umas 16:10", um aviso automático de
+// laboratório — e o "Ok" da Santa (13/11), que confirmou a consulta a que ela tinha dito
+// que não iria. A mensagem ATUAL tem de falar em confirmar ou manter, ser o "sim" a uma
+// pergunta da Julia sobre a consulta, ou ser o CPF que a Julia pediu para confirmar.
+const _CONF_VERBO_RE =
+  /\b(confirm\w*|mante\w*|manter|mantenho|mantem|deixa\w* (como esta|assim|o dia|dia|pra dia|para dia|no dia)|pode deixar|fica (como esta|assim|conforme)|estarei|irei|comparecerei|vou (sim|comparecer|estar|ir|la)|nesse dia mesmo|nessa data|esse (dia|horario) mesmo)\b/;
+const _CONF_NEGA_RE =
+  /\bnao (vou|irei|posso|consigo|confirm\w*|poderei|conseguirei|quero confirmar|comparecerei)\b|(?<!\bnao (quero|vou|preciso|precisa) )(?<!\bsem )\b(cancel\w*|desmarc\w*|remarc\w*|reagend\w*)\b/;
+const _CONF_PERGUNTA_DA_JULIA_RE =
+  /(responda somente|confirmar a (sua )?(presenca|consulta)|confirme a sua presenca|e essa (a consulta|que)|quer (manter|confirmar)|posso confirmar|(consulta|agendamento|atendimento|horario)[^?]{0,160}\?\s*$)/;
+
+/** Onze dígitos de CPF, com ou sem pontuação. */
+export const TEM_CPF_RE = /\d{3}\D{0,2}\d{3}\D{0,2}\d{3}\D{0,2}\d{2}/;
+
+/** A última fala da clínica no histórico (Julia, equipe ou mensagem automática), sem o comentário de metadados. */
+export function ultimaFalaDaClinica(historico: ReadonlyArray<{ role?: string; content?: unknown }> | null | undefined): string {
+  const h = Array.isArray(historico) ? historico : [];
+  for (let i = h.length - 1; i >= 0; i--) if (h[i]?.role === "assistant") return semMetadados(h[i]?.content);
+  return "";
+}
+
+export const TEXTO_FICO_NO_AGUARDO = "Sem pressa! Fico no aguardo por aqui. 😊";
+
+export function autorizaConfirmarPresenca(mensagem: unknown, ultimaSaidaDaJulia: unknown): boolean {
+  const t = _rsNormal(mensagem);
+  if (!t) return false;
+  const pergunta = stripAccents(String(ultimaSaidaDaJulia ?? "").toLowerCase());
+  const juliaPerguntou = _CONF_PERGUNTA_DA_JULIA_RE.test(pergunta);
+  // o CPF que a Julia pediu para confirmar (a frase dela varia: basta falar de confirmar e de CPF)
+  if (/confirm/.test(pergunta) && /cpf/.test(pergunta) && TEM_CPF_RE.test(String(mensagem ?? ""))) return true;
+  if (pedeParaEsperar(t) || _CONF_NEGA_RE.test(t)) return false;
+  if (_CONF_VERBO_RE.test(t) && !String(mensagem ?? "").includes("?")) return true;
+  return juliaPerguntou && respostaSimOuNao(mensagem) === "sim";
+}
+
+/** Resposta a "Posso confirmar a consulta (…) para X?". Desde 15/11 é o leitor único. */
+export function respostaAPerguntaDoPaciente(texto: unknown): "sim" | "nao" | null {
+  const r = respostaSimOuNao(texto);
+  if (r) return r;
+  // "Não, é para mim": a recusa pode vir com a explicação junto — ela não escreve nada no
+  // Amigo, só faz a Julia pedir o nome e o CPF de quem vai ser atendido.
+  const t = _rsNormal(texto);
+  return t.length <= 60 && /^(?:nao|n)(?: |$)/.test(t) ? "nao" : null;
 }
 
 export const TEXTO_PEDE_CPF_DO_PACIENTE = "Tudo bem! 🙏 Me passa, por favor, o nome completo e o CPF de quem vai ser atendido.";

@@ -32,6 +32,7 @@ import {
   LIMITES_PADRAO_DA_FICHA,
   type LimitesDaFicha,
   atendenteDeCasoLongo,
+  atendentesForaHoje,
   decideNovaIdaAFila,
   desdeJanelaCasoLongo,
   FILTRO_GATILHOS_SEM_MOVIMENTO,
@@ -393,7 +394,9 @@ async function devolverInativosAFila(
       new Date(m.created_at).getTime() <= _tPac &&
       _tPac - new Date(m.created_at).getTime() <= JANELA_CONVERSA_ATIVA_MIN * 60000
     );
-    const prazoMin = prazoDaDevolucao({ nomeAtendente: nome, conversaAtiva, prazoPadrao, prazoEstendido });
+    // quem está de férias ou ausente hoje não segura o paciente (15/11)
+    const _fora = await atendentesForaHoje(supabase, clinicTokenId);
+    const prazoMin = prazoDaDevolucao({ nomeAtendente: nome, conversaAtiva, prazoPadrao, prazoEstendido, foraDaClinica: _fora });
     if (esperandoMin < prazoMin) { pulou("dentro_do_prazo_da_dona"); continue; }
 
     // CASO LONGO (pedido do dono, 15/09): a Vânia e a Lidiane perdem o paciente
@@ -401,7 +404,7 @@ async function devolverInativosAFila(
     // últimos 7 dias — por esta devolução, pela Julia ou pela varredura —, o
     // ticket fica com ela; só urgência clínica devolve de novo. De 08 a 15/09,
     // 64 das 86 devoluções delas foram de conversa que já tinha ido para a fila.
-    if (atendenteDeCasoLongo(nome)) {
+    if (atendenteDeCasoLongo(nome, _fora)) {
       const { count: _idas, error: _erroIdas } = await supabase
         .from("transfer_audit")
         .select("id", { count: "exact", head: true })
@@ -891,7 +894,8 @@ async function varrerFichasParadas(
     const idadeDias = (agoraMs - ultimaMsgMs) / 86400000;
     out.avaliados++;
 
-    const d = decideLiberarFicha({ temDona: true, ociosoMin, idadeDias, expedienteAberto: aberto, casoLongo: !!atendenteDeCasoLongo(donaNome) }, limites);
+    const _foraV = await atendentesForaHoje(supabase, clinicTokenId);
+    const d = decideLiberarFicha({ temDona: true, ociosoMin, idadeDias, expedienteAberto: aberto, casoLongo: !!atendenteDeCasoLongo(donaNome, _foraV) }, limites);
     if (!d.liberar) { pulou(d.motivo); continue; }
 
     // CASO LONGO (pedido do dono, 15/09): ticket da Vânia ou da Lidiane sai da
@@ -899,7 +903,7 @@ async function varrerFichasParadas(
     // já passou pela fila por outro caminho (a Julia, a inatividade) nos últimos
     // 7 dias — fica com ela. Caso de 15/09: a Julia mandou para a fila às 10h, a
     // Lidiane pegou de volta, e às 12h18 a varredura tirou de novo.
-    if (atendenteDeCasoLongo(donaNome)) {
+    if (atendenteDeCasoLongo(donaNome, _foraV)) {
       const _liberadoEm = ultimaLiberacao.get(ticketId);
       if (_liberadoEm && _liberadoEm >= Date.parse(desdeJanelaCasoLongo())) { pulou("caso_longo_ja_liberado"); continue; }
       const jaPassou = await conversaDoTicketJaPassouPelaFila(supabase, clinicTokenId, ticketId);
@@ -1088,6 +1092,7 @@ async function resgatarMensagensParadas(
       prazoMin: prazo,
       donoEhAdmin: !!(donoId && admins?.has(donoId)),
       donoNome: String(ultimaDoPaciente?.raw_payload?.ticket?.user?.name || ""),
+      foraDaClinica: await atendentesForaHoje(supabase, cl.id),
       mensagens: lista.map((m) => ({
         id: m.id,
         created_at: m.created_at,

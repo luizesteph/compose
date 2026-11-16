@@ -1,6 +1,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 import { chamadaDeCronAutorizada } from "../_shared/cron.ts";
+import { FILTRO_ORIGEM_DO_SITE } from "../_shared/origem.ts";
 import { canalVivo, enviarTexto, situacaoDoTicket } from "../_shared/zpro.ts";
 // Janela de silêncio 20h–7h (SP): nada de mensagem de madrugada/noite. Mesma
 // regra e mesmos limites do motor da lista de espera — lá isso já valia, aqui
@@ -133,7 +134,7 @@ Deno.serve(async (req) => {
         .from("webhook_messages")
         .select("id")
         .in("sender_phone", phoneVariants)
-        .eq("booking_source", "widget")
+        .like("booking_source", FILTRO_ORIGEM_DO_SITE)
         .gte("created_at", linkSentAt)
         .limit(1)
         .maybeSingle();

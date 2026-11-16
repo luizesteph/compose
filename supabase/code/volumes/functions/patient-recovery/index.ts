@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { FILTRO_ORIGEM_DO_SITE_NO_OR } from "../_shared/origem.ts";
 import { LLM_MODEL, LLM_GATEWAY, llmApiKey, llmHeaders, LLM_USAGE_INCLUDE } from "../_shared/llm.ts";
 
 function logAiUsage(clinicTokenId: string | null, functionName: string, model: string, usage: any) {
@@ -228,7 +229,7 @@ Deno.serve(async (req) => {
             .eq("sender_phone", phoneDigits)
             .eq("action_status", "success")
             .gt("created_at", record.created_at)
-            .or("booking_source.eq.widget,ai_intent.eq.agendar")
+            .or(`${FILTRO_ORIGEM_DO_SITE_NO_OR},ai_intent.eq.agendar`)
             .limit(1);
 
           const didBook = !!(bookings && bookings.length > 0);
