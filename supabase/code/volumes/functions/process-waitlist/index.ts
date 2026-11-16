@@ -15,6 +15,13 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 import { chamadaDeCronAutorizada } from "../_shared/cron.ts";
 import { FERIADOS } from "../_shared/confirmacao.ts";
+import { FILTRO_ORIGEM_DO_SITE } from "../_shared/origem.ts";
+import {
+  situacaoDaBase,
+  nomeDaLinhaDoSite,
+  AGENDA_DA_FILA_DIAS,
+  type AtendimentoDaAgenda,
+} from "../_shared/lista-espera.ts";
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-cron-secret",
@@ -420,6 +427,69 @@ function ddmm(iso: string | null | undefined): string {
   return d && m ? `${d}/${m}` : String(iso || "");
 }
 
+// Agenda do Amigo para conferir a consulta-base de quem está na fila (16/11, Isabella).
+// SÓ a API do robô: a outra base (api.amigoapp) devolve outro formato, e uma lista em outro
+// formato poderia parecer "a consulta sumiu". Falha de leitura devolve null e ninguém sai.
+async function lerAgendaDaFila(
+  token: string, companyId: string, ini: string, fim: string,
+): Promise<AtendimentoDaAgenda[] | null> {
+  try {
+    const res = await fetch(
+      `${API_URLS[0]}/attendances?company_id=${companyId}&start_date=${ini}&end_date=${fim}&status=ALL`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" }, signal: AbortSignal.timeout(20000) },
+    );
+    if (!res.ok) {
+      console.log(`[Waitlist] agenda da fila -> ${res.status}`);
+      return null;
+    }
+    const j = await res.json();
+    const lista = Array.isArray(j) ? j : (j as any)?.data;
+    return Array.isArray(lista) ? (lista as AtendimentoDaAgenda[]) : null;
+  } catch (e) {
+    console.log(`[Waitlist] agenda da fila erro: ${(e as Error).message}`);
+    return null;
+  }
+}
+
+// Como reconhecer na agenda a pessoa desta entrada: o número do paciente no Amigo (de quem
+// marcou pelo WhatsApp COM ESTE MÉDICO, ou gravado pelo site no convite) e o nome completo
+// que o site gravou na marcação desta consulta. Telefone compartilhado: o filtro pelo
+// médico e pela data evita pegar outra pessoa da família.
+async function identificacaoDaFila(
+  supabase: any, clinicTokenId: string, w: { phone: string; doctor_id: string; requested_date: string },
+): Promise<{ pacientesConhecidos: string[]; nomeCompleto: string | null }> {
+  const variantes = wlPhoneVariants(w.phone);
+  const ids = new Set<string>();
+  let nomeCompleto: string | null = null;
+  if (variantes.length === 0) return { pacientesConhecidos: [], nomeCompleto };
+  const { data: pbv } = await supabase
+    .from("pending_booking_verifications")
+    .select("patient_id")
+    .eq("clinic_token_id", clinicTokenId)
+    .eq("doctor_id", String(w.doctor_id))
+    .in("phone", variantes)
+    .not("patient_id", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(5);
+  for (const r of (pbv || []) as any[]) if (r?.patient_id) ids.add(String(r.patient_id));
+  const base = String(w.requested_date || "").slice(0, 10);
+  const { data: site } = await supabase
+    .from("webhook_messages")
+    .select("message_text, ai_entities")
+    .eq("clinic_token_id", clinicTokenId)
+    .in("sender_phone", variantes)
+    .like("booking_source", FILTRO_ORIGEM_DO_SITE)
+    .like("message_text", `Agendamento via widget:% em ${base}%`)
+    .order("created_at", { ascending: false })
+    .limit(3);
+  for (const l of (site || []) as any[]) {
+    nomeCompleto = nomeCompleto || nomeDaLinhaDoSite(l?.message_text);
+    const pid = l?.ai_entities?.waitlist_invite?.patient_id;
+    if (pid) ids.add(String(pid));
+  }
+  return { pacientesConhecidos: [...ids], nomeCompleto };
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
@@ -435,7 +505,9 @@ Deno.serve(async (req) => {
 
   // Janela de silêncio: nada de mensagem de madrugada/noite. Expirações também
   // esperam a janela (o webhook rejeita aceites vencidos por expires_at).
-  if (sp.hour >= QUIET_HOUR_START || sp.hour < QUIET_HOUR_END) {
+  // `?simular_base=1`: só LÊ (mostra o que o passo 0a decidiria) — por isso passa pela janela.
+  const _simularBase = new URL(req.url).searchParams.get("simular_base") === "1";
+  if (!_simularBase && (sp.hour >= QUIET_HOUR_START || sp.hour < QUIET_HOUR_END)) {
     return new Response(JSON.stringify({ skipped: "quiet_hours", hour_sp: sp.hour }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
@@ -446,6 +518,76 @@ Deno.serve(async (req) => {
   // Observabilidade (10/07): os logs do Lovable são instáveis — o MOTIVO de cada
   // erro vai no corpo da resposta, visível em net._http_response por SQL.
   const errorsDetail: string[] = [];
+
+  // ── 0a) CONSULTA-BASE CANCELADA OU APAGADA → sai da fila (16/11, Isabella) ──
+  // A reconciliação do passo 0 só procura consulta ANTECIPADA, e só de quem marcou pelo
+  // WhatsApp. Quem teve a consulta desmarcada pela equipe continuava "aguardando vaga":
+  // a Isabella (plano não atendido, 10/11) recebeu uma vaga e dois avisos de "Sua consulta
+  // marcada segue garantida". Uma leitura da agenda por clínica cobre a fila inteira.
+  // Só LÊ do Amigo e só FECHA entrada; não manda mensagem. Na dúvida, ninguém sai
+  // (regras em _shared/lista-espera.ts). `?simular_base=1` mostra a decisão sem gravar.
+  const _baseDebug: string[] = [];
+  let baseCancelada = 0;
+  try {
+    const { data: _fila } = await supabase
+      .from("waitlist_entries")
+      .select("id, phone, patient_name, doctor_id, doctor_name, status, requested_date, conversation_id, clinic_token_id, clinic_tokens:clinic_token_id (token, waitlist_enabled)")
+      .in("status", ["waiting", "notified"])
+      .not("requested_date", "is", null)
+      .limit(200);
+    const _porClinica = new Map<string, any[]>();
+    for (const w of (_fila || []) as any[]) {
+      if (!w.clinic_tokens?.waitlist_enabled || !w.clinic_tokens?.token) continue;
+      if (!_porClinica.has(w.clinic_token_id)) _porClinica.set(w.clinic_token_id, []);
+      _porClinica.get(w.clinic_token_id)!.push(w);
+    }
+    for (const [clinicId, entradas] of _porClinica) {
+      const tok = entradas[0].clinic_tokens.token;
+      const companyId = String(decodeJwtPayload(tok).company_id ?? "");
+      if (!companyId) continue;
+      const agenda = await lerAgendaDaFila(tok, companyId, sp.todayISO, addDaysISO(sp.todayISO, AGENDA_DA_FILA_DIAS));
+      if (!agenda || agenda.length === 0) {
+        errorsDetail.push("base da fila: agenda não veio; ninguém foi conferido");
+        continue;
+      }
+      for (const w of entradas) {
+        try {
+          const ident = await identificacaoDaFila(supabase, clinicId, w);
+          const sit = situacaoDaBase(
+            { doctor_id: String(w.doctor_id), requested_date: String(w.requested_date), phone: String(w.phone), ...ident },
+            agenda, sp.todayISO,
+          );
+          if (_simularBase) {
+            _baseDebug.push(`${String(w.id).slice(0, 8)} ${ddmm(w.requested_date)}: ${sit.tipo}${"como" in sit ? "/" + sit.como : ""}${"motivo" in sit ? " (" + sit.motivo + ")" : ""}${"novaData" in sit ? " → " + ddmm(sit.novaData) : ""} [ids ${ident.pacientesConhecidos.length}, nome ${ident.nomeCompleto ? "sim" : "não"}]`);
+            continue;
+          }
+          if (sit.tipo !== "cancelada") continue;
+          const { data: _saiu } = await supabase.from("waitlist_entries")
+            .update({ status: "expired", cancelled_reason: "consulta_base_cancelada", updated_at: nowIso })
+            .eq("id", w.id)
+            .in("status", ["waiting", "notified"])
+            .select("id");
+          if (!_saiu || _saiu.length === 0) continue;
+          baseCancelada++;
+          await logWaitlistEvent(supabase, {
+            clinic_token_id: clinicId, entry_id: w.id, conversation_id: w.conversation_id,
+            phone: w.phone, patient_name: w.patient_name, doctor_name: w.doctor_name,
+            event_type: "removido",
+            detail: `Removido da fila: ${w.patient_name || "paciente"} (${w.doctor_name}) — a consulta de ${ddmm(w.requested_date)} ${sit.como === "cancelada" ? "foi cancelada" : "não está mais na agenda"}; não há o que antecipar.`,
+          });
+        } catch (err) {
+          errorsDetail.push(`base da fila ${String(w.id).slice(0, 8)}: ${(err as Error).message}`.slice(0, 180));
+        }
+      }
+    }
+  } catch (err) {
+    errorsDetail.push(`base da fila geral: ${(err as Error).message}`.slice(0, 180));
+  }
+  if (_simularBase) {
+    return new Response(JSON.stringify({ simulacao_base: _baseDebug, errors: errorsDetail }), {
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
 
   // ── 0) RECONCILIAÇÃO: quem já antecipou POR FORA sai da fila (pedido 27/07) ──
   // Buraco real: toda baixa da fila dependia de um evento DENTRO do bot. Se a
@@ -1379,7 +1521,7 @@ Deno.serve(async (req) => {
   // errors_detail (cortado em 5) podia encher antes de chegar nele.
   return new Response(
     JSON.stringify({
-      expired: expiredCount, offered, nudged, reconciled, errors,
+      expired: expiredCount, offered, nudged, reconciled, base_cancelada: baseCancelada, errors,
       errors_detail: errorsDetail.slice(0, 5),
       nudge_debug: nudgeDebug.slice(0, 10),
     }),

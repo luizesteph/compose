@@ -186,9 +186,15 @@ export const INTENCOES_DA_LISTA_DE_ESPERA = [
 const _SAIR_NO_CONTEXTO_DA_LISTA_RE =
   /\b(sair|me tira|me tire|tira|tirar|remove|remover|retira|retirar|desisto|desistir|para(r)? de (me )?(mandar|enviar|avisar|chamar)|pare de (me )?(mandar|enviar|avisar)|nao (quero|preciso) mais|nao precisa mais|nao (me )?(mande|envie|avise|mandem|enviem|avisem) mais|cancela(r)? (a |essa |minha )?(lista|espera|fila))\b/;
 
+// Vale LINHA A LINHA (16/11): o lote junta as mensagens de uma rajada com quebra de linha.
+// "MOÇA / cancela meu cadastro nesse telefone / Vocês não atendem o meu plano, para de me
+// mandar mensagem" (Isabella, 12/11) passava dos 80 caracteres somados e virou "cancelar"
+// com pedido de CPF; ela continuou na fila e recebeu outro aviso em 16/11.
 export function pedeSairNoContextoDaLista(texto: unknown): boolean {
-  const t = stripAccents(semMetadados(texto).toLowerCase()).replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
-  return t.length > 0 && t.length <= 80 && _SAIR_NO_CONTEXTO_DA_LISTA_RE.test(t);
+  return semMetadados(texto).split(/[\r\n]+/).some((linha) => {
+    const t = stripAccents(linha.toLowerCase()).replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+    return t.length > 0 && t.length <= 80 && _SAIR_NO_CONTEXTO_DA_LISTA_RE.test(t);
+  });
 }
 
 // Aceite/recusa da OFERTA de vaga. Recusa testa PRIMEIRO ("não quero" contém

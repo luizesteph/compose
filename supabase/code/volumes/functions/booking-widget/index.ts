@@ -641,6 +641,9 @@ Deno.serve(async (req) => {
                     doctor_id: String(_docId),
                     doctor_name: doctorName || "",
                     booked_date: _bookedISO,
+                    // 16/11: o número do paciente no Amigo, para a lista de espera conferir
+                    // depois se esta consulta ainda existe (process-waitlist, passo 0a).
+                    ...(attendanceBody.patient_id ? { patient_id: String(attendanceBody.patient_id) } : {}),
                   };
                 }
               }
