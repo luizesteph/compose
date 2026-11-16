@@ -126,6 +126,15 @@ import {
   pedeSairNoContextoDaLista,
   pedeOutroMedico,
   aceitaOpcaoUnica,
+  pedeOutraData,
+  datasDaLista,
+  janelaDepoisDaLista,
+  horaDitaParaOutroDia,
+  pedeQualquerMedicoDaArea,
+  medicoDitoNaMensagem,
+  medicoDispensadoEmVigor,
+  recuperarDoHistorico,
+  prazoDosOutrosDaArea,
   INTENCOES_DA_LISTA_DE_ESPERA,
   TEM_CPF_RE,
   autorizaConfirmarPresenca,
@@ -3677,7 +3686,35 @@ async function executeAction(
         //   - período (semana/mês/faixa) ou vários dias: a data do modelo é chute;
         //     some, e a busca de datas filtra pela janela (Step 5)
         //   - só dia da semana: não mexe na data (pode ter vindo da lista oferecida)
-        const _janela = janelaDeDatas(currentMessageText, getTodayISO_SP());
+        let _janela = janelaDeDatas(currentMessageText, getTodayISO_SP());
+        // "OUTRA DATA" SEM DIZER QUAL (16/11) — ver pedeOutraData em helpers.ts. O pedido vira
+        // a janela "depois de dd/mm", contada da última data que a Julia mostrou (a lista
+        // enviada, ou a reserva que ele recusou), e segue pela escada de sempre.
+        if (!_janela && supabaseClient && conversationIdParam && pedeOutraData(currentMessageText || "")) {
+          try {
+            const { data: _ultLista } = await supabaseClient
+              .from("webhook_messages")
+              .select("message_text, ai_entities")
+              .eq("conversation_id", conversationIdParam)
+              .eq("direction", "outgoing")
+              .eq("verified_schedule", true)
+              .eq("ai_intent", "agendar") // lista de remarcação fica de fora: aqui é marcação nova
+              .gte("created_at", new Date(Date.now() - 60 * 60_000).toISOString())
+              .order("created_at", { ascending: false })
+              .limit(1);
+            const _l = _ultLista?.[0] as any;
+            const _vistas = _l ? datasDaLista(_l.message_text, getTodayISO_SP()) : [];
+            const _reservada = String(_l?.ai_entities?.pendente?.tipo || "") === "reserva" ? String(_l.ai_entities.pendente.data || "") : "";
+            const _depois = janelaDepoisDaLista(_vistas.length ? _vistas[_vistas.length - 1] : _reservada);
+            if (_depois) {
+              console.log(`[Janela] "outra data" sem dizer qual — ${_depois.rotulo} (o que o paciente já viu)`);
+              _janela = _depois;
+              entities.time = "";
+            }
+          } catch (e) {
+            console.log(`[Janela] outra data: leitura da última lista falhou (non-blocking): ${(e as Error).message}`);
+          }
+        }
         if (_janela && !_janela.qualquerData) {
           if (_janela.datas && _janela.datas.length === 1) {
             if (entities.date !== _janela.datas[0]) {
@@ -4116,6 +4153,26 @@ async function executeAction(
         if (entities.time && !(entities as any).hora_aceita && !(await horaFoiDitaPeloPaciente(supabaseClient, conversationIdParam, currentMessageText, entities.time))) {
           console.log(`[HoraDoPaciente] agendar - time="${entities.time}" que o paciente não disse — limpando (ele escolhe na lista)`);
           entities.time = "";
+        }
+        // A HORA DITA PARA UM DIA NÃO VALE PARA OUTRO (16/11) — ver horaDitaParaOutroDia.
+        if (entities.time && entities.date && !(entities as any).hora_aceita && supabaseClient && conversationIdParam) {
+          try {
+            const { data: _falas3h } = await supabaseClient
+              .from("webhook_messages")
+              .select("message_text, ai_entities")
+              .eq("conversation_id", conversationIdParam)
+              .eq("direction", "incoming")
+              .gte("created_at", new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString())
+              .order("created_at", { ascending: false })
+              .limit(40);
+            const _anteriores = ((_falas3h || []) as any[]).map((r) => ({ texto: r.message_text, data: r.ai_entities?.date }));
+            if (horaDitaParaOutroDia(currentMessageText, _anteriores, normalizeTimeToHHMM(entities.time) || entities.time, entities.date)) {
+              console.log(`[HoraDoPaciente] agendar - time="${entities.time}" foi dita para outro dia, não para ${entities.date} — limpando (ele escolhe na lista do dia)`);
+              entities.time = "";
+            }
+          } catch (e) {
+            console.log(`[HoraDoPaciente] hora de outro dia: conferência falhou (non-blocking): ${(e as Error).message}`);
+          }
         }
         // CONSULTA PARA OUTRA PESSOA (23/09, caso Karina — ver consultaParaOutraPessoa em
         // helpers.ts). "teria um horário para atender minha filha?" e, no dia seguinte,
@@ -5511,10 +5568,18 @@ async function executeAction(
                     const _fimJanela = _jb ? (((_jb.datas || []) as string[]).slice().sort().pop() || _jb.fim || "") : "";
                     const _janelaNaoAtendida = !!(_jb && _temPeriodo && (_nivel > 1 || _depoisDoPedido) && _fimJanela);
                     const _pediuAntes = pedeHorarioMaisCedo(currentMessageText || "");
-                    if (doctorId && (_janelaNaoAtendida || _pediuAntes)) {
-                      const _ini = _janelaNaoAtendida ? (_jb!.inicio && _jb!.inicio > _hojeOA ? _jb!.inicio : _hojeOA) : _hojeOA;
-                      const _fim = _janelaNaoAtendida ? _fimJanela : somaDiasISO(datesWithSlots[0].date, -1);
-                      _outrosArea = await outrosMedicosDaAreaNoPrazo(String(doctorId), _ini, _fim, periodFilter);
+                    // um cálculo só para o prazo (16/11) — ver prazoDosOutrosDaArea em helpers.ts
+                    const _prazoOA = doctorId
+                      ? prazoDosOutrosDaArea({
+                        janela: _jb,
+                        janelaNaoAtendida: _janelaNaoAtendida,
+                        pediuAntes: _pediuAntes,
+                        primeiraOferecida: String(datesWithSlots[0]?.date || ""),
+                        hojeISO: _hojeOA,
+                      })
+                      : null;
+                    if (_prazoOA) {
+                      _outrosArea = await outrosMedicosDaAreaNoPrazo(String(doctorId), _prazoOA.ini, _prazoOA.fim, periodFilter);
                     }
                   }
                   console.log(`[Webhook] Returning ${datesWithSlots.length} dates with slots${_jb ? ` (janela nível ${_nivel})` : ""}`);
@@ -17016,12 +17081,49 @@ Deno.serve(async (req) => {
           console.log(
             `[Webhook] "Outro médico" detected in message. Clearing doctor_name="${classification.doctor_name}" and subspecialty="${classification.subspecialty}" to trigger multi-doctor search.`,
           );
+          if (classification.doctor_name) (classification as any).__medicoDispensado = classification.doctor_name;
           classification.doctor_name = "";
           classification.subspecialty = "";
           // A recuperação do histórico (48 h) devolvia o médico que o paciente acabou
           // de dispensar (27/09, Manuela: "Dr Helio" voltava a cada mensagem). A
           // especialidade continua recuperável — "outro médico" é outro da mesma área.
           _limposDeProposito.add("doctor_name");
+        }
+
+        // "ALGUM ESPECIALISTA EM PÉ" (16/11) — ver pedeQualquerMedicoDaArea em helpers.ts. Só o
+        // médico sai; a área que a própria mensagem disse continua valendo.
+        if (classification.doctor_name && pedeQualquerMedicoDaArea(finalMessage) && !medicoDitoNaMensagem(finalMessage, classification.doctor_name)) {
+          console.log(`[Webhook] "algum médico/especialista" — tirando doctor_name="${classification.doctor_name}" para buscar na área`);
+          (classification as any).__medicoDispensado = classification.doctor_name;
+          classification.doctor_name = "";
+          _limposDeProposito.add("doctor_name");
+        }
+        // O MÉDICO DISPENSADO NÃO VOLTA PELO MODELO (16/11): a mensagem anterior limpou o
+        // médico ("outro médico") e o modelo o copia de novo do histórico. Se o paciente não
+        // escreveu o nome dele agora, continua limpo — e a marca segue para a próxima.
+        if (classification.doctor_name && conversationId) {
+          try {
+            const { data: _ultEnt } = await supabase
+              .from("webhook_messages")
+              .select("ai_entities, created_at")
+              .eq("conversation_id", conversationId)
+              .eq("direction", "incoming")
+              .not("ai_entities", "is", null)
+              .neq("id", messageId)
+              .gte("created_at", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
+              .order("created_at", { ascending: false })
+              .limit(8);
+            // só o médico DISPENSADO sai; outro, escolhido na lista da área, fica
+            const _dispensado = medicoDispensadoEmVigor(((_ultEnt || []) as any[]).map((r) => ({ entidades: r.ai_entities })));
+            if (_dispensado && mesmoMedico(classification.doctor_name, _dispensado) && !medicoDitoNaMensagem(finalMessage, classification.doctor_name)) {
+              console.log(`[Webhook] médico "${classification.doctor_name}" tinha sido dispensado e não foi dito agora — continua fora`);
+              (classification as any).__medicoDispensado = _dispensado;
+              classification.doctor_name = "";
+              _limposDeProposito.add("doctor_name");
+            }
+          } catch (e) {
+            console.log(`[Webhook] médico dispensado: conferência falhou (non-blocking): ${(e as Error).message}`);
+          }
         }
 
         // "NÃO TENHO" À PERGUNTA DA PREFERÊNCIA (27/09, Manuela 24/09) — ver helpers.ts
@@ -17245,22 +17347,26 @@ Deno.serve(async (req) => {
           // horário 10:40 não está disponível". Da linha com booked_event_id para
           // trás, só identidade (CPF, nome) volta; data, hora e médico não.
           const _camposDeAgenda = new Set(["date", "time", "doctor_name", "subspecialty", "preferred_weekday", "preferred_period", "attendance_id"]);
-          let _passouDeMarcacao = false;
-          for (const msg of prevMsgs || []) {
-            const ent = msg.ai_entities as Record<string, unknown>;
-            // marcação pelo SITE também encerra (28/09, Alessandra Moreno: marcou 07/10
-            // 10h40 pelo site, escreveu "Já sou paciente" e ouviu "10:40 não está
-            // disponível" — o horário era dela)
-            if (ent?.booked_event_id || String((msg as { message_text?: string }).message_text || "").startsWith("Agendamento via widget")) _passouDeMarcacao = true;
-            for (const key of missingKeys) {
-              if (_passouDeMarcacao && _camposDeAgenda.has(key)) continue;
-              if (!classification[key] && ent?.[key]) {
-                (classification as any)[key] = String(ent[key]);
-                console.log(`[Webhook] Recovered ${key} from conversation history: ${classification[key]}`);
-              }
-            }
-            // Check if all keys are now filled
-            if (entityKeys.every((k) => classification[k])) break;
+          // marcação pelo SITE também encerra (28/09, Alessandra Moreno: marcou 07/10
+          // 10h40 pelo site, escreveu "Já sou paciente" e ouviu "10:40 não está
+          // disponível" — o horário era dela)
+          // 16/11: a leitura é de recuperarDoHistorico (helpers.ts) — campo que uma mensagem
+          // limpou de propósito (`limpos`) não volta de mensagens mais antigas que ela.
+          const _recuperados = recuperarDoHistorico(
+            missingKeys,
+            (prevMsgs || []).map((msg) => {
+              const ent = msg.ai_entities as Record<string, unknown>;
+              return {
+                entidades: ent,
+                fechaAgenda: !!(ent?.booked_event_id || String((msg as { message_text?: string }).message_text || "").startsWith("Agendamento via widget")),
+              };
+            }),
+            _camposDeAgenda,
+          );
+          for (const [key, valor] of Object.entries(_recuperados)) {
+            if (classification[key]) continue;
+            (classification as any)[key] = valor;
+            console.log(`[Webhook] Recovered ${key} from conversation history: ${valor}`);
           }
         }
 
@@ -17278,9 +17384,14 @@ Deno.serve(async (req) => {
           // Tema 1: persiste a confirmacao pra sobreviver entre turnos do reagendamento.
           reagendar_confirmed: classification.reagendar_confirmed || false,
           confidence: classification.confidence || 0,
+          // o que esta mensagem limpou de propósito (16/11): a recuperação das próximas não passa daqui
+          ...(_limposDeProposito.size > 0 ? { limpos: [..._limposDeProposito] } : {}),
+          ...(_limposDeProposito.has("doctor_name") && (classification as any).__medicoDispensado
+            ? { medico_dispensado: String((classification as any).__medicoDispensado) }
+            : {}),
         };
         const hasAnyEntity = entityKeys.some((k) => classification[k]);
-        if (hasAnyEntity) {
+        if (hasAnyEntity || _limposDeProposito.size > 0) {
           await supabase.from("webhook_messages").update({ ai_entities: recoveredEntities }).eq("id", messageId);
           console.log("[Webhook] Persisted recovered entities to current message");
         }

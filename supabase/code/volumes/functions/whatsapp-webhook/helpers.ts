@@ -1207,6 +1207,96 @@ export function pedeOutroMedico(texto: unknown): boolean {
   return _OUTRO_MEDICO_RE.test(stripAccents(semMetadados(texto).toLowerCase()));
 }
 
+/**
+ * "ALGUM ESPECIALISTA EM PÉ", "ALGUM MÉDICO QUE ATENDA HOJE" (16/11). Quem pede "algum"
+ * médico não escolheu um: quer qualquer um da área. Com um médico no contexto (da conversa
+ * de dias atrás, ou o que o classificador supôs), a busca ficava só nele — "tem horário com
+ * algum especialista em pé pra dia 12/11?" → "Em 12/11 não encontrei horário livre com
+ * Ricardo" (Igor 11/11, laço), "Tem algum médico que possa me atender hoje pela manhã?" →
+ * "Luiz Gustavo não tem horário, nem nos 7 dias seguintes" (03/11). 12 em 60 dias. A área
+ * dita na mensagem continua valendo; só o médico sai.
+ */
+export function pedeQualquerMedicoDaArea(texto: unknown): boolean {
+  return /\balgum(?:a)? (?:outr[oa] )?(?:medic[oa]|doutor[a]?|dr[a]?\b|especialista|ortopedista|profissional)\b/
+    .test(stripAccents(semMetadados(texto).toLowerCase()).replace(/\s+/g, " "));
+}
+
+/**
+ * O paciente escreveu o nome deste médico NESTA mensagem? Compara pelo começo de cada parte
+ * do nome (4 letras), para valer "Cristhian" por Cristian e "Mioto" por Miotto. Na dúvida
+ * responde que sim — quem chama só tira o médico quando o nome não aparece de jeito nenhum.
+ */
+export function medicoDitoNaMensagem(texto: unknown, nomeDoMedico: unknown): boolean {
+  const palavras = stripAccents(semMetadados(texto).toLowerCase()).split(/[^a-z]+/).filter((p) => p.length >= 4);
+  const partes = stripAccents(String(nomeDoMedico || "").toLowerCase())
+    .split(/[^a-z]+/)
+    .filter((p) => p.length >= 4 && !["doutor", "doutora", "medico", "medica"].includes(p));
+  if (!partes.length) return true;
+  return partes.some((p) => palavras.some((w) => w.slice(0, 4) === p.slice(0, 4)));
+}
+
+/**
+ * CAMPO LIMPO DE PROPÓSITO NÃO VOLTA DO HISTÓRICO (16/11). A recuperação de contexto repõe
+ * cada campo vazio a partir das mensagens das últimas 48 h. Quando o paciente dispensava o
+ * médico ("outro médico", "pode ser outro"), a limpeza valia só para aquela mensagem: na
+ * seguinte, o médico dispensado voltava de uma mensagem mais antiga — em 7 dos 20 pedidos
+ * de outro médico em 60 dias (Rosana 12/11, perdida; Igor 11/11). Vale o mesmo para a data
+ * apagada por "tanto faz o dia" e para data e hora apagadas na troca de médico.
+ * A limpeza fica gravada na mensagem (`limpos`), e a recuperação não passa dela: recebe as
+ * mensagens da mais recente para a mais antiga e devolve, para cada campo que falta, o
+ * valor mais recente — parando no ponto em que o campo foi limpo.
+ */
+export function recuperarDoHistorico(
+  faltando: readonly string[],
+  mensagens: Array<{ entidades: Record<string, unknown> | null | undefined; fechaAgenda?: boolean }>,
+  camposDeAgenda: ReadonlySet<string>,
+): Record<string, string> {
+  const achados: Record<string, string> = {};
+  const bloqueados = new Set<string>();
+  let passouDeMarcacao = false;
+  for (const m of mensagens || []) {
+    const ent = (m?.entidades || {}) as Record<string, unknown>;
+    if (m?.fechaAgenda) passouDeMarcacao = true;
+    for (const k of faltando) {
+      if (k in achados || bloqueados.has(k)) continue;
+      if (passouDeMarcacao && camposDeAgenda.has(k)) continue;
+      if (ent[k]) achados[k] = String(ent[k]);
+    }
+    // o que ESTA mensagem limpou não volta de mensagens mais antigas que ela
+    const limpos = Array.isArray(ent.limpos) ? (ent.limpos as unknown[]) : [];
+    for (const k of limpos) bloqueados.add(String(k));
+    if (faltando.every((k) => k in achados || bloqueados.has(k))) break;
+  }
+  return achados;
+}
+
+/**
+ * O MÉDICO QUE O PACIENTE DISPENSOU, enquanto a dispensa vale (16/11). Recebe as falas
+ * anteriores do paciente, da mais recente para a mais antiga. A dispensa ("outro médico",
+ * "algum especialista") vale até ele escolher um médico: se uma fala mais nova já tem
+ * médico, não há dispensa em vigor. Devolve o nome dispensado (o gravado na limpeza ou, sem
+ * ele, o último médico de antes dela) ou "". Serve para o caso em que o MODELO copia do
+ * histórico justamente o médico dispensado: só ESSE sai; outro médico, escolhido na lista
+ * da área sem dizer o nome ("13/11 às 14:40"), fica.
+ */
+export function medicoDispensadoEmVigor(anteriores: Array<{ entidades: Record<string, unknown> | null | undefined }>): string {
+  const lista = anteriores || [];
+  for (let i = 0; i < lista.length; i++) {
+    const ent = (lista[i]?.entidades || {}) as Record<string, unknown>;
+    if (String(ent.doctor_name || "").trim()) return "";
+    if (Array.isArray(ent.limpos) && (ent.limpos as unknown[]).includes("doctor_name")) {
+      const gravado = String(ent.medico_dispensado || "").trim();
+      if (gravado) return gravado;
+      for (let j = i + 1; j < lista.length; j++) {
+        const antes = String((lista[j]?.entidades as Record<string, unknown> | undefined)?.doctor_name || "").trim();
+        if (antes) return antes;
+      }
+      return "";
+    }
+  }
+  return "";
+}
+
 export function semPreferenciaDeMedico(mensagem: unknown, ultimaPerguntaDaJulia: unknown): boolean {
   const perg = stripAccents(String(ultimaPerguntaDaJulia || "").toLowerCase());
   if (!/preferencia por algum|qual (?:deles|delas|dos dois|das duas)|com qual (?:deles|delas|dos dois)|qual (?:medico|profissional|especialista) (?:voce )?prefere/.test(perg)) return false;
@@ -1389,11 +1479,126 @@ export function medicosDaMesmaArea<T extends { doctor_id: string; doctor_name: s
   if (!area.size) return [];
   return todos.filter((d) => d.is_schedulable && String(d.doctor_id) !== String(idDoAtual) && partesDaArea(d.subspecialty).some((p) => area.has(p)));
 }
+/**
+ * O PRAZO EM QUE OUTRO MÉDICO DA ÁREA AJUDA (16/11). Quando o dia ou a janela pedida não tem
+ * vaga com o médico, a Julia mostra os próximos horários dele e, se houver, outros médicos
+ * da mesma área. O prazo desses outros era calculado em cada ponto, e na escada estava
+ * errado dos dois lados:
+ *  - para um DIA pedido ("dia 30/11") começava em HOJE: oferecia 19/11 a quem pediu 30/11;
+ *  - terminava no último dia pedido: quem pediu 12/11 e só teria o médico em 16/11 não ficava
+ *    sabendo do colega com vaga em 13/11 (Igor, 11/11).
+ * O prazo certo vai do primeiro dia pedido até a véspera do primeiro horário que a Julia
+ * está oferecendo com o médico pedido — é ali que outro médico atende ANTES. Se o que ela
+ * oferece é anterior ao pedido (agenda ainda não aberta), vale a janela pedida. "Tem antes?"
+ * sem janela: de hoje até a véspera do primeiro horário oferecido.
+ */
+export function prazoDosOutrosDaArea(a: {
+  janela: Pick<JanelaDeDatas, "inicio" | "fim" | "datas"> | null;
+  janelaNaoAtendida: boolean;
+  pediuAntes: boolean;
+  primeiraOferecida: string;
+  hojeISO: string;
+}): { ini: string; fim: string } | null {
+  const iso = (d: unknown) => (/^\d{4}-\d{2}-\d{2}/.test(String(d || "")) ? String(d).slice(0, 10) : "");
+  const oferecida = iso(a.primeiraOferecida);
+  const vespera = oferecida ? addDaysToISO(oferecida, -1) : "";
+  if (a.janelaNaoAtendida && a.janela) {
+    const datas = (a.janela.datas || []).map(iso).filter(Boolean).sort();
+    let ini = datas[0] || iso(a.janela.inicio) || a.hojeISO;
+    if (ini < a.hojeISO) ini = a.hojeISO;
+    const fimPedido = datas[datas.length - 1] || iso(a.janela.fim);
+    if (!fimPedido) return null;
+    const fim = vespera && vespera > fimPedido ? vespera : fimPedido;
+    return ini <= fim ? { ini, fim } : null;
+  }
+  if (a.pediuAntes && vespera && a.hojeISO <= vespera) return { ini: a.hojeISO, fim: vespera };
+  return null;
+}
+
 export function textoOutrosMedicosDaArea(achados: Array<{ medico: string; rotulo: string; slots: string[] }>): string {
   if (!achados.length) return "";
   return "\n\nCom outros médicos da mesma área, antes disso:\n" +
     achados.map((a) => `• ${a.medico} — ${a.rotulo}: ${a.slots.join(", ")}`).join("\n") +
     "\n\nSe algum servir, me diga o médico e o horário.";
+}
+
+// ─── "OUTRA DATA" SEM DIZER QUAL (16/11) ─────────────────────────────────────
+// "Outra data", "Tem outra data?", "Não consigo essas datas": o paciente recusa as datas que
+// a Julia mostrou e não diz qual quer. Saía a MESMA lista (ou "me diga qual data") e, na
+// repetição, o laço — 24 vezes em 60 dias. A resposta certa são as datas DEPOIS das que ele
+// já viu: o pedido vira a janela "depois de dd/mm" e segue pela escada que já existe (lista,
+// "a agenda ainda não abriu", outros médicos da área). Quem diz a data, o dia, o período ou
+// pede "antes" não entra aqui — o leitor da janela e o "tem antes?" cuidam.
+const _OUTRA_DATA_RE =
+  /\b(?:outr[ao]s? (?:datas?|dias?|opcao|opcoes)|(?:tem|teria|tem mais|teria mais|ha|haveria|alguma) outr[ao]s? (?:datas?|dias?|opcao|opcoes)|mais (?:datas|dias|opcoes)|nao (?:consigo|posso|da|vou conseguir|tenho como)(?: ir)? (?:em )?(?:ness[ea]s?|ess[ea]s?|nest[ea]s?|est[ea]s?)(?: (?:datas?|dias?))?|nenhum[a]? (?:dess[ea]s|dest[ea]s)|ess[ea]s? (?:datas?|dias?) (?:nao|eu nao)|mais (?:pra|para) (?:frente|a frente))\b/;
+export function pedeOutraData(texto: unknown): boolean {
+  const bruto = semMetadados(texto).trim();
+  if (!bruto || bruto.length > 90) return false;
+  const t = stripAccents(bruto.toLowerCase()).replace(/[.!,;:]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!_OUTRA_DATA_RE.test(t)) return false;
+  // quem pede antes já tem resposta própria ("não tenho nada antes… lista de espera")
+  if (pedeHorarioMaisCedo(bruto)) return false;
+  // "outro dia às 15h", "outra data, 20/11": disse a hora ou a data — segue o fluxo normal
+  return !horaDoTexto(bruto) && !/\d{1,2}\s*\/\s*\d{1,2}/.test(bruto);
+}
+
+/** As datas (ISO, em ordem) de uma lista "dd/mm (dia): hh:mm, …" que a Julia mandou. */
+export function datasDaLista(texto: unknown, hojeISO: string): string[] {
+  const ano = Number(String(hojeISO).slice(0, 4));
+  const datas = new Set<string>();
+  for (const m of String(texto ?? "").matchAll(/(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?[ \t]*\([^)]+\)[ \t]*:[ \t]*\d{1,2}\s*[:h]\s*\d{2}/g)) {
+    const dd = Number(m[1]), mm = Number(m[2]);
+    if (!(dd >= 1 && dd <= 31 && mm >= 1 && mm <= 12)) continue;
+    let aa = m[3] ? (m[3].length === 2 ? 2000 + Number(m[3]) : Number(m[3])) : ano;
+    let iso = `${aa}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+    // lista de dezembro lida em janeiro (ou o contrário): a data sem ano é a mais próxima à frente
+    if (!m[3] && iso < addDaysToISO(hojeISO, -60)) { aa += 1; iso = `${aa}${iso.slice(4)}`; }
+    datas.add(iso);
+  }
+  return [...datas].sort();
+}
+
+/** A janela "depois das datas que eu já te mostrei" (60 dias à frente, como "a partir de"). */
+export function janelaDepoisDaLista(ultimaDataMostrada: string): JanelaDeDatas | null {
+  const d = String(ultimaDataMostrada || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return null;
+  return {
+    inicio: addDaysToISO(d, 1),
+    fim: addDaysToISO(d, 61),
+    diasDaSemana: null,
+    datas: null,
+    qualquerData: false,
+    rotulo: `depois de ${d.slice(8, 10)}/${d.slice(5, 7)}`,
+    rotuloDias: "",
+  };
+}
+
+// ─── A HORA DITA PARA UM DIA NÃO VALE PARA OUTRO (16/11) ──────────────────────
+// A recuperação de contexto devolve data, hora e médico campo a campo: a hora que o
+// paciente escolheu para um dia grudava no dia seguinte que ele pedia. "Quarta, 25/11 às
+// 14h" e depois "Há alguma opção no dia 23/11?" → "O horário 14:00 não está disponível em
+// 23/11" (Dani 11/11, virou laço); "Teria amanhã às 9:40?" e depois "só posso até sexta" →
+// reserva das 09:40 num dia que ele não pediu (20/10). 9 mensagens em 60 dias. A fala mais
+// recente que citou a hora decide: se ela era sobre OUTRO dia, a hora não acompanha, e o
+// fluxo lista os horários do dia pedido. Dita agora, ou dita sem dia, continua valendo.
+export function horaDitaParaOutroDia(
+  mensagemAtual: unknown,
+  falasAnteriores: Array<{ texto: unknown; data?: unknown }>, // do paciente, da mais recente para a mais antiga
+  hhmm: unknown,
+  dataAtualISO: unknown,
+): boolean {
+  const h = String(hhmm || "").trim();
+  const dia = String(dataAtualISO || "").slice(0, 10);
+  if (!/^\d{1,2}:\d{2}$/.test(h) || !/^\d{4}-\d{2}-\d{2}$/.test(dia)) return false;
+  const alvo = h.padStart(5, "0");
+  const cita = (t: unknown) => mensagemCitaHora(t, alvo) || horaDoTexto(t) === alvo;
+  if (cita(mensagemAtual)) return false;
+  for (const f of falasAnteriores || []) {
+    if (!cita(f.texto)) continue;
+    const d = String(f.data ?? "").slice(0, 10);
+    return /^\d{4}-\d{2}-\d{2}$/.test(d) && d !== dia;
+  }
+  return false;
 }
 
 export function pedeHorarioMaisCedo(texto: unknown): boolean {
