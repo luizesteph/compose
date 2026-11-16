@@ -125,6 +125,7 @@ import {
   TEXTO_FICO_NO_AGUARDO,
   pedeSairNoContextoDaLista,
   pedeOutroMedico,
+  aceitaOpcaoUnica,
   INTENCOES_DA_LISTA_DE_ESPERA,
   TEM_CPF_RE,
   autorizaConfirmarPresenca,
@@ -258,6 +259,9 @@ import {
   validateBookingDate,
   isDuplicateReply,
   ehCorrida,
+  decidirRepeticao,
+  MARCA_JA_ESTA_COM_A_EQUIPE,
+  MARCA_RESERVA_CONTINUA,
   nearDuplicate,
   respostaFoiFalha,
   corrigirLinkDoMapa,
@@ -4109,7 +4113,7 @@ async function executeAction(
         }
         // HORA QUE O PACIENTE NUNCA DISSE NÃO MARCA (27/10, Tati Cury): sem ela, o fluxo
         // lista os horários do dia e a escolha é do paciente.
-        if (entities.time && !(await horaFoiDitaPeloPaciente(supabaseClient, conversationIdParam, currentMessageText, entities.time))) {
+        if (entities.time && !(entities as any).hora_aceita && !(await horaFoiDitaPeloPaciente(supabaseClient, conversationIdParam, currentMessageText, entities.time))) {
           console.log(`[HoraDoPaciente] agendar - time="${entities.time}" que o paciente não disse — limpando (ele escolhe na lista)`);
           entities.time = "";
         }
@@ -6221,6 +6225,9 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             error: _msgReserva,
             bypassAiRewrite: true,
             verifiedSchedule: true,
+            // o que fica pendente, estruturado (16/11): a trava de repetição lê daqui, e a
+            // linha enviada guarda em ai_entities o que a Julia está esperando
+            schedulingContext: { pendente: { tipo: "reserva", medico: doctorName || "", data: entities.date, hora: entities.time } },
           } as any;
         }
         console.log(`[Webhook] CPF already available (${entities.cpf}) — skipping CPF question, proceeding to confirm`);
@@ -8207,6 +8214,12 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                   error: _semAntes,
                   bypassAiRewrite: true,
                   entities: { ...entities, attendance_id: attId, doctor_name: origDoctorName },
+                  // A oferta da lista de espera fica gravada na linha enviada (16/11): o
+                  // "sim" / "pode ser" seguinte entra na lista. Sem isso, virava remarcar de
+                  // novo e laço (Fernanda 05/11) ou confirmação de presença (20/10).
+                  ...(origDoctorId && /^\d{4}-\d{2}-\d{2}/.test(origStart)
+                    ? { schedulingContext: { waitlist_invite: { doctor_id: String(origDoctorId), doctor_name: String(origDoctorName || ""), booked_date: origStart.slice(0, 10) } } }
+                    : {}),
                 } as any;
               } else {
                 // No real slots — be honest
@@ -16757,7 +16770,7 @@ Deno.serve(async (req) => {
             const cutoffIso = new Date(Date.now() - 30 * 60 * 1000).toISOString();
             const { data: lastVerified } = await supabase
               .from("webhook_messages")
-              .select("message_text,created_at")
+              .select("message_text,created_at,ai_intent")
               .eq("conversation_id", conversationId)
               .eq("direction", "outgoing")
               .eq("verified_schedule", true)
@@ -16804,7 +16817,33 @@ Deno.serve(async (req) => {
                 }
               }
 
-              if (offered.length > 0) {
+              // ACEITE DA OPÇÃO ÚNICA (16/11, Cassia) — ver aceitaOpcaoUnica em helpers.ts. A
+              // lista ofereceu UM horário e ela é a última fala da clínica: "pode ser esse"
+              // escolhe esse horário. `hora_aceita` leva a escolha até a ação (a regra "hora
+              // que o paciente nunca disse não marca" não pode apagar o que ele aceitou).
+              // Só lista do AGENDAR: aceitar o horário único de uma lista de remarcação aqui
+              // marcaria uma consulta nova em vez de trocar a que existe.
+              let _aceitouAUnica = false;
+              if (offered.length === 1 && String((lastVerified?.[0] as any)?.ai_intent || "") === "agendar" && aceitaOpcaoUnica(finalMessage || "")) {
+                const { data: _ultSaida } = await supabase
+                  .from("webhook_messages")
+                  .select("created_at")
+                  .eq("conversation_id", conversationId)
+                  .eq("direction", "outgoing")
+                  .order("created_at", { ascending: false })
+                  .limit(1);
+                if (String(_ultSaida?.[0]?.created_at || "") === String(lastVerified?.[0]?.created_at || "x")) {
+                  const pick = offered[0];
+                  classification.intent = "agendar";
+                  classification.date = pick.date;
+                  classification.time = pick.time;
+                  (classification as any).hora_aceita = true;
+                  _aceitouAUnica = true;
+                  console.log(`[SlotMatch] ✅ aceite da opção única ${pick.date} ${pick.time} — "${(finalMessage || "").slice(0, 40)}"`);
+                }
+              }
+
+              if (offered.length > 0 && !_aceitouAUnica) {
                 const raw = stripAccents((finalMessage || "").toLowerCase());
                 // Hora mencionada — leitor único (27/09): o regex daqui não lia "9hrs"
                 // nem "às 9" (<paciente> 25/09: "28/09 as 9hrs" casava só o dia e a
@@ -17557,6 +17596,7 @@ Deno.serve(async (req) => {
           // Remarcar na resposta à confirmação (29/10): consulta e paciente já conhecidos
           patient_id_da_consulta: (classification as any).patient_id_da_consulta || "",
           consulta_da_confirmacao: (classification as any).consulta_da_confirmacao || null,
+          hora_aceita: (classification as any).hora_aceita === true,
           remarcar_da_confirmacao: (classification as any).remarcar_da_confirmacao || "",
           // Telefone no cadastro de outra pessoa (30/09): não buscar CPF pelo telefone
           sem_cpf_pelo_telefone: _telefoneDeOutraPessoa,
@@ -19497,22 +19537,91 @@ Deno.serve(async (req) => {
             );
           }
           if (dupCheck.duplicate) {
-            // Mais de 2 min: o paciente falou de novo e nós íamos repetir a mesma
-            // frase. É sinal de que estamos rodando em círculo — a saída é a equipe,
-            // e o texto é DIFERENTE de propósito, senão o próximo ciclo cai aqui de
-            // novo e vira silêncio outra vez.
-            console.log(
-              `[Webhook] 🔁 Resposta repetida após ${_idadeDup}s — oferecendo atendente em vez de ficar mudo (${phone})`,
-            );
-            replyText =
-              "Acho que não estou conseguindo te ajudar direito por aqui. 🙏 Me diga *atendente* que eu passo agora para uma pessoa da equipe — ou, se preferir, me conte de novo com suas palavras o que você precisa.";
-            await supabase
-              .from("webhook_messages")
-              .update({
-                action_status: "duplicate_loop_escalated",
-                action_error: `Resposta seria idêntica à de ${_idadeDup}s atrás — ofereci atendente em vez de silêncio`,
-              })
-              .eq("id", messageId);
+            // A TRAVA OLHA OS FATOS E O ESTADO GRAVADO (16/11) — ver decidirRepeticao em
+            // guards.ts. Resposta com outra data/hora/dia não é repetição; caso que já está
+            // com a equipe (pending_human_transfers sem resposta) diz isso uma vez e cala;
+            // agradecimento não pede resposta repetida; reserva pendente (o `pendente` que a
+            // própria ação devolveu) é reafirmada. Só o que sobra é laço de verdade.
+            let _dec: ReturnType<typeof decidirRepeticao> = { acao: "laco" };
+            try {
+              const [{ data: _saidas30 }, { data: _passagens }] = await Promise.all([
+                supabase.from("webhook_messages").select("message_text")
+                  .eq("conversation_id", conversationId).eq("direction", "outgoing")
+                  .gte("created_at", new Date(Date.now() - 30 * 60_000).toISOString())
+                  .order("created_at", { ascending: false }).limit(8),
+                supabase.from("pending_human_transfers").select("status, created_at")
+                  .eq("conversation_id", conversationId)
+                  .gte("created_at", new Date(Date.now() - 12 * 3600_000).toISOString())
+                  .order("created_at", { ascending: false }).limit(1),
+              ]);
+              const _jaDitas = ((_saidas30 || []) as any[]).map((r) => String(r.message_text || ""));
+              const _daAcao = (actionResult as any)?.schedulingContext?.pendente;
+              const _semResposta = !!_passagens?.[0] && String((_passagens[0] as any).status) !== "responded";
+              const _spRep = getNowSPParts();
+              _dec = decidirRepeticao({
+                anterior: dupCheck.matchedText || "",
+                candidata: replyText,
+                mensagemDoPaciente: finalMessage || "",
+                pendencia: _daAcao?.tipo === "reserva"
+                  ? {
+                    tipo: "reserva",
+                    medico: String(_daAcao.medico || ""),
+                    dataISO: String(_daAcao.data || ""),
+                    hora: String(_daAcao.hora || ""),
+                    jaReafirmada: _jaDitas.some((t) => t.includes(MARCA_RESERVA_CONTINUA)),
+                  }
+                  : _semResposta
+                    ? { tipo: "com_a_equipe", jaAvisado: _jaDitas.some((t) => t.includes(MARCA_JA_ESTA_COM_A_EQUIPE)) }
+                    : null,
+                quandoRespondem: quandoAEquipeResponde({ diaDaSemana: _spRep.weekday, hora: _spRep.hour, minuto: _spRep.minute }),
+              });
+            } catch (e) {
+              console.log(`[Repeticao] leitura do estado falhou (segue como laço): ${(e as Error).message}`);
+            }
+            if (_dec.acao === "calar") {
+              console.log(`[Repeticao] não envio (${_dec.motivo}) — ${phone}`);
+              await supabase
+                .from("webhook_messages")
+                .update({
+                  action_status: "duplicate_suppressed",
+                  action_error: `Resposta repetida não enviada: ${_dec.motivo}`,
+                })
+                .eq("id", messageId);
+              return new Response(
+                JSON.stringify({ status: "duplicate_suppressed", reason: _dec.motivo }),
+                { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+              );
+            }
+            if (_dec.acao === "enviar") {
+              // parecida no texto, com outra data, hora, dia ou médico: é resposta nova
+              console.log(`[Repeticao] resposta parecida com a de ${_idadeDup}s atrás, mas com outros fatos — envio (${phone})`);
+            } else if (_dec.acao === "texto") {
+              console.log(`[Repeticao] ${_dec.motivo} — texto do estado no lugar do laço (${phone})`);
+              replyText = _dec.texto;
+              try {
+                await supabase.from("webhook_messages")
+                  .update({ action_error: `Resposta seria idêntica à de ${_idadeDup}s atrás — ${_dec.motivo}` })
+                  .eq("id", messageId);
+              } catch { /* non-blocking */ }
+            } else {
+              // Mais de 2 min: o paciente falou de novo e nós íamos repetir a mesma
+              // frase. É sinal de que estamos rodando em círculo — a saída é a equipe,
+              // e o texto é DIFERENTE de propósito, senão o próximo ciclo cai aqui de
+              // novo e vira silêncio outra vez.
+              console.log(
+                `[Webhook] 🔁 Resposta repetida após ${_idadeDup}s — oferecendo atendente em vez de ficar mudo (${phone})`,
+              );
+              const _candidataRep = replyText.replace(/\s+/g, " ").slice(0, 240);
+              replyText =
+                "Acho que não estou conseguindo te ajudar direito por aqui. 🙏 Me diga *atendente* que eu passo agora para uma pessoa da equipe — ou, se preferir, me conte de novo com suas palavras o que você precisa.";
+              await supabase
+                .from("webhook_messages")
+                .update({
+                  action_status: "duplicate_loop_escalated",
+                  action_error: `Resposta seria idêntica à de ${_idadeDup}s atrás — ofereci atendente em vez de silêncio | candidata: ${_candidataRep}`,
+                })
+                .eq("id", messageId);
+            }
           }
           // Fim do expediente: DEPOIS da rede de promessa (que decide se transfere de
           // verdade olhando a promessa original) e ANTES de enviar e gravar — o que o

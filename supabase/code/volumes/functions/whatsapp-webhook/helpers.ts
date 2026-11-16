@@ -1112,7 +1112,31 @@ export function horaEscolhidaPeloPaciente(textosDoPaciente: string[], textosDaJu
   if (!/^\d{1,2}:\d{2}$/.test(h)) return false;
   const alvo = h.padStart(5, "0");
   const doPaciente = textosDoPaciente.some((t) => mensagemCitaHora(t, alvo) || horaDoTexto(t) === alvo);
-  return doPaciente || textosDaJulia.some((t) => /Abriu uma vaga com/.test(String(t || "")) && mensagemCitaHora(t, alvo));
+  // Da Julia valem dois textos: a vaga da lista de espera (o aceite é "quero") e a reserva
+  // ("Estou segurando o horário das…"), que só sai depois de o paciente ter escolhido — é
+  // por ela que a opção única aceita com "pode ser esse" chega até a marcação (16/11).
+  return doPaciente || textosDaJulia.some((t) => /Abriu uma vaga com|Estou segurando o horário das/.test(String(t || "")) && mensagemCitaHora(t, alvo));
+}
+
+/**
+ * ACEITE DA OPÇÃO ÚNICA (16/11, Cassia 12/11). A lista tinha um horário só ("Horários
+ * disponíveis em 19/11 (quinta): 15:40 — Qual horário prefere?"), ela respondeu "Pode ser
+ * esse" e ouviu "Acho que não estou conseguindo te ajudar direito": a escolha na lista
+ * exige a hora dita (regra de 19/09), e com uma opção só ninguém repete a hora. Vale só
+ * quando a ÚLTIMA fala da clínica é a lista de UM horário; o que a paciente aceita é
+ * exatamente o que leu. "Ok" e "obrigada" não escolhem; pergunta, número e pedido de tempo
+ * também não.
+ */
+export function aceitaOpcaoUnica(texto: unknown): boolean {
+  const bruto = semMetadados(texto).trim();
+  // "ok" / "obrigada" o leitor de sim e não aceita como sim; aqui não escolhem horário.
+  // Pergunta, número e pedido de tempo já não passam pelo leitor nem pela frase abaixo.
+  if (!bruto || soAckOuAgradecimento(bruto)) return false;
+  if (respostaSimOuNao(bruto) === "sim") return true;
+  const t = stripAccents(bruto.toLowerCase())
+    .replace(/[\p{Extended_Pictographic}\p{Emoji_Modifier}\u200d\ufe0f]/gu, " ")
+    .replace(/[!.,;:]+/g, " ").replace(/\s+/g, " ").trim();
+  return /^(?:(?:pode ser|quero|fico com|vou querer|vou ficar com|prefiro|pode marcar|pode agendar|pode confirmar|serve|aceito|marca|agenda) )?(?:ess[ea]|est[ea])(?: mesmo)?(?: (?:horario|dia|data))?(?: mesmo)?(?: (?:por favor|pf|pfv))?$/.test(t);
 }
 
 export function horaDoTexto(texto: unknown): string | null {

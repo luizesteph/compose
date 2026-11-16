@@ -4,7 +4,7 @@
 // horarios (tokens de agenda so saem com respaldo verificado), pre-book guard
 // (fim de semana / fora do expediente) e dedup de respostas quase-identicas.
 // Extraido byte a byte do index.ts — comportamento identico. Sem @ts-nocheck.
-import { stripAccents, PROMESSA_DE_HUMANO_RE, MARCA_LIBERACAO_CONFERIDA } from "./helpers.ts";
+import { stripAccents, PROMESSA_DE_HUMANO_RE, MARCA_LIBERACAO_CONFERIDA, soAckOuAgradecimento, falaEsperaResposta, formatDateLabel, respostaSimOuNao, mensagemCitaHora } from "./helpers.ts";
 import { ehOrigemDoSite } from "../_shared/origem.ts";
 import { FRASE_ENCERRAMENTO, pertoDoEncerramento, expedienteAberto, fraseForaDoExpediente } from "../_shared/atendimento.ts";
 
@@ -71,6 +71,109 @@ export async function isDuplicateReply(
     console.warn(`[isDuplicateReply] error: ${(e as Error).message}`);
   }
   return { duplicate: false };
+}
+
+// ─────────────────────────────────────────────────────────────────�
+// A TRAVA DE REPETIÇÃO OLHA OS FATOS E O ESTADO, NÃO SÓ O TEXTO (16/11)
+// ─────────────────────────────────────────────────────────────────�
+// Quando a resposta a enviar era "quase igual" a uma dos últimos 5 minutos, saía "Acho que
+// não estou conseguindo te ajudar direito por aqui… me diga *atendente*". 42 vezes em 60
+// dias (12 na semana de 10 a 15/11), e em mais da metade a Julia tinha a resposta certa:
+//
+//  1. "Quase igual" comparava PALAVRAS (85% das palavras em comum). A reserva das 09:20 e a
+//     das 08:20 (Cristina, 12/11: "Desculpa, dia 02/12 às 9:20"), "Em 12/11 também não há
+//     horário" e "Em 11/11…", "não há vaga às terças" e "…às segundas" diferem numa palavra
+//     só — justamente a que importa. Agora duas respostas só são a mesma se os FATOS forem
+//     os mesmos: números (data, hora, valor), dia da semana, período e médico.
+//  2. Em 12 das 42 o caso JÁ ESTAVA com a equipe (a Julia tinha dito "vou passar para a
+//     nossa equipe") e o paciente só acrescentou uma informação ("Eu acabei de cancelar pelo
+//     site", um CPF). Pedir para ele escrever "atendente" não fazia sentido: o estado está
+//     gravado em `pending_human_transfers`. Agora a resposta diz isso uma vez, e depois cala.
+//  3. "Ok" / "Muito obrigada" depois de uma fala que não pergunta nada não pede resposta
+//     repetida nem "não estou conseguindo te ajudar": silêncio.
+//  4. Reserva pendente (o horário está seguro, falta o CPF) e o paciente responde "Pode
+//     confirmar" ou repete o horário (Dani, 11/11): a reserva continua valendo — a Julia diz
+//     isso com outras palavras em vez de desistir.
+// O que sobra (a agenda não tem outra resposta) segue com o texto antigo, e é a etapa da
+// função única de agenda.
+
+/** Os fatos de uma resposta: números (datas, horas, valores), dia da semana, período e médico citado. */
+export function fatosDaResposta(texto: unknown): string {
+  const bruto = String(texto ?? "");
+  const t = stripAccents(bruto.toLowerCase());
+  const numeros = (t.match(/\d+(?:[:\/h.,]\d+)*/g) || []).map((n) => n.replace(/^0+(?=\d)/, ""));
+  const dias = (t.match(/\b(?:segunda|terca|quarta|quinta|sexta|sabado|domingo)s?\b/g) || []).map((d) => d.replace(/s$/, ""));
+  const periodos = t.match(/\b(?:manha|tarde|noite)\b/g) || [];
+  const medicos = [...bruto.matchAll(/\bcom (?:o |a )?(?:Dra?\.? )?(\p{Lu}[\p{L}]+(?: (?:d[aeo]s? )?\p{Lu}[\p{L}]+){0,4})/gu)]
+    .map((m) => stripAccents(m[1].toLowerCase()));
+  const unicos = (l: string[]) => [...new Set(l)].sort().join(" ");
+  return [numeros.join(" "), unicos(dias), unicos(periodos), unicos(medicos)].join(" # ");
+}
+
+/** A mesma resposta de verdade: parecida no texto E com os mesmos fatos. */
+export function mesmaResposta(anterior: string, candidata: string): boolean {
+  return nearDuplicate(anterior, candidata) && fatosDaResposta(anterior) === fatosDaResposta(candidata);
+}
+
+/** O que está pendente na conversa, lido do que está GRAVADO (não do texto da última mensagem). */
+export type PendenciaDaConversa =
+  | { tipo: "com_a_equipe"; jaAvisado: boolean }
+  | { tipo: "reserva"; medico: string; dataISO: string; hora: string; jaReafirmada: boolean }
+  | null;
+
+export type DecisaoDaRepeticao =
+  | { acao: "enviar"; motivo: "fatos_diferentes" }
+  | { acao: "calar"; motivo: "agradecimento_repetido" | "ja_avisado_que_esta_com_a_equipe" }
+  | { acao: "texto"; texto: string; motivo: "com_a_equipe" | "reserva_so_falta_cpf" }
+  | { acao: "laco" };
+
+export const MARCA_JA_ESTA_COM_A_EQUIPE = "já está com a nossa equipe";
+/** O caso já foi passado e o paciente acrescentou algo: diz que está com a equipe (e quando respondem, se fechado). */
+export function textoJaEstaComAEquipe(quandoRespondem: string | null | undefined): string {
+  return quandoRespondem
+    ? `Anotado! 🙏 O seu caso ${MARCA_JA_ESTA_COM_A_EQUIPE}. O atendimento está fechado agora, e elas respondem por aqui ${quandoRespondem}.`
+    : `Anotado! 🙏 O seu caso ${MARCA_JA_ESTA_COM_A_EQUIPE}, que responde por aqui.`;
+}
+
+export const MARCA_RESERVA_CONTINUA = "continua guardado para você";
+/** A reserva continua valendo: o mesmo estado dito com outras palavras, pedindo o que falta. */
+export function textoReservaSoFaltaCpf(medico: string, dataISO: string, hora: string): string {
+  return `O horário das ${hora} do dia ${formatDateLabel(dataISO)}${medico ? ` com ${medico}` : ""} ${MARCA_RESERVA_CONTINUA} — ` +
+    `ainda *não* está confirmado. Para eu fechar a marcação só falta o CPF. Pode me passar?`;
+}
+
+/**
+ * A resposta a enviar é "quase igual" a uma recente e NÃO é corrida (o paciente leu a
+ * anterior e escreveu de novo). O que fazer — ver o bloco acima.
+ */
+export function decidirRepeticao(a: {
+  anterior: string;
+  candidata: string;
+  mensagemDoPaciente: string;
+  pendencia: PendenciaDaConversa;
+  quandoRespondem?: string | null;
+}): DecisaoDaRepeticao {
+  if (fatosDaResposta(a.anterior) !== fatosDaResposta(a.candidata)) return { acao: "enviar", motivo: "fatos_diferentes" };
+  // só reconhecimento, e a fala anterior não perguntava nada: não há o que repetir
+  if (soAckOuAgradecimento(a.mensagemDoPaciente) && !falaEsperaResposta(a.anterior)) {
+    return { acao: "calar", motivo: "agradecimento_repetido" };
+  }
+  const p = a.pendencia;
+  // já passado para a equipe, e a resposta repetida é a própria passagem
+  if (p?.tipo === "com_a_equipe" && PROMESSA_DE_HUMANO_RE.test(a.candidata)) {
+    return p.jaAvisado
+      ? { acao: "calar", motivo: "ja_avisado_que_esta_com_a_equipe" }
+      : { acao: "texto", texto: textoJaEstaComAEquipe(a.quandoRespondem), motivo: "com_a_equipe" };
+  }
+  if (p?.tipo === "reserva" && !p.jaReafirmada && /^\d{4}-\d{2}-\d{2}$/.test(p.dataISO) && /^\d{2}:\d{2}$/.test(p.hora)) {
+    // só para quem ACEITOU ou repetiu o horário reservado ("Pode confirmar", "25/11 às 14h").
+    // Quem recusou ("Essa data não tenho interesse") não ouve a reserva de novo.
+    const m = stripAccents(String(a.mensagemDoPaciente || "").toLowerCase());
+    const aceitou = respostaSimOuNao(a.mensagemDoPaciente) === "sim" || mensagemCitaHora(a.mensagemDoPaciente, p.hora) ||
+      (/\bconfirm/.test(m) && !/\bnao\b/.test(m) && !m.includes("?"));
+    if (aceitou) return { acao: "texto", texto: textoReservaSoFaltaCpf(p.medico, p.dataISO, p.hora), motivo: "reserva_so_falta_cpf" };
+  }
+  return { acao: "laco" };
 }
 
 /**
