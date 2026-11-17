@@ -538,6 +538,14 @@ export function telefoneDasMensagens(msgs: unknown): string | null {
  * auditoria dizer POR QUE o ticket mudou de mão; sem isso a atendente abre o
  * painel, não acha o caso que era dela e ninguém sabe explicar.
  */
+/** Quem mandou a última mensagem da conversa: a equipe (resposta manual), a Julia ou o paciente. */
+export function quemFalouPorUltimo(m: { direction?: unknown; ai_intent?: unknown } | null | undefined): "equipe" | "julia" | "paciente" | null {
+  if (!m) return null;
+  if (m.direction === "incoming") return "paciente";
+  if (m.direction !== "outgoing") return null;
+  return m.ai_intent === "manual_reply" ? "equipe" : "julia";
+}
+
 export function decideLiberarFicha(
   f: {
     /** o ticket tem nome de atendente? sem dono não há de quem tirar. */
@@ -553,6 +561,14 @@ export function decideLiberarFicha(
      * que elas resolviam fora do chat (autorização, hospital, convênio).
      */
     casoLongo?: boolean;
+    /**
+     * a última mensagem da conversa é da equipe (17/11, decisão do dono, opção A): no
+     * expediente a ficha fica com ela — ela respondeu e espera o paciente. Em 14 dias, 172
+     * das 216 liberações por ociosidade eram assim; em 53 o paciente voltou e caiu em
+     * pendentes, e em 25 ficou mais de 2 h sem resposta. Se ele voltar e ela não responder,
+     * a devolução por inatividade (20 min) leva a ficha. À noite sai como sempre.
+     */
+    atendenteFalouPorUltimo?: boolean;
   },
   lim: LimitesDaFicha = LIMITES_PADRAO_DA_FICHA,
 ): { liberar: boolean; motivo: string } {
@@ -570,6 +586,7 @@ export function decideLiberarFicha(
   }
   if (f.ociosoMin >= lim.ocioso) {
     if (f.casoLongo && f.expedienteAberto) return { liberar: false, motivo: "caso_longo_no_expediente" };
+    if (f.atendenteFalouPorUltimo && f.expedienteAberto) return { liberar: false, motivo: "atendente_falou_por_ultimo" };
     return { liberar: true, motivo: "ocioso" };
   }
   return { liberar: false, motivo: "dentro_do_prazo" };

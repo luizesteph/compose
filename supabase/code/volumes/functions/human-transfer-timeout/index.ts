@@ -26,6 +26,7 @@ import {
   inicioDoPrazoDaDevolucao,
   JANELA_CONVERSA_ATIVA_MIN,
   decideLiberarFicha,
+  quemFalouPorUltimo,
   expedienteAberto,
   minutosParado,
   telefoneDasMensagens,
@@ -726,6 +727,42 @@ function canalVivo(cl: any): { baseUrl: string; apiId: string; bearerToken: stri
 //   true  = a conversa já passou pela fila nos últimos 7 dias
 //   false = não passou (ou não há mensagem deste ticket na janela: primeira ida)
 //   null  = não deu para saber — quem chama NÃO libera
+// Quem falou por último na conversa deste ticket (17/11, opção A da varredura). A conversa é
+// achada pelo número do ticket gravado nas mensagens (como em conversaDoTicketJaPassouPelaFila).
+// Erro ou conversa não achada → null, e a ficha segue a regra antiga.
+async function quemFalouPorUltimoNoTicket(
+  supabase: any,
+  clinicTokenId: string,
+  ticketId: number,
+): Promise<"equipe" | "julia" | "paciente" | null> {
+  try {
+    const { data: msg, error } = await supabase
+      .from("webhook_messages")
+      .select("conversation_id")
+      .eq("clinic_token_id", clinicTokenId)
+      .eq("raw_payload->ticket->>id", String(ticketId))
+      .not("conversation_id", "is", null)
+      .gte("created_at", new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString())
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) return null;
+    const conversa = (msg as { conversation_id?: string } | null)?.conversation_id;
+    if (!conversa) return null;
+    const { data: ultima, error: erro2 } = await supabase
+      .from("webhook_messages")
+      .select("direction, ai_intent")
+      .eq("conversation_id", conversa)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (erro2) return null;
+    return quemFalouPorUltimo(ultima as { direction?: string; ai_intent?: string } | null);
+  } catch {
+    return null;
+  }
+}
+
 async function conversaDoTicketJaPassouPelaFila(
   supabase: any,
   clinicTokenId: string,
@@ -901,6 +938,15 @@ async function varrerFichasParadas(
     const _foraV = await atendentesForaHoje(supabase, clinicTokenId);
     const d = decideLiberarFicha({ temDona: true, ociosoMin, idadeDias, expedienteAberto: aberto, casoLongo: !!atendenteDeCasoLongo(donaNome, _foraV) }, limites);
     if (!d.liberar) { pulou(d.motivo); continue; }
+
+    // OPÇÃO A (17/11, decisão do dono): no expediente, ficha em que a atendente falou por último
+    // fica com ela — ver atendenteFalouPorUltimo em decideLiberarFicha. Só consulta o banco
+    // para quem ia sair por ociosidade.
+    if (d.motivo === "ocioso") {
+      const _quem = await quemFalouPorUltimoNoTicket(supabase, clinicTokenId, ticketId);
+      const _d2 = decideLiberarFicha({ temDona: true, ociosoMin, idadeDias, expedienteAberto: aberto, casoLongo: !!atendenteDeCasoLongo(donaNome, _foraV), atendenteFalouPorUltimo: _quem === "equipe" }, limites);
+      if (!_d2.liberar) { pulou(_d2.motivo); continue; }
+    }
 
     // CASO LONGO (pedido do dono, 15/09): ticket da Vânia ou da Lidiane sai da
     // ficha dela UMA vez por caso. Já liberado por esta varredura, ou a conversa
