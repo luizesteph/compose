@@ -85,6 +85,7 @@ import {
   cpfDigitadoNaConversa,
   falasDoPaciente,
   semMetadados,
+  respostaSimOuNao,
   liderVivaDaRajada,
   pareceRoboDeAtendimento,
   pedidoSobreSessaoDeFisio,
@@ -307,6 +308,18 @@ import {
   planoNotreDameNaoAtendido,
   TEXTO_NOTRE_DAME_NAO_ATENDIDO,
 } from "./insurance.ts";
+import {
+  vereditoDoConvenioDito,
+  textoConvenioNaoAtendido,
+  jaExplicouParticular,
+  particularAutorizado,
+  pacienteRecusouParticular,
+  TEXTO_NAO_MARQUEI_SEM_PARTICULAR,
+  PERGUNTA_COMO_PARTICULAR_RE,
+  PERGUNTA_PARTICULAR_DO_CADASTRO_RE,
+  textoSoFaltaOParticular,
+  desistiuDeMarcar,
+} from "./convenio.ts";
 // @ts-nocheck
 // TODO(FASE 2): remove this directive and address ~50 structural TS errors
 // (extra fields on inferred ActionResult shape: patientName, entities, schedulingContext,
@@ -3756,6 +3769,34 @@ async function executeAction(
             error: _infMsg,
             bypassAiRewrite: true,
           } as any;
+        }
+
+        // === CONVÊNIO DECIDIDO ANTES DA LISTA (16/11, etapa 4 do plano de 15/11) ===
+        // Sophia (10/11): "pelo convênio Hapvida" + "plano SMART 500" → lista, reserva, CPF e
+        // cadastro, e só então "esse plano eu preciso confirmar". Renata (15/11): "Convenio
+        // medsenior black 3" com o horário já reservado → questionário de cadastro. O convênio
+        // ou o plano que a clínica não atende é dito ANTES de qualquer lista, uma vez, com a
+        // alternativa do script (particular com reembolso) — sem fila. Depois da explicação,
+        // ou da palavra do paciente ("particular"), a conversa segue como sempre.
+        // Leitura única: vereditoDoConvenioDito (convenio.ts), só com as falas do paciente.
+        {
+          const _falasConv = [...falasDoPaciente(recentMessages).slice(-12), semMetadados(currentMessageText || "")];
+          const _vcd = vereditoDoConvenioDito(_falasConv);
+          const _nutro = /nutr|ana\s+paula/i.test(`${entities.doctor_name || ""} ${entities.subspecialty || ""}`);
+          if (_vcd.tipo === "nao_atendido" && !_nutro) {
+            const _juliaDisse = (recentMessages || [])
+              .filter((m: any) => m?.role === "assistant").slice(-8).map((m: any) => String(m?.content || ""));
+            if (!jaExplicouParticular(_juliaDisse) && !particularAutorizado(recentMessages, currentMessageText || "")) {
+              const _hhConv = normalizeTimeToHHMM(entities.time || "") || "";
+              const _ddConv = String(entities.date || "");
+              const _quandoConv = /^\d{4}-\d{2}-\d{2}$/.test(_ddConv) && _hhConv
+                ? `${_ddConv.slice(8, 10)}/${_ddConv.slice(5, 7)} às ${_hhConv}`
+                : null;
+              const _txtConv = textoConvenioNaoAtendido(_vcd, precoDaConsulta(customNotes), _quandoConv);
+              console.log(`[Convenio] ${_vcd.convenio} (${_vcd.motivo}${_vcd.plano ? " " + _vcd.plano : ""}) não atendido — dito antes da lista`);
+              return { status: "needs_info", response: _txtConv, error: _txtConv, bypassAiRewrite: true, convenioDecidido: true } as any;
+            }
+          }
         }
 
         // ── GREETING GUARD: Prevent simple greetings from entering booking flow ──
@@ -8627,6 +8668,56 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               : "Para finalizar o cadastro, ainda preciso do seu CPF. Pode me enviar os 11 dígitos, por favor?",
             ...(_hasSchedCtx ? { schedulingContext: _schedCtx } : {}),
           };
+        }
+        // === PARTICULAR SÓ COM A PALAVRA DO PACIENTE (16/11) ===
+        // Renata (15/11): disse "Convenio medsenior black 3"; na mensagem da data de
+        // nascimento o CLASSIFICADOR escreveu insurance_choice="particular" e a consulta saiu
+        // como particular ("Particular não", respondeu ela depois). E em 16/11 dois cadastros
+        // com "Porto Seguro P320" e "P470 Q" foram marcados PELO CONVÊNIO, em planos que a
+        // clínica não atende (o cadastro pega o primeiro plano do grupo).
+        //   - "particular" que não saiu da boca do paciente não vale: a escolha fica vazia e
+        //     segue para a pergunta de sempre ("Você tem convênio?");
+        //   - convênio ou plano não atendido (vereditoDoConvenioDito): sem a palavra do
+        //     paciente, a Julia explica e pergunta antes de marcar; com ela, marca particular
+        //     — nunca pelo plano não atendido.
+        {
+          const _falasCad = [...falasDoPaciente(recentMessages).slice(-12), semMetadados(currentMessageText || "")];
+          const _vcdCad = vereditoDoConvenioDito(_falasCad);
+          const _particularOk = particularAutorizado(recentMessages, currentMessageText || "");
+          const _escolhaCad = stripAccents(String(entities.insurance_choice || "").toLowerCase()).trim();
+          if (_escolhaCad && (_escolhaCad === "particular" || isNegativeInsuranceClaim(_escolhaCad)) && !_particularOk) {
+            console.log(`[Webhook] cadastrar - "particular" veio do classificador, não do paciente — escolha desconsiderada`);
+            entities.insurance_choice = "";
+          }
+          if (_vcdCad.tipo === "nao_atendido") {
+            if (_particularOk) {
+              entities.insurance_choice = "particular";
+            } else {
+              const _hhCad = normalizeTimeToHHMM(String((_schedCtx as any)?.time || entities.time || "")) || "";
+              const _ddCad = String((_schedCtx as any)?.date || entities.date || "");
+              const _quandoCad = /^\d{4}-\d{2}-\d{2}$/.test(_ddCad) && _hhCad
+                ? `${_ddCad.slice(8, 10)}/${_ddCad.slice(5, 7)} às ${_hhCad}`
+                : null;
+              const _juliaDisseCad = (recentMessages || [])
+                .filter((m: any) => m?.role === "assistant").slice(-8).map((m: any) => String(m?.content || ""));
+              const _txtCad = pacienteRecusouParticular(currentMessageText || "") || desistiuDeMarcar(currentMessageText || "") ||
+                  respostaSimOuNao(currentMessageText || "") === "nao"
+                ? TEXTO_NAO_MARQUEI_SEM_PARTICULAR
+                : jaExplicouParticular(_juliaDisseCad)
+                ? textoSoFaltaOParticular(precoDaConsulta(customNotes), _quandoCad)
+                : textoConvenioNaoAtendido(_vcdCad, precoDaConsulta(customNotes), _quandoCad, true);
+              console.log(`[Webhook] cadastrar - ${_vcdCad.convenio} não atendido e o paciente não disse "particular" — não marca`);
+              return {
+                status: "needs_info",
+                response: _txtCad,
+                error: _txtCad,
+                bypassAiRewrite: true,
+                convenioDecidido: true,
+                entities: entities,
+                ...(_hasSchedCtx ? { schedulingContext: _schedCtx } : {}),
+              } as any;
+            }
+          }
         }
         if (!entities.patient_full_name) {
           return {
@@ -17690,6 +17781,30 @@ Deno.serve(async (req) => {
         console.log(`[Webhook] pergunta com resposta pronta (${_domiciliar ? "domicílio" : "regra do retorno"})`);
         classification.intent = "unknown";
       }
+      // === RESPOSTA À PERGUNTA "… COMO PARTICULAR?" (16/11) ===
+      // Depois de dizer que o convênio não é atendido, a Julia pergunta se segue como
+      // particular. O "sim" (ou a palavra "particular") continua o fluxo que perguntou —
+      // a marcação ou o cadastro —; o "não" encerra sem marcar nada. Sem isto, o "sim"
+      // dependia de o classificador adivinhar a que pergunta respondia.
+      let _recusouParticular = false;
+      {
+        const _ultClinConv = ultimaFalaDaClinica(conversationHistory || []).trim();
+        if (PERGUNTA_COMO_PARTICULAR_RE.test(_ultClinConv)) {
+          const _rConv = respostaSimOuNao(finalMessage || "");
+          const _recusaConv = pacienteRecusouParticular(finalMessage || "") || desistiuDeMarcar(finalMessage || "") || _rConv === "nao";
+          const _aceitaConv = !_recusaConv && (_rConv === "sim" || pacienteDisseParticular(finalMessage || ""));
+          if (_aceitaConv) {
+            const _fluxoConv = PERGUNTA_PARTICULAR_DO_CADASTRO_RE.test(_ultClinConv) ? "cadastrar" : "agendar";
+            console.log(`[Convenio] paciente aceitou particular — ${classification.intent} → ${_fluxoConv}`);
+            classification.intent = _fluxoConv;
+            classification.insurance_choice = "particular";
+          } else if (_recusaConv) {
+            console.log(`[Convenio] paciente recusou particular — nada é marcado`);
+            _recusouParticular = true;
+            classification.intent = "unknown";
+          }
+        }
+      }
       console.log(`[Webhook] Executing action: ${classification.intent}`);
       const _actionResultRaw = await executeAction(
         classification.intent,
@@ -18490,6 +18605,10 @@ Deno.serve(async (req) => {
           // vamos ao banco buscar o histórico, para não pagar SELECT em toda
           // resposta que menciona um convênio.
           let _vConv = validarAfirmacaoDeConvenio(replyText, finalMessage || "");
+          // O TEXTO DA DECISÃO DE CONVÊNIO (16/11) já é o veredito: não é afirmação a conferir.
+          if (!_vConv.ok && (actionResult as any)?.convenioDecidido === true) {
+            _vConv = { ok: true } as any;
+          }
           // O PEDIDO DE CADASTRO LISTA OS CONVÊNIOS — NÃO É AFIRMAÇÃO (01/10, Tai):
           // SulAmérica Especial 100, mandou o CPF, a Julia ia pedir os dados do
           // cadastro ("Convênios disponíveis: Bradesco, Care Plus…") e a guarda leu
@@ -18663,6 +18782,7 @@ Deno.serve(async (req) => {
         }
 
         if (_recadoDoMedico) replyText = TEXTO_RECADO_DO_MEDICO;
+        if (_recusouParticular) replyText = TEXTO_NAO_MARQUEI_SEM_PARTICULAR;
         if (_prontoAtendimento) replyText = TEXTO_SEM_PRONTO_ATENDIMENTO;
         if (_exameFeito) replyText = TEXTO_EXAME_FEITO;
         if (_propostaComercial) replyText = TEXTO_PROPOSTA_COMERCIAL;
