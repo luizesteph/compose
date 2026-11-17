@@ -1591,6 +1591,37 @@ export function pedeOutraData(texto: unknown): boolean {
   return !horaDoTexto(bruto) && !/\d{1,2}\s*\/\s*\d{1,2}/.test(bruto);
 }
 
+// A LISTA QUE A JULIA MOSTROU, GUARDADA NA MENSAGEM ENVIADA (16/11, etapa 2, parte B).
+// Até aqui, "que datas o paciente já viu?" era respondido lendo o TEXTO da lista de volta
+// (datasDaLista, abaixo). O texto muda — saudação na frente, aviso no meio, o modelo
+// reescrevendo — e a leitura quebra junto. A ação agora devolve a lista em
+// `schedulingContext.pendente`, que vai para `ai_entities` da mensagem enviada, do mesmo
+// jeito que a reserva (`pendente: { tipo: "reserva" }`, 15/11). Quem precisa lê daqui e só
+// cai no texto quando a mensagem é antiga.
+export interface ListaMostrada {
+  tipo: "lista";
+  medico: string;
+  datas: Array<{ data: string; horas: string[] }>;
+}
+export function pendenteDaLista(medico: unknown, datas: ReadonlyArray<{ date?: unknown; slots?: unknown }>): ListaMostrada {
+  return {
+    tipo: "lista",
+    medico: String(medico ?? "").trim(),
+    datas: (datas || [])
+      .map((d) => ({
+        data: String(d?.date ?? "").slice(0, 10),
+        horas: Array.isArray(d?.slots) ? (d.slots as unknown[]).map((h) => String(h)).filter((h) => /^\d{2}:\d{2}$/.test(h)) : [],
+      }))
+      .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d.data) && d.horas.length > 0),
+  };
+}
+/** As datas (ISO, em ordem) da lista gravada; vazio se a mensagem não guardou uma lista. */
+export function datasDaListaGravada(pendente: unknown): string[] {
+  const p = pendente as { tipo?: unknown; datas?: unknown } | null | undefined;
+  if (!p || p.tipo !== "lista" || !Array.isArray(p.datas)) return [];
+  return [...new Set((p.datas as Array<{ data?: unknown }>).map((d) => String(d?.data ?? "")).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)))].sort();
+}
+
 /** As datas (ISO, em ordem) de uma lista "dd/mm (dia): hh:mm, …" que a Julia mandou. */
 export function datasDaLista(texto: unknown, hojeISO: string): string[] {
   const ano = Number(String(hojeISO).slice(0, 4));

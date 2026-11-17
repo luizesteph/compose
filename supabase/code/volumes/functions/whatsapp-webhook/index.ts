@@ -132,6 +132,8 @@ import {
   aceitaOpcaoUnica,
   pedeOutraData,
   datasDaLista,
+  pendenteDaLista,
+  datasDaListaGravada,
   janelaDepoisDaLista,
   horaDitaParaOutroDia,
   pedeQualquerMedicoDaArea,
@@ -3723,7 +3725,9 @@ async function executeAction(
               .order("created_at", { ascending: false })
               .limit(1);
             const _l = _ultLista?.[0] as any;
-            const _vistas = _l ? datasDaLista(_l.message_text, getTodayISO_SP()) : [];
+            // a lista gravada na mensagem (16/11); o texto fica para as mensagens antigas
+            const _gravadas = datasDaListaGravada(_l?.ai_entities?.pendente);
+            const _vistas = _gravadas.length ? _gravadas : (_l ? datasDaLista(_l.message_text, getTodayISO_SP()) : []);
             const _reservada = String(_l?.ai_entities?.pendente?.tipo || "") === "reserva" ? String(_l.ai_entities.pendente.data || "") : "";
             const _depois = janelaDepoisDaLista(_vistas.length ? _vistas[_vistas.length - 1] : _reservada);
             if (_depois) {
@@ -5440,7 +5444,9 @@ async function executeAction(
                   }
                   // níveis 2 e 3 explicam o que não tem — vão literais, sem reescrita
                   const _msgFinal = _outrosArea ? fullMsg.replace(/\n\nQual data e horário prefere\?\s*$/, "") + _outrosArea : fullMsg;
-                  return { status: "needs_info", response: _msgFinal, error: _msgFinal, verifiedSchedule: true, bypassAiRewrite: _nivel > 1 || !!_avisoDia || !!_outrosArea } as any;
+                  // a lista mostrada fica gravada na mensagem enviada (16/11) — ver pendenteDaLista
+                  const _pendenteLista = { pendente: pendenteDaLista(doctorName, datesWithSlots) };
+                  return { status: "needs_info", response: _msgFinal, error: _msgFinal, verifiedSchedule: true, schedulingContext: _pendenteLista, bypassAiRewrite: _nivel > 1 || !!_avisoDia || !!_outrosArea } as any;
                 } else {
                   // Dates exist but no slots found from bulk fetch — fetch individually per date
                   const top5 = filteredIso.filter((d: string) => !isWeekendISO(d)).slice(0, 5);
@@ -5508,12 +5514,24 @@ async function executeAction(
                   console.log(
                     `[Webhook] Patient requested specific doctor "${entities.doctor_name}" — skipping multi-doctor fallback (OVERRIDE 2)`,
                   );
+                  // AGENDA DELE SEM DATA NENHUMA ABERTA (16/11, parte B): em vez de mandar o modelo
+                  // perguntar "quer tentar outro dia?" sem opção, a mesma resposta do dia sem vaga —
+                  // os outros da mesma área nas próximas 3 semanas, ou a lista de espera. Literal.
+                  const _hojeSemData = getTodayISO_SP();
+                  const _nomeSemData = doctorName || entities.doctor_name;
+                  const _outrosSemData = await outrosMedicosDaAreaNoPrazo(
+                    String(doctorId || ""), _hojeSemData, somaDiasISO(_hojeSemData, 21), entities.preferred_period || undefined,
+                  );
+                  const _msgSemData = `Não encontrei horário livre com ${_nomeSemData} nas próximas semanas — a agenda dele ainda não abriu mais datas.` +
+                    (_outrosSemData || "\n\nSe quiser, te coloco na *lista de espera* dele: se abrir uma vaga, te aviso por aqui.");
+                  // o `error` mantém a frase que a Regra 7 conta como negativa de horário
                   return {
                     status: "needs_info",
-                    response: "",
-                    error: `Verifiquei aqui e o(a) Dr(a). ${doctorName || entities.doctor_name} não tem horários disponíveis no momento.`,
-                    internal_instruction: "Pergunte se o paciente gostaria de tentar em outro dia com o mesmo médico. NÃO sugira outro profissional, pois o paciente pediu este médico especificamente.",
-                  };
+                    response: _msgSemData,
+                    error: `Sem horários com ${_nomeSemData} nos próximos 7 dias.`,
+                    verifiedSchedule: !!_outrosSemData,
+                    bypassAiRewrite: true,
+                  } as any;
                 }
                 // FALLBACK: Search other schedulable doctors for availability (only when no specific doctor was requested)
                 if (schedulableDoctors.length > 1) {
@@ -5627,6 +5645,102 @@ async function executeAction(
           };
         }
 
+        // === DIA PEDIDO SEM VAGA: UMA RESPOSTA SÓ (16/11, etapa 2 do plano de 15/11, parte B) ===
+        // O dia pedido sem vaga era respondido em três lugares, com textos e regras diferentes:
+        // o Step 6.5 (com a hora escolhida) mostrava as próximas datas do médico e os outros
+        // da mesma área; o Step 6 (sem hora) devolvia "Sem horários com X em D" para o modelo
+        // escrever, com a ordem "NÃO sugira outro profissional"; o Step 5 fazia o mesmo quando
+        // a agenda do médico não tinha data nenhuma. O paciente ouvia "quer tentar outro dia?"
+        // sem opção. Agora os três chamam esta função: próximas datas do mesmo médico (7 dias,
+        // depois a agenda aberta), os outros médicos da mesma área no prazo e a lista de
+        // espera — texto literal, com os horários reais.
+        const respostaDiaSemVaga = async (_ofereciEsse: boolean): Promise<any> => {
+          const dateLabel = formatDateLabel(entities.date);
+          const nextDays: { date: string; label: string; slots: string[] }[] = [];
+          const baseParts = entities.date.split("-").map(Number);
+          const baseDate = new Date(baseParts[0], baseParts[1] - 1, baseParts[2]);
+          for (let i = 1; i <= 7 && nextDays.length < 3; i++) {
+            const nd = new Date(baseDate);
+            nd.setDate(nd.getDate() + i);
+            const ndIso = `${nd.getFullYear()}-${String(nd.getMonth() + 1).padStart(2, "0")}-${String(nd.getDate()).padStart(2, "0")}`;
+            // Fim de semana nunca vira oferta (caso Caio, 11/08): a clínica não
+            // abre sáb/dom e a marcação seria recusada no final do fluxo.
+            if (isWeekendISO(ndIso)) continue;
+            try {
+              const ndSlots = await fetchSlotsForDate(ndIso, doctorId);
+              if (ndSlots.length > 0) {
+                nextDays.push({
+                  date: ndIso,
+                  label: formatDateLabel(ndIso),
+                  slots: ndSlots.slice(0, 4),
+                });
+              }
+            } catch (_) {
+              /* non-blocking */
+            }
+          }
+
+          // NUNCA "NÃO TEM" SEM A PRÓXIMA DATA (29/10, Andreia: "amanhã tem após as 18h30?" →
+          // "não tem nos próximos 7 dias. Gostaria de tentar outro dia?", sem data nenhuma; o
+          // Dr. Luiz tinha 09/11 e 11/11). Sem nada em 7 dias, as próximas datas da agenda dele.
+          let _alemDos7 = false;
+          if (nextDays.length === 0 && doctorId) {
+            try {
+              const _rAd = await tryFetch(`doctors/${doctorId}/available-dates?event_id=${eventId}&place_id=${placeId}&company_id=${companyId}`, amigoToken);
+              const _arrAd = normalizeApiResponse(_rAd);
+              const _datasAd = (Array.isArray(_arrAd) ? (_arrAd as string[]) : []).map((d) => toIsoDate(String(d)).slice(0, 10))
+                .filter((d) => d > entities.date && !isWeekendISO(d)).sort().slice(0, 6);
+              for (const d of _datasAd) {
+                if (nextDays.length >= 3) break;
+                const _sl = await fetchSlotsForDate(d, doctorId);
+                if (_sl.length > 0) nextDays.push({ date: d, label: formatDateLabel(d), slots: _sl.slice(0, 4) });
+              }
+              _alemDos7 = nextDays.length > 0;
+            } catch (_) { /* non-blocking */ }
+          }
+
+          if (nextDays.length > 0) {
+            const lines = nextDays.map((d) => `${d.label}: ${d.slots.join(", ")}`).join("\n");
+            // TOM (reclamação do dono, 11/08: "você está respondendo de forma
+            // agressiva"). Esta mensagem passa por bypassAiRewrite, ou seja, sai
+            // literal — e no caso ela NEGOU um dia que a própria Julia
+            // tinha acabado de oferecer ("22/08, que é um sábado, às 08:30, 09:10
+            // e 10:20" → "Cristian Vilela dos Santos não tem horários em 22/08"),
+            // sem pedir desculpa e sem chamar o paciente pelo nome. Ler isso
+            // depois de escolher um horário soa como se a culpa fosse dele.
+            // O texto assume o erro; a lista real de horários continua idêntica.
+            // 13/10 (Simeia pediu "quinta às 11h"): o dia foi pedido pelo PACIENTE — não
+            // há o que desculpar. A desculpa fica para quando a Julia ofereceu o dia.
+            const _jDia65 = janelaDeDatas(currentMessageText || "", getTodayISO_SP());
+            const _diaPedido65 = !!_jDia65 && (
+              ((_jDia65.datas || []) as string[]).includes(entities.date) ||
+              ((_jDia65.diasDaSemana || []) as number[]).includes(new Date(`${entities.date}T12:00:00`).getDay())
+            );
+            const _outros65 = await outrosMedicosDaAreaNoPrazo(String(doctorId || ""), entities.date, somaDiasISO(nextDays[0].date, -1), entities.preferred_period || undefined);
+            const altMsg = _alemDos7
+              ? `Em ${dateLabel} ${doctorName} não tem horário livre, nem nos 7 dias seguintes. As próximas datas que ele tem:\n${lines}` +
+                (_outros65 || "\n\nAlguma delas te atende? Se quiser, também te coloco na *lista de espera* para avisar se abrir uma vaga antes.")
+              : _ofereciEsse
+              ? textoHorarioPreenchido(dateLabel, String(entities.time || ""), doctorName, lines)
+              : _diaPedido65
+              ? `Em ${dateLabel} ${doctorName} não tem horário livre. Estas são as próximas datas que ele tem:\n${lines}\n\nAlguma delas te atende?`
+              : `Me desculpe — me confundi aqui: ${doctorName} não tem horários em ${dateLabel}. 🙏\n\n` +
+                `Estas são as datas que ele realmente tem:\n${lines}\n\nAlguma delas te atende?`;
+            // literal (15/10, André: o modelo reescreveu e a lista sumiu — "quer tentar outro dia?")
+            return { status: "needs_info", response: altMsg, error: altMsg, verifiedSchedule: true, bypassAiRewrite: true } as any;
+          }
+
+          // agenda dele sem nada aberto: os outros da mesma área nas próximas 3 semanas, ou a
+          // lista de espera — texto literal, nunca "quer tentar outro dia?" sem opção (29/10)
+          {
+            const _outrosSem = await outrosMedicosDaAreaNoPrazo(String(doctorId || ""), entities.date, somaDiasISO(entities.date, 21), entities.preferred_period || undefined);
+            const _msgSem = `Não encontrei horário livre com ${doctorName} em ${dateLabel} nem nas próximas semanas — a agenda dele ainda não abriu mais datas.` +
+              (_outrosSem || "\n\nSe quiser, te coloco na *lista de espera* dele: se abrir uma vaga, te aviso por aqui.");
+            // o `error` mantém a frase que a Regra 7 conta como negativa de horário
+            return { status: "needs_info", response: _msgSem, error: `Sem horários com ${doctorName} em ${dateLabel} nem nos próximos 7 dias.`, verifiedSchedule: !!_outrosSem, bypassAiRewrite: true } as any;
+          }
+        };
+
         // Step 6: If no time, fetch and show formatted slots for the chosen date
         if (!entities.time) {
           const dateLabel = formatDateLabel(entities.date);
@@ -5644,7 +5758,11 @@ async function executeAction(
                   senderPhone || "",
                 );
               }
-              return { status: "needs_info", response: msg, error: msg, verifiedSchedule: true } as any;
+              return {
+                status: "needs_info", response: msg, error: msg, verifiedSchedule: true,
+                // a lista mostrada fica gravada na mensagem enviada (16/11) — ver pendenteDaLista
+                schedulingContext: { pendente: pendenteDaLista(doctorName, [{ date: entities.date, slots }]) },
+              } as any;
             }
             // Doctor selected but no slots available — try fallback to other doctors on same date
             // OVERRIDE 2: if patient requested specific doctor, do NOT suggest others
@@ -5652,12 +5770,8 @@ async function executeAction(
               console.log(
                 `[Webhook] Patient requested specific doctor "${entities.doctor_name}" on ${entities.date} — no fallback (OVERRIDE 2)`,
               );
-              return {
-                status: "needs_info",
-                response: "",
-                error: `Sem horários com ${doctorName || entities.doctor_name} em ${dateLabel}.`,
-                internal_instruction: "Pergunte se deseja tentar outra data com o mesmo médico. NÃO sugira outro profissional, pois o paciente pediu este médico especificamente.",
-              };
+              // uma resposta só para o dia sem vaga (16/11): próximas datas dele, os outros da área, lista de espera
+              return await respostaDiaSemVaga(false);
             }
             console.log(`[Webhook] No slots for ${doctorName} on ${entities.date}. Trying other doctors...`);
             const fbOtherDocs = schedulableDoctors.filter(
@@ -5682,12 +5796,8 @@ async function executeAction(
               const fbMsg = `Infelizmente ${doctorName || "o médico"} não possui horários em ${dateLabel}. Porém, encontrei disponibilidade com outros especialistas:\n\n${fbDateSlots.join("\n")}\n\nQual médico e horário prefere? Ou deseja tentar outra data?`;
               return { status: "needs_info", response: fbMsg, error: fbMsg, verifiedSchedule: true } as any;
             }
-            return {
-              status: "needs_info",
-              response: "",
-              error: `Sem horários para ${doctorName || "o médico"} em ${dateLabel}, e nenhum outro médico tem disponibilidade nesta data.`,
-              internal_instruction: "Pergunte se o paciente deseja tentar outra data. NÃO invente horários ou datas.",
-            };
+            // ninguém com vaga nesse dia: as próximas datas do médico, em vez de "quer tentar outro dia?" (16/11)
+            return await respostaDiaSemVaga(false);
           }
 
           // No doctorId — search slots for all schedulable doctors on this date
@@ -5769,89 +5879,7 @@ async function executeAction(
             console.log(
               `[Webhook] Step 6.5: No slots at all for ${doctorName} on ${entities.date} — searching next 7 days`,
             );
-            const nextDays: { date: string; label: string; slots: string[] }[] = [];
-            const baseParts = entities.date.split("-").map(Number);
-            const baseDate = new Date(baseParts[0], baseParts[1] - 1, baseParts[2]);
-            for (let i = 1; i <= 7 && nextDays.length < 3; i++) {
-              const nd = new Date(baseDate);
-              nd.setDate(nd.getDate() + i);
-              const ndIso = `${nd.getFullYear()}-${String(nd.getMonth() + 1).padStart(2, "0")}-${String(nd.getDate()).padStart(2, "0")}`;
-              // Fim de semana nunca vira oferta (caso Caio, 11/08): a clínica não
-              // abre sáb/dom e a marcação seria recusada no final do fluxo.
-              if (isWeekendISO(ndIso)) continue;
-              try {
-                const ndSlots = await fetchSlotsForDate(ndIso, doctorId);
-                if (ndSlots.length > 0) {
-                  nextDays.push({
-                    date: ndIso,
-                    label: formatDateLabel(ndIso),
-                    slots: ndSlots.slice(0, 4),
-                  });
-                }
-              } catch (_) {
-                /* non-blocking */
-              }
-            }
-
-            // NUNCA "NÃO TEM" SEM A PRÓXIMA DATA (29/10, Andreia: "amanhã tem após as 18h30?" →
-            // "não tem nos próximos 7 dias. Gostaria de tentar outro dia?", sem data nenhuma; o
-            // Dr. Luiz tinha 09/11 e 11/11). Sem nada em 7 dias, as próximas datas da agenda dele.
-            let _alemDos7 = false;
-            if (nextDays.length === 0 && doctorId) {
-              try {
-                const _rAd = await tryFetch(`doctors/${doctorId}/available-dates?event_id=${eventId}&place_id=${placeId}&company_id=${companyId}`, amigoToken);
-                const _arrAd = normalizeApiResponse(_rAd);
-                const _datasAd = (Array.isArray(_arrAd) ? (_arrAd as string[]) : []).map((d) => toIsoDate(String(d)).slice(0, 10))
-                  .filter((d) => d > entities.date && !isWeekendISO(d)).sort().slice(0, 6);
-                for (const d of _datasAd) {
-                  if (nextDays.length >= 3) break;
-                  const _sl = await fetchSlotsForDate(d, doctorId);
-                  if (_sl.length > 0) nextDays.push({ date: d, label: formatDateLabel(d), slots: _sl.slice(0, 4) });
-                }
-                _alemDos7 = nextDays.length > 0;
-              } catch (_) { /* non-blocking */ }
-            }
-
-            if (nextDays.length > 0) {
-              const lines = nextDays.map((d) => `${d.label}: ${d.slots.join(", ")}`).join("\n");
-              // TOM (reclamação do dono, 11/08: "você está respondendo de forma
-              // agressiva"). Esta mensagem passa por bypassAiRewrite, ou seja, sai
-              // literal — e no caso ela NEGOU um dia que a própria Julia
-              // tinha acabado de oferecer ("22/08, que é um sábado, às 08:30, 09:10
-              // e 10:20" → "Cristian Vilela dos Santos não tem horários em 22/08"),
-              // sem pedir desculpa e sem chamar o paciente pelo nome. Ler isso
-              // depois de escolher um horário soa como se a culpa fosse dele.
-              // O texto assume o erro; a lista real de horários continua idêntica.
-              // 13/10 (Simeia pediu "quinta às 11h"): o dia foi pedido pelo PACIENTE — não
-              // há o que desculpar. A desculpa fica para quando a Julia ofereceu o dia.
-              const _jDia65 = janelaDeDatas(currentMessageText || "", getTodayISO_SP());
-              const _diaPedido65 = !!_jDia65 && (
-                ((_jDia65.datas || []) as string[]).includes(entities.date) ||
-                ((_jDia65.diasDaSemana || []) as number[]).includes(new Date(`${entities.date}T12:00:00`).getDay())
-              );
-              const _outros65 = await outrosMedicosDaAreaNoPrazo(String(doctorId || ""), entities.date, somaDiasISO(nextDays[0].date, -1), entities.preferred_period || undefined);
-              const altMsg = _alemDos7
-                ? `Em ${dateLabel} ${doctorName} não tem horário livre, nem nos 7 dias seguintes. As próximas datas que ele tem:\n${lines}` +
-                  (_outros65 || "\n\nAlguma delas te atende? Se quiser, também te coloco na *lista de espera* para avisar se abrir uma vaga antes.")
-                : _ofereciEsse
-                ? textoHorarioPreenchido(dateLabel, String(entities.time || ""), doctorName, lines)
-                : _diaPedido65
-                ? `Em ${dateLabel} ${doctorName} não tem horário livre. Estas são as próximas datas que ele tem:\n${lines}\n\nAlguma delas te atende?`
-                : `Me desculpe — me confundi aqui: ${doctorName} não tem horários em ${dateLabel}. 🙏\n\n` +
-                  `Estas são as datas que ele realmente tem:\n${lines}\n\nAlguma delas te atende?`;
-              // literal (15/10, André: o modelo reescreveu e a lista sumiu — "quer tentar outro dia?")
-              return { status: "needs_info", response: altMsg, error: altMsg, verifiedSchedule: true, bypassAiRewrite: true } as any;
-            }
-
-            // agenda dele sem nada aberto: os outros da mesma área nas próximas 3 semanas, ou a
-            // lista de espera — texto literal, nunca "quer tentar outro dia?" sem opção (29/10)
-            {
-              const _outrosSem = await outrosMedicosDaAreaNoPrazo(String(doctorId || ""), entities.date, somaDiasISO(entities.date, 21), entities.preferred_period || undefined);
-              const _msgSem = `Não encontrei horário livre com ${doctorName} em ${dateLabel} nem nas próximas semanas — a agenda dele ainda não abriu mais datas.` +
-                (_outrosSem || "\n\nSe quiser, te coloco na *lista de espera* dele: se abrir uma vaga, te aviso por aqui.");
-              // o `error` mantém a frase que a Regra 7 conta como negativa de horário
-              return { status: "needs_info", response: _msgSem, error: `Sem horários com ${doctorName} em ${dateLabel} nem nos próximos 7 dias.`, verifiedSchedule: !!_outrosSem, bypassAiRewrite: true } as any;
-            }
+            return await respostaDiaSemVaga(_ofereciEsse);
           }
           console.log(`[Webhook] Step 6.5: Time ${entities.time} validated OK in slots [${realSlots.join(",")}]`);
         }
