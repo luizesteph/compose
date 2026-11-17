@@ -1736,6 +1736,84 @@ export function ehSaudacaoPura(texto: unknown): boolean {
 // (caso Nirya 01/09 21:20, caso Cecilia 14:48, caso das 14:57) — e o horário
 // continuava livre na agenda.
 //
+// ============================================================================
+// horariosDoCalendario — UMA leitura da agenda do Amigo (16/11/2026, etapa 2, parte B)
+// ============================================================================
+// O `calendar?place_id=&event_id=&user_id=` devolve a agenda da CLÍNICA INTEIRA, seja qual
+// for o médico pedido (medido em 16/11: as 18 respostas — 9 médicos × 2 tipos de consulta —
+// são idênticas: 65 dias, 10 médicos, 2.327 vagas). Quem separa por médico é quem lê.
+//
+// Essa leitura estava copiada em NOVE pontos do index.ts (lista de datas, horários do dia,
+// busca com vários médicos, remarcação, três conferências do cadastro…), cada cópia com um
+// conjunto diferente de proteções: três não tinham a regra do bloco sem médico, duas não
+// liam o formato alternativo, e as do cadastro passaram meses lendo a chave errada (ver
+// horaDoSlot, abaixo). Agora há uma leitura só, com todas:
+//   • a chave do dia: date | day | data;
+//   • vagas por médico em slotsByUser (e as três outras grafias), filtradas pelo médico;
+//   • FAIL-CLOSED (30/06, conversa 76): bloco sem identificação de médico numa resposta com
+//     vários médicos não é de ninguém — fica de fora (entrava a mesma lista para todos);
+//   • formato plano (slots direto no dia) e o dia que traz um horário só;
+//   • horários sem repetição, em ordem.
+// Devolve dia (como veio, "AAAA-MM-DD") → horários "HH:MM". Dia sem data fica na chave "".
+// Sem `medicoId`, não filtra por médico.
+export function horariosDoCalendario(calData: unknown, medicoId?: string | number | null): Map<string, string[]> {
+  const porDia = new Map<string, string[]>();
+  if (!Array.isArray(calData)) return porDia;
+  const alvo = medicoId === undefined || medicoId === null || medicoId === "" ? "" : String(medicoId);
+  const hora = (slot: Record<string, unknown>): string | null => {
+    const bruto = String(slot.start_time || slot.startTime || slot.start || slot.time || slot.hour || slot.hora || "");
+    const m = bruto.match(/(\d{2}:\d{2})/);
+    return m ? m[1] : null;
+  };
+  for (const dia of calData as Array<Record<string, unknown>>) {
+    if (!dia || typeof dia !== "object") continue;
+    const chave = String(dia.date || dia.day || dia.data || "");
+    const horarios: string[] = [];
+    const porMedico = (dia.slotsByUser || dia.slots_by_user || dia.slotsbyuser || dia.SlotsByUser) as
+      | Array<Record<string, unknown>>
+      | undefined;
+    if (porMedico && Array.isArray(porMedico)) {
+      for (const bloco of porMedico) {
+        const user = (bloco.user || bloco.User) as Record<string, unknown> | undefined;
+        const idDoBloco = user?.id || user?.user_id || user?.Id || bloco.user_id || bloco.userId;
+        if (alvo && idDoBloco && String(idDoBloco) !== alvo) continue;
+        if (alvo && !idDoBloco && porMedico.length > 1) continue; // fail-closed
+        const vagas = (bloco.slots || bloco.Slots || bloco.available_slots) as Array<Record<string, unknown>> | undefined;
+        if (vagas && Array.isArray(vagas)) {
+          for (const vaga of vagas) {
+            const h = hora(vaga);
+            if (h) horarios.push(h);
+          }
+        }
+      }
+    } else {
+      const diretas = (dia.slots || dia.Slots || dia.available_slots || dia.availableSlots) as
+        | Array<Record<string, unknown>>
+        | undefined;
+      if (diretas && Array.isArray(diretas)) {
+        for (const vaga of diretas) {
+          const idDaVaga = vaga.user_id || vaga.userId || (vaga.user as Record<string, unknown> | undefined)?.id;
+          if (alvo && idDaVaga && String(idDaVaga) !== alvo) continue;
+          const h = hora(vaga);
+          if (h) horarios.push(h);
+        }
+      } else if (dia.available === true || dia.status === "available" || dia.status === "AVAILABLE") {
+        const h = hora(dia);
+        if (h) horarios.push(h);
+      }
+    }
+    if (horarios.length === 0) continue;
+    const juntos = [...(porDia.get(chave) || []), ...horarios];
+    porDia.set(chave, [...new Set(juntos)].sort());
+  }
+  return porDia;
+}
+
+/** Os horários de UM dia na agenda lida (a chave vazia é o dia que veio sem data — vale para qualquer dia pedido). */
+export function horariosDoDia(porDia: Map<string, string[]>, diaISO: string): string[] {
+  return [...new Set([...(porDia.get(diaISO) || []), ...(porDia.get("") || [])])].sort();
+}
+
 // Um único leitor, para a chave não voltar a divergir. Aceita string solta também.
 export function horaDoSlot(slot: unknown): string | null {
   const bruto =

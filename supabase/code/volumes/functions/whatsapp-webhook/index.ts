@@ -73,6 +73,8 @@ import {
   normalizeApiResponse,
   fetchWithTimeout,
   horaDoSlot,
+  horariosDoCalendario,
+  horariosDoDia,
   mesmoMedico,
   slotJaPassou,
   podeCancelarSemPerguntar,
@@ -4818,71 +4820,12 @@ async function executeAction(
                 );
                 const calData = normalizeApiResponse(calResult) as Array<Record<string, unknown>>;
 
-                // Parse slots from calendar
+                // Parse slots from calendar — uma leitura só da agenda (horariosDoCalendario, helpers.ts)
                 const slotsMap = new Map<string, string[]>();
-                if (Array.isArray(calData)) {
-                  for (const dayObj of calData) {
-                    const dateKey = String(dayObj.date || dayObj.day || dayObj.data || "");
-                    if (!dateKey) continue;
-                    if (_listGateMin && dateKey.slice(0, 10) < _listGateMin) continue; // piso do retorno (convênio)
-                    const times: string[] = [];
-                    const slotsByUser = (dayObj.slotsByUser || dayObj.slots_by_user || dayObj.slotsbyuser) as
-                      | Array<Record<string, unknown>>
-                      | undefined;
-                    if (slotsByUser && Array.isArray(slotsByUser)) {
-                      for (const userSlots of slotsByUser) {
-                        const user = (userSlots.user || userSlots.User) as Record<string, unknown> | undefined;
-                        const userId = user?.id || userSlots.user_id || userSlots.userId;
-                        if (userId && String(userId) !== String(doc.id)) continue;
-                        // Fail-closed (30/06 conv 76): bloco SEM userId numa resposta
-                        // multi-usuario nao e' atribuivel ao medico consultado — pular
-                        // em vez de incluir (incluia a mesma lista pra medicos diferentes).
-                        if (!userId && slotsByUser.length > 1) continue;
-                        const slots = (userSlots.slots || userSlots.Slots || userSlots.available_slots) as
-                          | Array<Record<string, unknown>>
-                          | undefined;
-                        if (slots && Array.isArray(slots)) {
-                          for (const slot of slots) {
-                            const raw = String(
-                              slot.start_time ||
-                                slot.startTime ||
-                                slot.start ||
-                                slot.time ||
-                                slot.hour ||
-                                slot.hora ||
-                                "",
-                            );
-                            const match = raw.match(/(\d{2}:\d{2})/);
-                            if (match) times.push(match[1]);
-                          }
-                        }
-                      }
-                    } else {
-                      const directSlots = (dayObj.slots || dayObj.Slots || dayObj.available_slots) as
-                        | Array<Record<string, unknown>>
-                        | undefined;
-                      if (directSlots && Array.isArray(directSlots)) {
-                        for (const slot of directSlots) {
-                          const slotUserId = slot.user_id || slot.userId || (slot.user as Record<string, unknown>)?.id;
-                          if (slotUserId && String(slotUserId) !== String(doc.id)) continue;
-                          const raw = String(
-                            slot.start_time ||
-                              slot.startTime ||
-                              slot.start ||
-                              slot.time ||
-                              slot.hour ||
-                              slot.hora ||
-                              "",
-                          );
-                          const match = raw.match(/(\d{2}:\d{2})/);
-                          if (match) times.push(match[1]);
-                        }
-                      }
-                    }
-                    if (times.length > 0) {
-                      slotsMap.set(dateKey, [...new Set(times)].sort());
-                    }
-                  }
+                for (const [dateKey, times] of horariosDoCalendario(calData, doc.id as any)) {
+                  if (!dateKey) continue;
+                  if (_listGateMin && dateKey.slice(0, 10) < _listGateMin) continue; // piso do retorno (convênio)
+                  slotsMap.set(dateKey, times);
                 }
 
                 // Build slots array (limited)
@@ -5100,68 +5043,8 @@ async function executeAction(
               `[Webhook] Calendar ${date} response (status ${calResult.status}): ${JSON.stringify(calData).substring(0, 500)}`,
             );
             if (Array.isArray(calData)) {
-              const times: string[] = [];
-              if (calData.length > 0) {
-                console.log(`[Webhook] fetchSlotsForDate dayObj[0] keys: ${Object.keys(calData[0]).join(", ")}`);
-              }
-              for (const dayObj of calData) {
-                // Filter by the correct date in the response (API may return multiple days)
-                const dayDate = String(dayObj.date || dayObj.day || dayObj.data || "");
-                if (dayDate && dayDate !== isoDate) continue;
-
-                const slotsByUser = (dayObj.slotsByUser ||
-                  dayObj.slots_by_user ||
-                  dayObj.slotsbyuser ||
-                  dayObj.SlotsByUser) as Array<Record<string, unknown>> | undefined;
-                if (slotsByUser && Array.isArray(slotsByUser)) {
-                  for (const userSlots of slotsByUser) {
-                    const user = (userSlots.user || userSlots.User) as Record<string, unknown> | undefined;
-                    const userId = user?.id || user?.user_id || user?.Id || userSlots.user_id || userSlots.userId;
-                    if (targetDoctorId && userId && String(userId) !== String(targetDoctorId)) continue;
-                    // Fail-closed (30/06 conv 76): bloco sem userId em resposta multi-usuario.
-                    if (targetDoctorId && !userId && slotsByUser.length > 1) continue;
-                    const slots = (userSlots.slots || userSlots.Slots || userSlots.available_slots) as
-                      | Array<Record<string, unknown>>
-                      | undefined;
-                    if (slots && Array.isArray(slots)) {
-                      for (const slot of slots) {
-                        const raw = String(
-                          slot.start_time || slot.startTime || slot.start || slot.time || slot.hour || slot.hora || "",
-                        );
-                        const match = raw.match(/(\d{2}:\d{2})/);
-                        if (match) times.push(match[1]);
-                      }
-                    }
-                  }
-                } else {
-                  // Fallback: flat slots on dayObj
-                  const directSlots = (dayObj.slots ||
-                    dayObj.Slots ||
-                    dayObj.available_slots ||
-                    dayObj.availableSlots) as Array<Record<string, unknown>> | undefined;
-                  if (directSlots && Array.isArray(directSlots)) {
-                    for (const slot of directSlots) {
-                      const slotUserId = slot.user_id || slot.userId || (slot.user as Record<string, unknown>)?.id;
-                      if (targetDoctorId && slotUserId && String(slotUserId) !== String(targetDoctorId)) continue;
-                      const raw = String(
-                        slot.start_time || slot.startTime || slot.start || slot.time || slot.hour || slot.hora || "",
-                      );
-                      const match = raw.match(/(\d{2}:\d{2})/);
-                      if (match) times.push(match[1]);
-                    }
-                  } else if (
-                    dayObj.available === true ||
-                    dayObj.status === "available" ||
-                    dayObj.status === "AVAILABLE"
-                  ) {
-                    const raw = String(
-                      dayObj.start_time || dayObj.startTime || dayObj.time || dayObj.hour || dayObj.hora || "",
-                    );
-                    const match = raw.match(/(\d{2}:\d{2})/);
-                    if (match) times.push(match[1]);
-                  }
-                }
-              }
+              // uma leitura só da agenda (horariosDoCalendario, helpers.ts)
+              const times = horariosDoDia(horariosDoCalendario(calData, targetDoctorId), isoDate);
               // Remove duplicates, sort, apply period filter
               let unique = [...new Set(times)].sort();
               if (periodFilter === "manha") {
@@ -5376,97 +5259,13 @@ async function executeAction(
                 const calData = normalizeApiResponse(calResult) as Array<Record<string, unknown>>;
                 console.log(`[Webhook] Calendar returned ${Array.isArray(calData) ? calData.length : 0} day objects`);
 
-                // 3. Build slotsMap: date ISO → time strings[]
+                // 3. Build slotsMap: date ISO → time strings[] — uma leitura só da agenda
+                //    (horariosDoCalendario, helpers.ts)
                 const slotsMap = new Map<string, string[]>();
-                if (Array.isArray(calData)) {
-                  // Log the FIRST dayObj to understand the real API structure
-                  if (calData.length > 0) {
-                    console.log("[Webhook] First dayObj structure: " + JSON.stringify(calData[0]).substring(0, 1500));
-                    // Also log all top-level keys
-                    console.log("[Webhook] dayObj keys: " + Object.keys(calData[0]).join(", "));
-                  }
-
-                  for (const dayObj of calData) {
-                    const dateKey = String(dayObj.date || dayObj.day || dayObj.data || "");
-                    if (!dateKey) continue;
-                    if (_listGateMin && dateKey.slice(0, 10) < _listGateMin) continue; // piso do retorno (convênio)
-                    const times: string[] = [];
-
-                    // Try multiple key names for slotsByUser (camelCase, snake_case, lowercase)
-                    const slotsByUser = (dayObj.slotsByUser ||
-                      dayObj.slots_by_user ||
-                      dayObj.slotsbyuser ||
-                      dayObj.SlotsByUser) as Array<Record<string, unknown>> | undefined;
-
-                    if (slotsByUser && Array.isArray(slotsByUser)) {
-                      for (const userSlots of slotsByUser) {
-                        // Try multiple key names for user id
-                        const user = (userSlots.user || userSlots.User) as Record<string, unknown> | undefined;
-                        const userId = user?.id || user?.user_id || user?.Id || userSlots.user_id || userSlots.userId;
-                        if (userId && String(userId) !== String(doctorId)) continue;
-                        // Fail-closed (30/06 conv 76): bloco sem userId em resposta multi-usuario.
-                        if (!userId && slotsByUser.length > 1) continue;
-                        // Try multiple key names for slots array
-                        const slots = (userSlots.slots || userSlots.Slots || userSlots.available_slots) as
-                          | Array<Record<string, unknown>>
-                          | undefined;
-                        if (slots && Array.isArray(slots)) {
-                          for (const slot of slots) {
-                            const raw = String(
-                              slot.start_time ||
-                                slot.startTime ||
-                                slot.start ||
-                                slot.time ||
-                                slot.hour ||
-                                slot.hora ||
-                                "",
-                            );
-                            const match = raw.match(/(\d{2}:\d{2})/);
-                            if (match) times.push(match[1]);
-                          }
-                        }
-                      }
-                    } else {
-                      // Fallback: try flat slots directly on dayObj
-                      const directSlots = (dayObj.slots ||
-                        dayObj.Slots ||
-                        dayObj.available_slots ||
-                        dayObj.availableSlots) as Array<Record<string, unknown>> | undefined;
-                      if (directSlots && Array.isArray(directSlots)) {
-                        for (const slot of directSlots) {
-                          // Check if slot belongs to the right doctor
-                          const slotUserId = slot.user_id || slot.userId || (slot.user as Record<string, unknown>)?.id;
-                          if (slotUserId && String(slotUserId) !== String(doctorId)) continue;
-                          const raw = String(
-                            slot.start_time ||
-                              slot.startTime ||
-                              slot.start ||
-                              slot.time ||
-                              slot.hour ||
-                              slot.hora ||
-                              "",
-                          );
-                          const match = raw.match(/(\d{2}:\d{2})/);
-                          if (match) times.push(match[1]);
-                        }
-                      } else if (
-                        dayObj.available === true ||
-                        dayObj.status === "available" ||
-                        dayObj.status === "AVAILABLE"
-                      ) {
-                        // Ultra-fallback: single time on dayObj itself
-                        const raw = String(
-                          dayObj.start_time || dayObj.startTime || dayObj.time || dayObj.hour || dayObj.hora || "",
-                        );
-                        const match = raw.match(/(\d{2}:\d{2})/);
-                        if (match) times.push(match[1]);
-                      }
-                    }
-
-                    if (times.length > 0) {
-                      slotsMap.set(dateKey, [...new Set(times)].sort());
-                    }
-                  }
+                for (const [dateKey, times] of horariosDoCalendario(calData, doctorId)) {
+                  if (!dateKey) continue;
+                  if (_listGateMin && dateKey.slice(0, 10) < _listGateMin) continue; // piso do retorno (convênio)
+                  slotsMap.set(dateKey, times);
                 }
                 console.log(
                   `[Webhook] slotsMap has ${slotsMap.size} dates with slots. Sample: ${JSON.stringify([...slotsMap.entries()].slice(0, 3)).substring(0, 500)}`,
@@ -5741,61 +5540,10 @@ async function executeAction(
                       );
                       const fbCalData = normalizeApiResponse(fbCal) as Array<Record<string, unknown>>;
                       const fbSlotsMap = new Map<string, string[]>();
-                      if (Array.isArray(fbCalData)) {
-                        for (const dayObj of fbCalData) {
-                          const dateKey = String(dayObj.date || dayObj.day || dayObj.data || "");
-                          if (!dateKey) continue;
-                          if (_listGateMin && dateKey.slice(0, 10) < _listGateMin) continue; // piso do retorno (convênio)
-                          const times: string[] = [];
-                          const slotsByUser = (dayObj.slotsByUser || dayObj.slots_by_user || dayObj.slotsbyuser) as
-                            | Array<Record<string, unknown>>
-                            | undefined;
-                          if (slotsByUser && Array.isArray(slotsByUser)) {
-                            for (const userSlots of slotsByUser) {
-                              const user = (userSlots.user || userSlots.User) as Record<string, unknown> | undefined;
-                              const userId = user?.id || userSlots.user_id || userSlots.userId;
-                              if (userId && String(userId) !== String(doc.id)) continue;
-                              const slots = (userSlots.slots || userSlots.Slots || userSlots.available_slots) as
-                                | Array<Record<string, unknown>>
-                                | undefined;
-                              if (slots && Array.isArray(slots)) {
-                                for (const slot of slots) {
-                                  const raw = String(
-                                    slot.start_time ||
-                                      slot.startTime ||
-                                      slot.start ||
-                                      slot.time ||
-                                      slot.hour ||
-                                      slot.hora ||
-                                      "",
-                                  );
-                                  const match = raw.match(/(\d{2}:\d{2})/);
-                                  if (match) times.push(match[1]);
-                                }
-                              }
-                            }
-                          } else {
-                            const directSlots = (dayObj.slots || dayObj.Slots || dayObj.available_slots) as
-                              | Array<Record<string, unknown>>
-                              | undefined;
-                            if (directSlots && Array.isArray(directSlots)) {
-                              for (const slot of directSlots) {
-                                const raw = String(
-                                  slot.start_time ||
-                                    slot.startTime ||
-                                    slot.start ||
-                                    slot.time ||
-                                    slot.hour ||
-                                    slot.hora ||
-                                    "",
-                                );
-                                const match = raw.match(/(\d{2}:\d{2})/);
-                                if (match) times.push(match[1]);
-                              }
-                            }
-                          }
-                          if (times.length > 0) fbSlotsMap.set(dateKey, [...new Set(times)].sort());
-                        }
+                      for (const [dateKey, times] of horariosDoCalendario(fbCalData, doc.id as any)) {
+                        if (!dateKey) continue;
+                        if (_listGateMin && dateKey.slice(0, 10) < _listGateMin) continue; // piso do retorno (convênio)
+                        fbSlotsMap.set(dateKey, times);
                       }
                       const weekDaysFb = ["domingo", "segunda", "terça", "quarta", "quinta", "sexta", "sábado"];
                       const docSlots: Array<{ label: string; date: string; times: string[] }> = [];
@@ -8037,35 +7785,10 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               const calRes = await tryFetch(calUrl, amigoToken);
               const calData = normalizeApiResponse(calRes) as Array<Record<string, unknown>>;
 
-              // 3) Build slotsMap by date
+              // 3) Build slotsMap by date — uma leitura só da agenda (horariosDoCalendario, helpers.ts)
               const slotsMap = new Map<string, string[]>();
-              if (Array.isArray(calData)) {
-                for (const dayObj of calData) {
-                  const dayDate = String(dayObj.date || dayObj.day || dayObj.data || "");
-                  if (!dayDate) continue;
-                  const slotsByUser = (dayObj.slotsByUser ||
-                    dayObj.slots_by_user ||
-                    (dayObj as any).SlotsByUser) as Array<Record<string, unknown>> | undefined;
-                  const times: string[] = [];
-                  if (slotsByUser && Array.isArray(slotsByUser)) {
-                    for (const userSlots of slotsByUser) {
-                      const u = (userSlots.user || (userSlots as any).User) as Record<string, unknown> | undefined;
-                      const uid = u?.id || (userSlots as any).user_id;
-                      if (origDoctorId && uid && String(uid) !== String(origDoctorId)) continue;
-                      // Fail-closed (30/06 conv 76): bloco sem userId em resposta multi-usuario.
-                      if (origDoctorId && !uid && slotsByUser.length > 1) continue;
-                      const slots = (userSlots.slots || (userSlots as any).Slots) as Array<Record<string, unknown>> | undefined;
-                      if (slots && Array.isArray(slots)) {
-                        for (const s of slots) {
-                          const raw = String(s.start_time || s.startTime || s.start || s.time || "");
-                          const m = raw.match(/(\d{2}:\d{2})/);
-                          if (m) times.push(m[1]);
-                        }
-                      }
-                    }
-                  }
-                  if (times.length > 0) slotsMap.set(dayDate, [...new Set(times)].sort());
-                }
+              for (const [dayDate, times] of horariosDoCalendario(calData, origDoctorId)) {
+                if (dayDate) slotsMap.set(dayDate, times);
               }
               // AGENDA VAZIA COM O TIPO DA CONSULTA (20/10, Nathalia): consulta marcada pela
               // equipe com um tipo que a API do robô não expõe (484489, 478248…) devolve a
@@ -8084,24 +7807,8 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                     _agendaEmprestadaDaConsulta = true;
                     const _calRes2 = await tryFetch(`calendar?place_id=${origPlaceId}&event_id=${_consId}&user_id=${origDoctorId}&company_id=${companyId}`, amigoToken);
                     const _cal2 = normalizeApiResponse(_calRes2) as Array<Record<string, unknown>>;
-                    if (Array.isArray(_cal2)) {
-                      for (const dayObj of _cal2) {
-                        const dayDate = String(dayObj.date || dayObj.day || dayObj.data || "");
-                        if (!dayDate) continue;
-                        const sbu = (dayObj.slotsByUser || dayObj.slots_by_user || (dayObj as any).SlotsByUser) as Array<Record<string, unknown>> | undefined;
-                        const times: string[] = [];
-                        for (const userSlots of Array.isArray(sbu) ? sbu : []) {
-                          const u = (userSlots.user || (userSlots as any).User) as Record<string, unknown> | undefined;
-                          const uid = u?.id || (userSlots as any).user_id;
-                          if (uid && String(uid) !== String(origDoctorId)) continue;
-                          if (!uid && (sbu || []).length > 1) continue;
-                          for (const sl of ((userSlots.slots || (userSlots as any).Slots) as Array<Record<string, unknown>> | undefined) || []) {
-                            const mm = String(sl.start_time || sl.startTime || sl.start || sl.time || "").match(/(\d{2}:\d{2})/);
-                            if (mm) times.push(mm[1]);
-                          }
-                        }
-                        if (times.length > 0) slotsMap.set(dayDate, [...new Set(times)].sort());
-                      }
+                    for (const [dayDate, times] of horariosDoCalendario(_cal2, origDoctorId)) {
+                      if (dayDate) slotsMap.set(dayDate, times);
                     }
                   }
                 } catch (e) {
@@ -9079,33 +8786,8 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                     const calUrl = `calendar?place_id=${autoPlaceId}&event_id=${autoEventId}&user_id=${autoDocId}&company_id=${companyId}`;
                     const calRes = await tryFetch(calUrl, amigoToken);
                     const calData = normalizeApiResponse(calRes) as Array<Record<string, unknown>>;
-                    const realSlots: string[] = [];
-                    if (Array.isArray(calData)) {
-                      for (const dayObj of calData) {
-                        const dayDate = String(dayObj.date || dayObj.day || dayObj.data || "");
-                        if (dayDate && dayDate !== autoIsoDate) continue;
-                        const slotsByUser = (dayObj.slotsByUser || dayObj.slots_by_user) as
-                          | Array<Record<string, unknown>>
-                          | undefined;
-                        if (slotsByUser && Array.isArray(slotsByUser)) {
-                          for (const userSlots of slotsByUser) {
-                            const user = userSlots.user as Record<string, unknown> | undefined;
-                            const userId = user?.id || userSlots.user_id;
-                            if (userId && String(userId) !== String(autoDocId)) continue;
-                            const slots = (userSlots.slots || userSlots.available_slots) as
-                              | Array<Record<string, unknown>>
-                              | undefined;
-                            if (slots && Array.isArray(slots)) {
-                              for (const slot of slots) {
-                                // A chave do Amigo é "start" (ver horaDoSlot em helpers.ts).
-                                const _h = horaDoSlot(slot);
-                                if (_h) realSlots.push(_h);
-                              }
-                            }
-                          }
-                        }
-                      }
-                    }
+                    // uma leitura só da agenda (horariosDoCalendario, helpers.ts)
+                    const realSlots = horariosDoDia(horariosDoCalendario(calData, autoDocId), autoIsoDate);
                     const uniqueSlots = [...new Set(realSlots)].sort();
                     // === A VAGA QUE "SUMIU" PODE SER A DELA MESMA (02/09, caso Maria Inês) ===
                     // 16:57 a Julia agendou 10:40 e disse "Prontinho! Consulta confirmada".
@@ -9188,28 +8870,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                         const retryUrl = `calendar?place_id=${autoPlaceId}&event_id=${autoEventId}&user_id=${autoDocId}&company_id=${companyId}&start_date=${autoIsoDate}&end_date=${autoIsoDate}`;
                         const retryRes = await tryFetch(retryUrl, amigoToken);
                         const retryData = normalizeApiResponse(retryRes) as Array<Record<string, unknown>>;
-                        const retrySlots: string[] = [];
-                        if (Array.isArray(retryData)) {
-                          for (const dayObj of retryData) {
-                            const dayDate = String(dayObj.date || dayObj.day || dayObj.data || "");
-                            if (dayDate && dayDate !== autoIsoDate) continue;
-                            const sbu = (dayObj.slotsByUser || dayObj.slots_by_user) as Array<Record<string, unknown>> | undefined;
-                            if (Array.isArray(sbu)) {
-                              for (const us of sbu) {
-                                const u = us.user as Record<string, unknown> | undefined;
-                                const uid = u?.id || us.user_id;
-                                if (uid && String(uid) !== String(autoDocId)) continue;
-                                const sl = (us.slots || us.available_slots) as Array<Record<string, unknown>> | undefined;
-                                if (Array.isArray(sl)) {
-                                  for (const s of sl) {
-                                    const _h = horaDoSlot(s);
-                                    if (_h) retrySlots.push(_h);
-                                  }
-                                }
-                              }
-                            }
-                          }
-                        }
+                        const retrySlots = horariosDoDia(horariosDoCalendario(retryData, autoDocId), autoIsoDate);
                         const retryUnique = [...new Set(retrySlots)].sort();
                         if (retryUnique.length > 0) {
                           console.log(
@@ -9394,38 +9055,8 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                     );
                     const calData = normalizeApiResponse(calRes) as Array<Record<string, unknown>>;
                     const slotsMap2 = new Map<string, string[]>();
-                    if (Array.isArray(calData)) {
-                      for (const dayObj of calData) {
-                        const dateKey = String(dayObj.date || dayObj.day || dayObj.data || "");
-                        if (!dateKey) continue;
-                        const times: string[] = [];
-                        const slotsByUser = (dayObj.slotsByUser || dayObj.slots_by_user || dayObj.slotsbyuser || dayObj.SlotsByUser) as Array<Record<string, unknown>> | undefined;
-                        if (slotsByUser && Array.isArray(slotsByUser)) {
-                          for (const userSlots of slotsByUser) {
-                            const user = (userSlots.user || userSlots.User) as Record<string, unknown> | undefined;
-                            const userId2 = user?.id || userSlots.user_id || userSlots.userId;
-                            if (userId2 && String(userId2) !== regDocId) continue;
-                            const slots = (userSlots.slots || userSlots.Slots || userSlots.available_slots) as Array<Record<string, unknown>> | undefined;
-                            if (slots && Array.isArray(slots)) {
-                              for (const slot of slots) {
-                                const raw = String(slot.start_time || slot.startTime || slot.start || slot.time || slot.hour || slot.hora || "");
-                                const m = raw.match(/(\d{2}:\d{2})/);
-                                if (m) times.push(m[1]);
-                              }
-                            }
-                          }
-                        } else {
-                          const directSlots = (dayObj.slots || dayObj.Slots || dayObj.available_slots) as Array<Record<string, unknown>> | undefined;
-                          if (directSlots && Array.isArray(directSlots)) {
-                            for (const slot of directSlots) {
-                              const raw = String(slot.start_time || slot.startTime || slot.start || slot.time || slot.hour || slot.hora || "");
-                              const m = raw.match(/(\d{2}:\d{2})/);
-                              if (m) times.push(m[1]);
-                            }
-                          }
-                        }
-                        if (times.length > 0) slotsMap2.set(dateKey, [...new Set(times)].sort());
-                      }
+                    for (const [dateKey, times] of horariosDoCalendario(calData, regDocId)) {
+                      if (dateKey) slotsMap2.set(dateKey, times);
                     }
                     const toIso2 = (ds: string) => ds.includes("/") ? (() => { const [d, m, y] = ds.split("/"); return `${y}-${m}-${d}`; })() : ds;
                     const weekDays2 = ["domingo", "segunda", "terça", "quarta", "quinta", "sexta", "sábado"];
@@ -9599,32 +9230,8 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                         const calUrl = `calendar?place_id=${dupPlaceId}&event_id=${dupEventId}&user_id=${dupDocId}&company_id=${companyId}`;
                         const calRes = await tryFetch(calUrl, amigoToken);
                         const calData = normalizeApiResponse(calRes) as Array<Record<string, unknown>>;
-                        const realSlots: string[] = [];
-                        if (Array.isArray(calData)) {
-                          for (const dayObj of calData) {
-                            const dayDate = String(dayObj.date || dayObj.day || dayObj.data || "");
-                            if (dayDate && dayDate !== dupIsoDate) continue;
-                            const slotsByUser = (dayObj.slotsByUser || dayObj.slots_by_user) as
-                              | Array<Record<string, unknown>>
-                              | undefined;
-                            if (slotsByUser && Array.isArray(slotsByUser)) {
-                              for (const userSlots of slotsByUser) {
-                                const user = userSlots.user as Record<string, unknown> | undefined;
-                                const userId = user?.id || userSlots.user_id;
-                                if (userId && String(userId) !== dupDocId) continue;
-                                const slots = (userSlots.slots || userSlots.available_slots) as
-                                  | Array<Record<string, unknown>>
-                                  | undefined;
-                                if (slots && Array.isArray(slots)) {
-                                  for (const slot of slots) {
-                                    const _h = horaDoSlot(slot);
-                                    if (_h) realSlots.push(_h);
-                                  }
-                                }
-                              }
-                            }
-                          }
-                        }
+                        // uma leitura só da agenda (horariosDoCalendario, helpers.ts)
+                        const realSlots = horariosDoDia(horariosDoCalendario(calData, dupDocId), dupIsoDate);
                         const uniqueSlots = [...new Set(realSlots)].sort();
                         if (uniqueSlots.length > 0 && !uniqueSlots.includes(dupIsoTime)) {
                           console.log(
@@ -9927,45 +9534,10 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                     const calResult = await tryFetch(calUrl, amigoToken);
                     const calData = normalizeApiResponse(calResult) as Array<Record<string, unknown>>;
 
-                    // Build slotsMap
+                    // Build slotsMap — uma leitura só da agenda (horariosDoCalendario, helpers.ts)
                     const slotsMap = new Map<string, string[]>();
-                    if (Array.isArray(calData)) {
-                      for (const dayObj of calData) {
-                        const dateKey = String(dayObj.date || dayObj.day || dayObj.data || "");
-                        if (!dateKey) continue;
-                        const times: string[] = [];
-                        const slotsByUser = (dayObj.slotsByUser ||
-                          dayObj.slots_by_user ||
-                          dayObj.slotsbyuser ||
-                          dayObj.SlotsByUser) as Array<Record<string, unknown>> | undefined;
-                        if (slotsByUser && Array.isArray(slotsByUser)) {
-                          for (const userSlots of slotsByUser) {
-                            const user = (userSlots.user || userSlots.User) as Record<string, unknown> | undefined;
-                            const userId =
-                              user?.id || user?.user_id || user?.Id || userSlots.user_id || userSlots.userId;
-                            if (userId && String(userId) !== String(singleDocId)) continue;
-                            const slots = (userSlots.slots || userSlots.Slots || userSlots.available_slots) as
-                              | Array<Record<string, unknown>>
-                              | undefined;
-                            if (slots && Array.isArray(slots)) {
-                              for (const slot of slots) {
-                                const raw = String(
-                                  slot.start_time ||
-                                    slot.startTime ||
-                                    slot.start ||
-                                    slot.time ||
-                                    slot.hour ||
-                                    slot.hora ||
-                                    "",
-                                );
-                                const m = raw.match(/(\d{2}:\d{2})/);
-                                if (m) times.push(m[1]);
-                              }
-                            }
-                          }
-                        }
-                        if (times.length > 0) slotsMap.set(dateKey, [...new Set(times)].sort());
-                      }
+                    for (const [dateKey, times] of horariosDoCalendario(calData, singleDocId)) {
+                      if (dateKey) slotsMap.set(dateKey, times);
                     }
 
                     // Build response with first 2 dates
