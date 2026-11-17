@@ -251,6 +251,7 @@ import { FILTRO_ORIGEM_DO_SITE, FILTRO_ORIGEM_DO_SITE_NO_OR } from "../_shared/o
 import { liberadoVaiParaAtendente, INTENT_AVISO_DE_LIBERACAO } from "../_shared/liberados.ts";
 import { chaveDoTelefone, ehSimDeConfirmacao, ehCancelamentoClaro, textoConfirmado, textoCancelado, consultaUnicaDaMensagem, HORAS_VALIDADE_DO_SIM, querRemarcarNaConfirmacao, cabecalhoRemarcarDaConfirmacao, MARCA_REMARCAR_DA_CONFIRMACAO, RODAPE_REMARCAR_DA_CONFIRMACAO, textoRemarcadaDaConfirmacao } from "../_shared/confirmacao.ts";
 import { canalVivo, enviarTexto } from "../_shared/zpro.ts";
+import { pegarVezDaConversa, soltarVezDaConversa, montarLoteDaVez, VEZ_JANELA_DO_LOTE_MS } from "../_shared/vez-da-conversa.ts";
 import { LLM_MODEL, LLM_MODEL_FALLBACK, LLM_MODEL_RESPOSTA, LLM_GATEWAY, ehErroDeModeloDesconhecido, llmApiKey, llmHeaders, LLM_USAGE_INCLUDE, custoDaChamada } from "../_shared/llm.ts";
 import { STT_ENDPOINT, STT_MODEL, STT_LANGUAGE, STT_RESPONSE_FORMAT, sttApiKey } from "../_shared/stt.ts";
 import {
@@ -13590,7 +13591,56 @@ Deno.serve(async (req) => {
     let avanceaiBaseUrl: string | null = null;
     let avanceaiApiId: string | null = null;
     let avanceaiBearerToken: string | null = null;
+    // a vez da conversa (ver abaixo): devolvida no finally deste bloco, por qualquer saída
+    let _vezDaConversaPega = false;
     try {
+      // === UMA EXECUÇÃO POR VEZ POR CONVERSA (16/11, etapa 3 do plano de 15/11) ===
+      // O lote acima junta o que chega com menos de 8 s de intervalo. O que chega DEPOIS,
+      // com a anterior ainda sendo respondida (10 a 25 s), rodava em paralelo e respondia sem
+      // saber o que a outra fez: "seu retorno foi agendado" e, 16 s depois, "entendi que
+      // você deseja o retorno…" (16/11); o CPF numa mensagem suprimida e o nome na seguinte,
+      // com a Julia pedindo o CPF três vezes (Raquel, 13/11). Aqui a execução espera a
+      // anterior TERMINAR e, com a vez na mão, leva junto o que ficou sem resposta (pendentes
+      // e suprimidas logo antes dela). Regras e limites em _shared/vez-da-conversa.ts.
+      // A trava nunca segura a Julia: erro, tabela ausente ou espera além do limite → segue
+      // sem trava, como era antes (e, sem a vez, não junta nada).
+      if (conversationId && !isTestMode) {
+        const _vez = await pegarVezDaConversa(supabase, conversationId, messageId);
+        _vezDaConversaPega = _vez.pegou;
+        if (_vez.motivo !== "livre") {
+          console.log(`[Vez] ${_vez.motivo} (${Math.round(_vez.esperouMs / 1000)}s)${_vez.pegou ? "" : " — seguindo sem trava"}`);
+        }
+        try {
+          const { data: _linhasDaVez } = await supabase
+            .from("webhook_messages")
+            .select("id, direction, action_status, message_text, created_at")
+            .eq("conversation_id", conversationId)
+            .gte("created_at", new Date(Date.now() - 2 * VEZ_JANELA_DO_LOTE_MS - 60_000).toISOString())
+            .order("created_at", { ascending: true })
+            .limit(80);
+          const _loteDaVez = montarLoteDaVez(messageId, (_linhasDaVez || []) as any, messageStr);
+          if (_loteDaVez.sair) {
+            console.log(`[Vez] msg ${messageId} já foi juntada por outra execução — saindo.`);
+            return new Response(JSON.stringify({ status: "batched", message: "Juntada por outra execução" }), {
+              status: 200,
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+          }
+          if (_vez.pegou && _loteDaVez.texto && _loteDaVez.juntar.length > 0) {
+            console.log(`[Vez] juntando ${_loteDaVez.suprimidas} suprimida(s) e ${_loteDaVez.pendentes} pendente(s) nesta mensagem`);
+            messageStr = _loteDaVez.texto;
+            await supabase.from("webhook_messages").update({ message_text: _loteDaVez.texto }).eq("id", messageId);
+            await supabase.from("chat_conversations").update({ last_message: _loteDaVez.texto }).eq("id", conversationId);
+            await supabase
+              .from("webhook_messages")
+              .update({ action_status: "batched", action_error: `Batched into ${messageId} (vez da conversa)` })
+              .in("id", _loteDaVez.juntar);
+          }
+        } catch (e) {
+          console.log(`[Vez] leitura do lote falhou (non-blocking): ${(e as Error).message}`);
+        }
+      }
+
       // Get clinic data
       let tokenQuery = supabase
         .from("clinic_tokens")
@@ -20254,6 +20304,9 @@ Deno.serve(async (req) => {
         status: 200,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
+    } finally {
+      // devolve a vez da conversa — vale para toda saída do bloco acima (return, erro, fim)
+      if (_vezDaConversaPega && conversationId) await soltarVezDaConversa(supabase, conversationId, messageId);
     }
   } catch (e) {
     console.error("[Webhook] Unhandled error:", e);
