@@ -155,6 +155,15 @@ import {
   TEXTO_SEM_ATENDIMENTO_DOMICILIAR,
   perguntaRegraDoRetorno,
   TEXTO_REGRA_DO_RETORNO,
+  EVENTO_RETORNO_ID,
+  podeMarcarComoRetorno,
+  avisaQueJaMudou,
+  TEXTO_OBRIGADA_POR_AVISAR,
+  consultasDaMesmaMensagem,
+  textoDuasConsultasNaConfirmacao,
+  outrosMedicosCitados,
+  textoListaSoDoMedicoDaConsulta,
+  textoSoEsseMedicoNaArea,
   perguntaSeRetornoECobrado,
   TEXTO_RETORNO_COBRADO,
   ofertaNovaDepoisDaMarcacao,
@@ -6890,6 +6899,61 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           });
           console.log(`[Webhook] limite - situação=${_limite.tipo} transferir=${_limite.transferir}`);
 
+          // RETORNO PELA JULIA (17/11, decisão do dono) — ver podeMarcarComoRetorno em helpers.ts.
+          // Mesmo horário, mesmo médico, tipo RETORNO e sem convênio (como a equipe marca). Se o
+          // Amigo recusar também, segue o caminho de sempre: o texto e a passagem para a equipe.
+          if (podeMarcarComoRetorno(_limite.tipo)) {
+            const _bodyRetorno: Record<string, unknown> = {
+              ...attendanceBody,
+              event_id: typeof eventIdParaPost === "number" ? Number(EVENTO_RETORNO_ID) : EVENTO_RETORNO_ID,
+            };
+            delete _bodyRetorno.insurance_id;
+            console.log(`[Retorno] consulta recente — tentando marcar como RETORNO: ${JSON.stringify(_bodyRetorno)}`);
+            const _retRes = await tryFetch(`attendances?company_id=${companyId}`, amigoToken, "POST", _bodyRetorno, true);
+            if (_retRes.status >= 200 && _retRes.status < 300) {
+              await registrarPosMarcacao({
+                supabaseClient,
+                clinicTokenId,
+                senderPhone,
+                conversationId: conversationIdParam || null,
+                trigger: "agendar:retorno_created",
+                patientId: String(patId),
+                doctorId: String(doctorId),
+                doctorName,
+                isoDate,
+                isoTime,
+                slotDate: entities.date,
+                slotTime: entities.time,
+                companyId,
+                amigoToken,
+                avanceaiConfig,
+                channelId,
+                placeId,
+                eventId: EVENTO_RETORNO_ID,
+              });
+              console.log(`[Retorno] ✅ marcado como RETORNO`);
+              return {
+                status: "success",
+                response: JSON.stringify({
+                  ...(normalizeApiResponse(_retRes) as object),
+                  _doctor_name: doctorName,
+                  _date: entities.date,
+                  _time: entities.time,
+                  _tipo: "retorno",
+                }),
+                patientName,
+                entities: {
+                  ...entities,
+                  booked_event_id: String(EVENTO_RETORNO_ID),
+                  booked_event_name: "RETORNO",
+                  booked_insurance_id: "particular",
+                  booked_insurance_source: "retorno_sem_convenio",
+                },
+              } as any;
+            }
+            console.log(`[Retorno] o Amigo recusou o RETORNO (${_retRes.status}): ${JSON.stringify(_retRes.data).slice(0, 300)} — segue para a equipe`);
+          }
+
           if (_limite.transferir && avanceaiConfig && senderPhone) {
             try {
               let formattedPhone = senderPhone.replace(/\D/g, "");
@@ -10440,8 +10504,11 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           event_type: "entrou_fila",
           detail: `${_wlContactName || "Paciente"} entrou na lista de espera do(a) ${_wlInvite.doctor_name}${_wlInvite.booked_date ? ` (consulta-base ${ddmmWH(String(_wlInvite.booked_date).slice(0, 10))})` : ""}.`,
         });
+        // 17/11 (Dora): pediu também a lista de outro médico — o texto diz o que foi feito
+        const _outrosNaLista = outrosMedicosCitados(currentMessageText || "", String(_wlInvite.doctor_name));
         const _wlOk =
-          `Prontinho! ✅ Te coloquei na *lista de espera* do(a) ${_wlInvite.doctor_name}.\n\n` +
+          `Prontinho! ✅ Te coloquei na *lista de espera* do(a) ${_wlInvite.doctor_name}.` +
+          `${textoListaSoDoMedicoDaConsulta(String(_wlInvite.doctor_name), _outrosNaLista)}\n\n` +
           `Sua consulta marcada continua garantida. Se abrir uma vaga mais próxima, te aviso por aqui — ` +
           `você terá *3 horas* para confirmar e eu antecipo sua consulta para o novo horário.\n\n` +
           `Pra eu tentar te encaixar melhor: qual período você prefere para antecipar — *manhã*, *tarde* ou *qualquer horário*? 😊`;
@@ -16291,7 +16358,9 @@ Deno.serve(async (req) => {
         // "Vou chegar às 9 😔" virou "Vou conferir os horários reais da agenda…", e em
         // ~7 de 25 avisos em 30 dias o modelo disse "já deixei a equipe avisada" sem
         // avisar ninguém. Aviso sem pergunta nem pedido → texto pronto (case unknown).
-        if (["unknown", "confirmar", "consultar"].includes(String(classification.intent || "")) && ehAvisoDeAtraso(finalMessage || "")) {
+        // 17/11 (Rafa): "Já estou a caminho / devo atrasar uns 15min" no meio de um remarcar
+        // seguiu pedindo CPF e mostrando datas de dezembro — o aviso vale também ali.
+        if (["unknown", "confirmar", "consultar", "reagendar"].includes(String(classification.intent || "")) && ehAvisoDeAtraso(finalMessage || "")) {
           console.log(`[Atraso] aviso de atraso ("${String(finalMessage || "").slice(0, 40)}") — texto pronto`);
           classification.intent = "unknown";
         }
@@ -17206,10 +17275,16 @@ Deno.serve(async (req) => {
               .gte("data_consulta", getTodayISO_SP())
               .in("status", ["enviada", "confirmada", "falhou_confirmar", "remarcada"])
               .order("enviada_em", { ascending: false })
-              .limit(1)
-              .maybeSingle()
+              .limit(6)
             : { data: null };
-          if (_ciR?.attendance_id) {
+          // DUAS CONSULTAS NA MESMA MENSAGEM (17/11, Elaine e a filha) — ver
+          // textoDuasConsultasNaConfirmacao em helpers.ts. A linha mais recente segue sendo a
+          // consulta de referência; as outras do mesmo envio só dizem que há mais de uma.
+          const _ciLista = (_ciR as any[] | null) || null;
+          const _mesmaMensagem = consultasDaMesmaMensagem(_ciLista || []);
+          const _ciR1 = (_ciLista && _ciLista[0]) || null;
+          if (_ciR1?.attendance_id) {
+            const _ciR = _ciR1;
             let _continua = false;
             if (["agendar", "unknown"].includes(String(classification.intent || "")) && (classification.date || classification.time || horaDoTexto(_txtR))) {
               const { data: _ultR } = await supabase
@@ -17225,7 +17300,16 @@ Deno.serve(async (req) => {
                 /hor[áa]rios? (?:livres|reais|dispon[ií]veis)|n[ãa]o est[áa] livre/i.test(String(_ultR.message_text || ""));
             }
             const _pedeR = querRemarcarNaConfirmacao(_txtR) && !ehAvisoDeAtraso(_txtR);
-            if (classification.intent === "reagendar" || _pedeR || _continua) {
+            // "MUDEI PARA AS 9H" (17/11, Cristina) — aviso de quem já mudou com a equipe; nada a remarcar
+            if (avisaQueJaMudou(_txtR)) {
+              console.log(`[RemarcarConfirmacao] aviso de que já mudou o horário — sem remarcar`);
+              classification.intent = "unknown";
+              (classification as any).__avisouQueMudou = true;
+            } else if (_mesmaMensagem.length > 1 && (classification.intent === "reagendar" || _pedeR)) {
+              console.log(`[RemarcarConfirmacao] ${_mesmaMensagem.length} consultas na mesma mensagem — a equipe remarca`);
+              classification.intent = "unknown";
+              (classification as any).__duasConsultasNaConfirmacao = textoDuasConsultasNaConfirmacao(_mesmaMensagem);
+            } else if (classification.intent === "reagendar" || _pedeR || _continua) {
               console.log(`[RemarcarConfirmacao] ${classification.intent} → reagendar da consulta ${_ciR.attendance_id} (${_ciR.data_consulta} ${_ciR.hora}) sem CPF nem "é essa?"`);
               classification.intent = "reagendar";
               classification.attendance_id = String(_ciR.attendance_id);
@@ -18456,6 +18540,8 @@ Deno.serve(async (req) => {
               // (22/09): a Elaine pediu outubro e ouviu que não havia nada ANTES.
               // Quem perguntou outra coisa recebe um texto que pede a data (helpers.ts).
               replyText = textoMesmaLista(_docN, pedeHorarioMaisCedo(finalMessage || ""));
+              // 17/11 (Cléo): pediu outro profissional e a área só tem esse médico
+              if (pedeOutroMedico(finalMessage || "")) replyText = textoSoEsseMedicoNaArea(_docN);
               // Pediu um DIA que também não tem: diz isso, não "me diga a data" (07/10, Filippe).
               const _jDia = janelaDeDatas(finalMessage || "", getTodayISO_SP());
               if (_jDia?.datas && _jDia.datas.length === 1) replyText = textoMesmaListaNaData(_docN, _jDia.datas[0]);
@@ -18493,6 +18579,8 @@ Deno.serve(async (req) => {
         }
         // PEDIU TEMPO (15/11): "Só um minuto", "vou ver e te falo" — a Julia espera, sem repetir a pergunta.
         if ((classification as any).__pedeTempo) replyText = TEXTO_FICO_NO_AGUARDO;
+        if ((classification as any).__avisouQueMudou) replyText = TEXTO_OBRIGADA_POR_AVISAR;
+        if ((classification as any).__duasConsultasNaConfirmacao) replyText = String((classification as any).__duasConsultasNaConfirmacao);
         // CARTEIRINHA ENVIADA (20/10, Mercia): a Julia não lê imagem — diz isso e pede o plano.
         if (falaDeCarteirinhaEnviada(finalMessage || "") && ["consultar_convenios", "unknown", "agendar", "cadastrar"].includes(String(classification.intent || "")) && !/\batendemos\b/i.test(replyText)) {
           console.log(`[Carteirinha] paciente diz que enviou a carteirinha — pedindo o nome do plano`);

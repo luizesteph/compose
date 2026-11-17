@@ -861,7 +861,22 @@ export function classificarUrgencia(text: string): "clinica" | "agenda" | null {
     if (p === URGENCIA_AGENDA_RE) { agenda = true; continue; }
     return "clinica";
   }
+  // "o Dr. pediu para me atenderem hoje" é encaixe (17/11, Ricardo) — ver medicoPediuEncaixe
+  if (!agenda && medicoPediuEncaixe(t)) agenda = true;
   return agenda ? "agenda" : null;
+}
+
+// O MÉDICO PEDIU PARA ATENDER HOJE (17/11, Ricardo 16/11: "ontem falei com o Dr Luiz para ver se
+// conseguia um atendimento hoje… e pediu para falar com vcs" → a lista do Dr. Luiz a partir de
+// 30/11, e ele desistiu). Quem diz que o próprio médico pediu o atendimento de hoje precisa de
+// encaixe — a agenda online nunca tem. Exige o médico ("Dr", "doutor"), um verbo de pedido e
+// "hoje" na mesma mensagem; pedido sem "hoje" ("pediu para retornar em 10 dias") fica de fora.
+export function medicoPediuEncaixe(texto: unknown): boolean {
+  const t = stripAccents(String(texto ?? "").toLowerCase()).replace(/\s+/g, " ");
+  if (!t || t.length > 400) return false;
+  if (!/\b(dr|dra|doutor|doutora)\b/.test(t) || !/\bhoje\b/.test(t)) return false;
+  return /\b(pediu|mandou|falou|disse|orientou|autorizou)\b[^.!?]{0,40}\b(atend\w*|encaix\w*|passar|vir|falar com (voces|vcs|a equipe|a clinica))\b/.test(t) ||
+    /\b(falei|conversei)\b[^.!?]{0,30}\b(dr|dra|doutor|doutora)\b[^.!?]{0,60}\b(atendimento|atender|encaix\w*)\b[^.!?]{0,15}\bhoje\b/.test(t);
 }
 
 // Validação real de CPF (dígitos verificadores mod-11). É o que distingue um CPF
@@ -973,7 +988,9 @@ export function getPhoneVariants(p: string | null | undefined): string[] {
 // 15/10: + o celular do Dr. Hugo Bitencourt Fabri — ele manda recados de paciente
 // ("Encaminha para o Wilson Piques") e a Julia respondia "não localizei atendente
 // Wilson" duas vezes; o recado se perdeu. A equipe o chama de "Dr." nesse número.
-export const TELEFONES_SEM_JULIA: readonly string[] = ["11983354622", "11981812223"];
+// 17/11/2026: o celular do Dr. Guilherme (11 98184-2686) — ele escreve para a equipe e a Julia
+// respondia com o texto truncado ("asmAn moment"). O dono confirmou.
+export const TELEFONES_SEM_JULIA: readonly string[] = ["11983354622", "11981812223", "11981842686"];
 
 export function telefoneSemJulia(
   telefone: string | null | undefined,
@@ -2656,6 +2673,17 @@ export type AtendimentoDoAmigo = {
   user_name?: unknown;
 };
 
+// RETORNO PELA JULIA (17/11, decisão do dono: "retorno, Julia pode marcar também"). O teto do
+// Amigo recusa a CONSULTA (comeback_days 16) de quem teve consulta há pouco; a equipe marca esses
+// casos com o tipo RETORNO (478248), sempre sem convênio (37 de 37 de 17/11 a 10/12). A Julia faz
+// o mesmo, só no caso "recente": consulta passada nos últimos 30 dias e NENHUMA futura. Com
+// consulta futura é a marcação repetida que o teto segura (o site marcou e a Julia tentaria de
+// novo) — essa continua com a equipe.
+export const EVENTO_RETORNO_ID = "478248";
+export function podeMarcarComoRetorno(tipo: string): boolean {
+  return tipo === "recente";
+}
+
 export function textoDoLimiteDeAtendimentos(a: {
   atendimentos: AtendimentoDoAmigo[] | null | undefined;
   dataPedida: string;
@@ -4023,6 +4051,10 @@ export function perguntaEspecialidadeDoMedico(texto: unknown): boolean {
 /** "enviei a carteirinha", "a carteirinha que enviei" (20/10, Mercia). A Julia não lê imagem. */
 export function falaDeCarteirinhaEnviada(texto: unknown): boolean {
   const t = stripAccents(String(texto ?? "").toLowerCase());
+  // "Eu enviei a foto / Consegue ver na conversa?" (17/11, Patrícia: depois de a Julia pedir a
+  // foto da carteirinha, ouviu quatro vezes "qual é o seu convênio e plano?" e "vejo que você
+  // enviou a foto" — a Julia não vê imagem). Foto de outra coisa ("do exame", "do pedido") não.
+  if (/\b(enviei|mandei|ja enviei|ja mandei|segue|te mandei|te enviei)\s+(a|uma)?\s*foto\b(?!\s+d[oa]s?\s+(exame|pedido|receita|laudo|ressonancia|raio|guia|atestado|documento))|\bconsegue\s+ver\s+(a\s+foto|a\s+imagem|na\s+conversa)\b/.test(t)) return true;
   return /\b(enviei|mandei|te\s+mandei|ja\s+mandei|ja\s+enviei)\s+(a\s+|uma\s+)?(foto\s+da\s+)?carteirinha\b|\bcarteirinha\s+que\s+(eu\s+)?(enviei|mandei)\b/.test(t) ||
     // 13/11 (Lara): "essa é a carteirinha", "segue a carteirinha", "aqui está a carteirinha"
     /\b(essa|esta|aqui)\s+(e|eh|esta)\s+(a\s+)?(foto\s+da\s+)?(minha\s+)?carteirinha\b|\bsegue\s+(a\s+)?(foto\s+da\s+)?(minha\s+)?carteirinha\b|\b(aqui|ai)\s+(esta|vai)\s+(a\s+)?(foto\s+da\s+)?(minha\s+)?carteirinha\b/.test(t);
@@ -4033,6 +4065,79 @@ export function carteirinhaSemPedidoDeAgenda(texto: unknown): boolean {
   const t = stripAccents(semMetadados(texto).toLowerCase());
   return falaDeCarteirinhaEnviada(t) && !/(cancel|desmarc|remarc|reagend|confirm|mudar|trocar|adiar|antecip)/.test(t);
 }
+// "MUDEI PARA AS 9H" É AVISO, NÃO PEDIDO (17/11, Cristina: respondeu à confirmação da consulta
+// dizendo que já tinha mudado o horário com a equipe; a Julia entendeu pedido de remarcar e
+// mandou outras datas). Verbo de mudança no PASSADO, dito por quem já resolveu — sem pergunta,
+// sem pedido, sem "vou".
+export function avisaQueJaMudou(texto: unknown): boolean {
+  const bruto = String(texto ?? "").trim();
+  if (!bruto || bruto.length > 160 || bruto.includes("?")) return false;
+  const t = stripAccents(bruto.toLowerCase());
+  if (/\b(quero|queria|preciso|gostaria|vou|posso|pode|podemos|consigo|da pra|cancel\w*|desmarc\w*)\b/.test(t)) return false;
+  if (/\bmudei de ideia\b/.test(t)) return false;
+  // a mudança é de dia ou horário ("meu convênio mudou para Sul América", "mudou a dose do remédio
+  // para 150" não são — 2 das 4 frases de 60 dias)
+  if (!/\b\d{1,2}\s*(h|hs|hrs|horas?|:\d{2})\b|\b\d{1,2}:\d{2}\b|\bdia\s+\d|\b\d{1,2}\/\d{1,2}\b|\b(segunda|terca|quarta|quinta|sexta|sabado|amanha|hoje)\b|\b(horario|consulta|data)\b/.test(t)) return false;
+  return /\b(ja\s+)?(mudei|troquei|remarquei|reagendei|alterei|mudou|trocou|remarcou|reagendou|alterou|foi (mudad|remarcad|alterad|trocad)\w*)\b[^.!]{0,30}\b(para|pra|pro|as|dia|na|no)\b/.test(t);
+}
+export const TEXTO_OBRIGADA_POR_AVISAR =
+  "Obrigada por avisar! ✅ Fica valendo o horário novo que você combinou com a nossa equipe.";
+
+/** As consultas da mesma mensagem de confirmação (enviadas no mesmo minuto que a mais recente). */
+export function consultasDaMesmaMensagem<T extends { attendance_id?: unknown; enviada_em?: unknown }>(linhas: readonly T[]): T[] {
+  const validas = (linhas || []).filter((l) => l && Number(l.attendance_id) > 0 && Date.parse(String(l.enviada_em || "")));
+  if (!validas.length) return [];
+  const ultima = Math.max(...validas.map((l) => Date.parse(String(l.enviada_em))));
+  const vistas = new Set<string>();
+  return validas.filter((l) => {
+    if (ultima - Date.parse(String(l.enviada_em)) > 60_000) return false;
+    const k = String(l.attendance_id);
+    if (vistas.has(k)) return false;
+    vistas.add(k);
+    return true;
+  });
+}
+
+// DUAS CONSULTAS NA MESMA CONFIRMAÇÃO (17/11, Elaine 16/11: o lembrete tinha a consulta dela e a
+// da filha; ela pediu "24/11, 15h40 e 16h00 — são 2 horários", a Julia remarcou a dela duas vezes
+// e a da filha ficou no dia antigo). A remarcação na resposta à confirmação só sabe mover UMA
+// consulta; com duas, a equipe faz — o texto promete a equipe e a rede da promessa transfere.
+export function textoDuasConsultasNaConfirmacao(
+  linhas: ReadonlyArray<{ paciente_nome?: unknown; data_consulta?: unknown; hora?: unknown; medico_nome?: unknown }>,
+): string {
+  if (!linhas || linhas.length < 2) return "";
+  const itens = linhas.map((l) => {
+    const d = String(l.data_consulta || "").slice(0, 10).split("-");
+    const quando = d.length === 3 ? `${d[2]}/${d[1]}` : "";
+    const hora = String(l.hora || "").slice(0, 5);
+    const nome = String(l.paciente_nome || "").trim().split(/\s+/)[0] || "";
+    const med = String(l.medico_nome || "").trim();
+    return `• ${nome ? `${_tituloDeNome(nome)}: ` : ""}${quando}${hora ? ` às ${hora}` : ""}${med ? ` com ${med}` : ""}`;
+  });
+  return `Vi que são duas consultas nessa mensagem:\n${itens.join("\n")}\n\n` +
+    "Para remarcar as duas juntas, vou passar para a nossa equipe, que acerta os dois horários e te responde por aqui. 🙏";
+}
+
+/** Outros médicos citados ("Dr. X") que não são o médico da lista de espera. */
+export function outrosMedicosCitados(texto: unknown, medicoDaLista: string): string[] {
+  return medicosCitadosNoTexto(texto).filter((c) => _tokensDeMedico(c).length > 0 && !medicoParecido(c, medicoDaLista));
+}
+// LISTA DE ESPERA DE OUTRO MÉDICO (17/11, Dora 16/11: pediu a lista do Dr. Paulo "e do Dr. Lucas
+// também" e ouviu só "te coloquei na lista do Dr. Paulo"). A lista de espera antecipa a consulta
+// que já existe, com o mesmo médico; com outro médico seria uma consulta nova. O texto diz isso.
+export function textoListaSoDoMedicoDaConsulta(medicoDaLista: string, outros: readonly string[]): string {
+  if (!outros || !outros.length) return "";
+  return `\n\nA lista de espera fica com o médico da sua consulta (${medicoDaLista}). Com ${outros.join(" e ")} seria uma consulta nova — se quiser, me peça os horários dele(a) que eu vejo.`;
+}
+
+// "OUTRO PROFISSIONAL" NUMA ÁREA COM UM MÉDICO SÓ (17/11, Cléo 16/11: dor no braço, ombro e
+// cotovelo; "com outro profissional, tem nessa semana?" recebeu de novo a lista do Dr. Luiz
+// Gustavo, sem explicar que é o único da área).
+export function textoSoEsseMedicoNaArea(medico: string): string {
+  return `Para essa região, só o(a) ${medico} atende aqui na clínica — os horários que te passei são os primeiros dele(a). 🙏 ` +
+    "Se quiser, te coloco na *lista de espera*: se abrir uma vaga antes, te aviso por aqui.";
+}
+
 export const TEXTO_CARTEIRINHA_SEM_LEITURA =
   "Eu não consigo abrir imagens por aqui. 🙏 Me diga o nome do plano que está escrito na carteirinha (por exemplo: Top Nacional, Nacional III, Especial 100) que eu confiro na hora.";
 
