@@ -125,6 +125,7 @@ import {
   pedeParaEsperar,
   TEXTO_FICO_NO_AGUARDO,
   pedeSairNoContextoDaLista,
+  TEXTO_FISIO_COM_A_EQUIPE,
   pedeOutroMedico,
   aceitaOpcaoUnica,
   pedeOutraData,
@@ -11267,7 +11268,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
         }
         // "sim/quero" à pergunta da avaliação (19/10): sem repetir a tabela
         let _aceitouAvaliacao = false;
-        if (_intFisio === "agendar" && aceitaAvaliacaoDaFisio(currentMessageText || "")) {
+        if ((_intFisio === "agendar" || _intFisio === "outro") && aceitaAvaliacaoDaFisio(currentMessageText || "")) {
           const _convIdAv = conversationIdParam || ((globalThis as any).__currentConversationId as string | undefined) || null;
           if (_convIdAv && supabaseClient) {
             try {
@@ -11314,6 +11315,10 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
               // Quem JÁ faz fisio aqui não pode receber tabela de preço: ele não
               // está comprando nada, está falando da sessão dele.
               ? "Já passei para nossa equipe, que cuida da agenda da fisioterapia e te responde por aqui. 🙏"
+            : _intFisio === "outro"
+              // PADRÃO SEGURO (16/11): sem sinal de quem quer começar, a tabela não sai —
+              // a equipe da fisioterapia responde (ver querComecarFisioterapia).
+              ? TEXTO_FISIO_COM_A_EQUIPE
               : "Nossa fisioterapia funciona pelo sistema de reembolso: sessão avulsa por R$ 180 ou pacote de 10 sessões por R$ 1.500 (em até 3x), com *avaliação gratuita*. 😊 " +
                 "Emitimos nota fiscal e relatório certinhos para você solicitar o reembolso ao seu plano. Vou te passar para nossa equipe agendar sua avaliação!";
 

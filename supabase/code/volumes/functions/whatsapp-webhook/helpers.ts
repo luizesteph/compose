@@ -528,7 +528,7 @@ export function campoPedidoNoCadastro(texto: unknown): "nome" | "cpf" | "nascime
 //
 // Os dois ultimos queriam GUIA do ortopedista, para fazer fisio em outro lugar.
 // Mandar tabela de preco para quem pede receita e' vender o que ninguem pediu.
-export type IntencaoFisio = "agendar" | "pedido_medico" | "falar_com_fisio" | "sessao_em_curso" | "nota_fiscal" | "trabalho" | "consulta_medica" | "convenio" | "pagamento" | "exame";
+export type IntencaoFisio = "agendar" | "pedido_medico" | "falar_com_fisio" | "sessao_em_curso" | "nota_fiscal" | "trabalho" | "consulta_medica" | "convenio" | "pagamento" | "exame" | "outro";
 
 // 19/10 (Antônio): "tem como passar as imagens do RX que realizei ontem? O
 // fisioterapeuta pediu para ver" recebeu a tabela de preço. Imagem/resultado/laudo de
@@ -648,10 +648,53 @@ export function classificarPedidoDeFisioterapia(texto: unknown): IntencaoFisio {
     return "pedido_medico";
   }
   if (FISIO_COMPARECIMENTO_RE.test(t) || FISIO_SESSAO_MINHA_RE.test(t) || FISIO_SESSAO_EM_CURSO_RE.test(t) || FISIO_SESSAO_ORDINAL_RE.test(t)) return "sessao_em_curso";
-  if (FISIO_CONVENIO_RE.test(t)) return "convenio";
+  if (FISIO_CONVENIO_RE.test(t) || /\batende[mr]?\s+(?:o\s+|a\s+)?(?:meu|minha|esse|este|nosso)\s+(?:plano|conv)/i.test(t)) return "convenio";
   if (FISIO_FALAR_RE.test(t)) return "falar_com_fisio";
-  return "agendar";
+  // PADRÃO SEGURO (16/11): a tabela de preço só para quem dá sinal de querer COMEÇAR.
+  return querComecarFisioterapia(t) ? "agendar" : "outro";
 }
+
+/**
+ * FISIOTERAPIA COM PADRÃO SEGURO (16/11/2026, etapa 5 do plano de 15/11).
+ *
+ * O classificador acima é uma lista de frases, e o que não casava nenhuma caía na TABELA DE
+ * PREÇO. Em 90 dias, 77 das 220 mensagens de fisioterapia caíram no padrão, e cerca de 35
+ * não eram de quem quer começar: "Amanhã não vou conseguir ir na Fisio", "Para cancelar minha
+ * consulta com fisioterapia…", "repor esta fisioterapia na terça", "preciso de um atestado…
+ * já realizou todas as sessões", "Hoje eu comecei a fisioterapia e estou com bastante dor…
+ * volto a tomar o Lisador?", "Essa cobrança é da fisio?". Cada caso novo virava mais uma
+ * frase na lista.
+ *
+ * Agora o padrão é o contrário: a tabela exige sinal de quem quer começar (pergunta do
+ * serviço ou do preço, pedido de marcar, encaminhamento do médico, ou a palavra sozinha).
+ * O que não tem sinal vai para a equipe, sem tabela (categoria "outro").
+ */
+export function querComecarFisioterapia(texto: unknown): boolean {
+  const n = stripAccents(String(texto ?? "").toLowerCase()).replace(/\s+/g, " ").trim();
+  if (!n) return false;
+  // pergunta do preço: a tabela é a resposta, mesmo de quem já é paciente
+  if (/\b(?:valor(?:es)?|preco|quanto\s+(?:custa|fica|e|sai|ficaria)|orcamento|como\s+funciona)\b/.test(n)) return true;
+  if (/\b(?:passar|mandar|enviar|dar|ter|obter|saber|quero|queria|gostaria\s+de|preciso\s+de|mais)\s+(?:mais\s+|as\s+|algumas\s+)?informac/.test(n)) return true;
+  // quem já faz, fala de sessão marcada, de atestado ou de cobrança, ou só avisa, não está começando
+  if (/\b(?:minhas?|meus?|nossas?|del[ea])\s+(?:consulta\s+(?:com|de)\s+)?(?:fisio|sess)|\b(?:repor|reposicao|trocar|troca|alterar|mudar|cancelar|desmarcar|remarcar|faltar|faltei|adiar)\b|\bestou\s+(?:agendad|fazendo|marcad)|\b(?:comecei|iniciei|terminei|ja\s+faco|ja\s+fiz|ja\s+realizou|ja\s+realizei)\b|\batestado\b|\bcobranca\b|\bnao\s+vou\s+(?:conseguir|poder)\s+ir\b|\bestou\s+ai\b|\bsou\s+paciente\b|\bpara\s+avisar\b|\bantes\s+de\s+(?:iniciar|comecar)\b/.test(n)) {
+    return false;
+  }
+  const temFisio = /fisio|\bsess(?:ao|oes)\b|\bavaliacao\b/.test(n);
+  // pergunta do serviço ("vocês têm fisioterapia?", "tem tratamento para o pulso?")
+  if (temFisio && /\b(?:voces|vcs|vc|voce|ai|clinica)\b[^.?!]{0,30}\b(?:tem|oferece[m]?|faz|fazem|trabalha[m]?\s+com|possui|possuem|atende[m]?\s+com)\b|\btem\s+(?:tratamento|atendimento)\b|\b(?:tem|oferecem|fazem)\s+(?:esse|este)\s+servico\b|\b(?:tem|oferecem|fazem)\s+fisio/.test(n)) return true;
+  // a palavra sozinha ("Fisioterapia", "Fisioterapia pélvica", "É de fisioterapia")
+  if (temFisio && n.length <= 45) return true;
+  // encaminhamento novo do médico ("o ortopedista solicitou fisioterapia", "foi encaminhada")
+  if (temFisio && n.length <= 220 && /\b(?:encaminhad[oa]|prescreveu|solicitou|recomendou|indicou|indicacao)\b[^.?!]{0,60}fisio/.test(n)) return true;
+  // pedido de marcar ("fazer" só com preciso/quero/gostaria: "pode fazer fisio amanhã?" é de quem já faz)
+  if (temFisio && /\b(?:agendar|agendamento|marcar|comecar|iniciar|procuro|preciso(?:\s+de|\s+fazer|\s+agendar|\s+marcar)?|gostaria\s+de|quero|queria|consigo\s+(?:agendar|marcar))\b[^.?!]{0,60}(?:fisio|\bsess(?:ao|oes)\b|\bavaliacao\b)/.test(n)) return true;
+  // sem a palavra: é continuação da conversa de fisioterapia ("quero agendar", "sim")
+  if (!temFisio && n.length <= 60 && /\b(?:agendar|marcar|quero|queria|gostaria|sim|pode\s+ser)\b/.test(n)) return true;
+  return false;
+}
+
+export const TEXTO_FISIO_COM_A_EQUIPE =
+  "Sobre a fisioterapia, vou passar para a nossa equipe, que cuida disso e te responde por aqui. 🙏";
 
 /**
  * SESSÃO DE FISIOTERAPIA NÃO É CONSULTA (10/11). "Preciso remarcar a sessão de hoje"
