@@ -790,6 +790,30 @@ export function ehNegativaDeHorario(texto: unknown): boolean {
 // faz o dia", e a Julia continuou procurando em 02/09 — a data que ela mesma
 // tinha extraido duas mensagens antes. Data grudada vira negativa repetida numa
 // agenda que TEM vaga.
+// PERGUNTA SOBRE OS DIAS DO MÉDICO (17/11, Gerson). "Segunda às 14" (para o Dr. Hugo) deixou
+// a segunda-feira grudada; para o Dr. Lucas ele perguntou "Quais dias ele tem?" e recebeu só
+// as segundas; "Ele só atende de segunda?" devolveu a mesma lista e caiu em "não estou
+// conseguindo te ajudar". Igual em 25/09 ("Ele só atende as segundas?", laço), 22/10 ("O Dr só
+// atende às segundas?" → pediu o CPF) e 09/11 ("Só tem quarta?" → a mesma lista). Quem
+// pergunta os dias quer ver a agenda sem o filtro do dia: a lista dos próximos horários
+// responde. Com outro dia ou data na mesma mensagem ("só tem de quarta? haveria na próxima
+// segunda?") é pedido, não pergunta — segue o leitor da janela.
+const _QUEM_ATENDE = "(?:ele|ela|o dr|a dra|dr|dra|o doutor|a doutora|o medico|a medica)";
+const _DIA_DA_SEMANA = "(?:segundas?|tercas?|quartas?|quintas?|sextas?|sabados?|domingos?)";
+const _QUAIS_DIAS_RE = new RegExp(
+  `\\b(?:quais|que)(?: sao)?(?: os)? dias\\b(?: da semana)?(?: que)? ${_QUEM_ATENDE}\\b.{0,25}\\b(?:tem|atende|trabalha)\\b` +
+  `|\\b${_QUEM_ATENDE}\\b.{0,25}\\b(?:tem|atende|trabalha) (?:em )?(?:quais|que) dias\\b`,
+);
+const _SO_ATENDE_NO_DIA_RE = new RegExp(`\\bso (?:atende|tem|trabalha)(?: horarios?)?(?: disponiveis?)?(?: de| as| nas?| a)? ${_DIA_DA_SEMANA}\\b`);
+export function perguntaDiasDoMedico(texto: unknown): boolean {
+  const bruto = semMetadados(texto).trim();
+  if (!bruto || bruto.length > 120) return false;
+  const t = stripAccents(bruto.toLowerCase()).replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+  if (_QUAIS_DIAS_RE.test(t)) return true;
+  if (!_SO_ATENDE_NO_DIA_RE.test(t)) return false;
+  return (t.match(new RegExp(`\\b${_DIA_DA_SEMANA}\\b`, "g")) || []).length === 1;
+}
+
 export function pedeQualquerData(texto: unknown): boolean {
   const t = String(texto ?? "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
   if (!t) return false;
@@ -1250,7 +1274,7 @@ export function horaPedidaSemDia(
 // pedido sem resposta em 27/10 (Renata, Guilherme) e 04/11 (Pedro, Jéssica, Ana Paula).
 // "tanto faz o DIA" continua falando do dia: quem chama confere antes de limpar o médico.
 const _OUTRO_MEDICO_RE =
-  /\b(outr[oa]s?\s*(medic[oa]s?|doutor(a|es)?|dr[a]?|profissiona(l|is)|ortopedistas?|especialistas?)|qualquer\s*(medic[oa]|doutor[a]?|dr[a]?|profissional|ortopedista|especialista|um)|pode\s*ser\s*outro|tanto\s*faz|nao\s*tenho\s*preferencia|mais\s*rapido\s*possivel|(com\s+)?quem\s+(tiver|estiver)\s+(disponivel|vaga|horario|livre))\b/;
+  /\b(outr[oa]s?\s*(medi[cd][oa]s?|doutor(a|es)?|dr[a]?|profissiona(l|is)|ortopedistas?|especialistas?)|qualquer\s*(medic[oa]|doutor[a]?|dr[a]?|profissional|ortopedista|especialista|um)|pode\s*ser\s*outro|tanto\s*faz|nao\s*tenho\s*preferencia|mais\s*rapido\s*possivel|(com\s+)?quem\s+(tiver|estiver)\s+(disponivel|vaga|horario|livre))\b/;
 
 export function pedeOutroMedico(texto: unknown): boolean {
   return _OUTRO_MEDICO_RE.test(stripAccents(semMetadados(texto).toLowerCase()));
@@ -1266,7 +1290,8 @@ export function pedeOutroMedico(texto: unknown): boolean {
  * dita na mensagem continua valendo; só o médico sai.
  */
 export function pedeQualquerMedicoDaArea(texto: unknown): boolean {
-  return /\balgum(?:a)? (?:outr[oa] )?(?:medic[oa]|doutor[a]?|dr[a]?\b|especialista|ortopedista|profissional)\b/
+  // "medido" é erro de digitação de "médico" (17/11, Rochelle: "Tem algum outro medido amanha ?")
+  return /\balgum(?:a)? (?:outr[oa] )?(?:medi[cd][oa]|doutor[a]?|dr[a]?\b|especialista|ortopedista|profissional)\b/
     .test(stripAccents(semMetadados(texto).toLowerCase()).replace(/\s+/g, " "));
 }
 
@@ -1507,7 +1532,7 @@ export function textoCpfNaoEncontrado(cpf?: unknown): string {
 // afirma nada e pede a data. Entender "outubro" e "quinta ou sexta" é o item 6,
 // fora deste conserto.
 const PEDE_MAIS_CEDO_RE =
-  /\b(antes|mais\s+(cedo|pr[oó]xim[oa]s?|perto|r[aá]pido)|nada\s+(mais\s+)?cedo|primeir[oa]s?\s+(hor[aá]rio|data|vaga)|(essa|esta|nessa|nesta)\s+semana|hoje|amanh[aã]|urgente|s[oó]\s+(no\s+)?(fim|final)\s+do\s+m[eê]s|(t[aã]o|muito)\s+longe|demora)(?![\p{L}])/iu;
+  /\b(antes|mais\s+(cedo|pr[oó]xim[oa]s?|perto|r[aá]pido|recentes?)|nada\s+(mais\s+)?cedo|primeir[oa]s?\s+(hor[aá]rio|data|vaga)|(essa|esta|nessa|nesta)\s+semana|hoje|amanh[aã]|urgente|s[oó]\s+(no\s+)?(fim|final)\s+do\s+m[eê]s|(t[aã]o|muito)\s+longe|demora)(?![\p{L}])/iu;
 
 // OUTROS MÉDICOS DA MESMA ÁREA (29/10, "Melhorias para a Julia" prioridade alta: Karina
 // pediu "antes do dia 31" e recebeu duas vezes a mesma lista do Dr. Cristian — a equipe
@@ -2543,6 +2568,21 @@ export function textoPerguntaCancelar(a: { dataISO: unknown; hora: unknown; medi
 // datas (item 6): amanhã, hoje, sexta, outubro, "depois do dia 5". Depois de
 // CANCELAR, o pedido de marcar de novo vale mesmo sem data — o contexto antigo já
 // foi apagado de propósito. Despedida ("até amanhã") não é pedido.
+// A TRAVA NÃO ARMA EM CIMA DE UMA OFERTA NOVA (17/11, Gerson). Ele marcou o Dr. Hugo às
+// 18h00, pediu o Dr. Lucas, recebeu a lista às 18h05 e escolheu "Ok. 9:20". A trava, armada
+// pela marcação de 5 min antes, jogou a escolha para "unknown" e a Julia disse duas vezes que
+// ia passar para um atendente. Igual em 28/09 ("As 10:20"). Se a ÚLTIMA saída da conversa é
+// uma lista ou uma reserva do agendar feita DEPOIS da marcação, o paciente já está numa
+// marcação nova — pedida por ele, porque só pedido explícito passa pela trava.
+export function ofertaNovaDepoisDaMarcacao(
+  ultimaSaida: { ai_intent?: unknown; action_status?: unknown; created_at?: unknown } | null | undefined,
+  marcouEmMs: number,
+): boolean {
+  if (!ultimaSaida || String(ultimaSaida.ai_intent || "") !== "agendar") return false;
+  if (!["needs_info", "needs_registration"].includes(String(ultimaSaida.action_status || ""))) return false;
+  return Date.parse(String(ultimaSaida.created_at || "")) > marcouEmMs;
+}
+
 export function pedidoDeNovaMarcacao(texto: unknown, hojeISO: string, depoisDeCancelar: boolean): boolean {
   const bruto = String(texto ?? "").trim();
   if (!bruto || isClosingThanks(bruto)) return false;
@@ -3354,7 +3394,7 @@ const _RS_ABERTURA = "(?:oi+|ola+|opa|bom dia|boa tarde|boa noite|ah|entao|olha|
 const _RS_SIM_RE = new RegExp(`^(?:${_RS_ABERTURA} )*${_RS_SIM}(?: (?:${_RS_SIM}|${_RS_CORTESIA}))*$`);
 const _RS_NAO_RE = new RegExp(`^(?:${_RS_ABERTURA} )*${_RS_NAO}(?: (?:${_RS_NAO}|${_RS_CORTESIA}))*$`);
 const _RS_ESPERA_RE =
-  /\b(so um (minuto|momento|instante|segundo|pouco|minutinho|momentinho)|(um|1) (minuto|momento|instante|segundo|minutinho|momentinho)|aguarde|aguarda ai|espere|espera(r)? (ai|um pouco|so um)|pera|perai|pera ai|ja (te )?(falo|respondo|retorno|volto|aviso|confirmo|digo)|vou (ver|verificar|confirmar|checar|pensar|conversar|falar|perguntar|olhar|conferir)|estou vendo|deixa eu (ver|verificar|confirmar|pensar|olhar|conferir)|te (aviso|falo|retorno|confirmo|respondo)|depois (eu )?(te )?(falo|aviso|confirmo|vejo|respondo|entro em contato))\b/;
+  /\b(so um (minuto|momento|instante|segundo|pouco|minutinho|momentinho)|(um|1) (minuto|momento|instante|segundo|minutinho|momentinho)|aguarde|aguarda ai|espere|espera(r)? (ai|um pouco|so um)|pera|perai|pera ai|ja (te )?(falo|respondo|retorno|volto|aviso|confirmo|digo)|vou (ver|verificar|confirmar|checar|pensar|conversar|falar|perguntar|olhar|conferir)|estou vendo|deixa eu (ver|verificar|confirmar|pensar|olhar|conferir)|te (aviso|falo|confirmo|respondo|retorno(?! (?:com|d[aeo]s?)\b))|depois (eu )?(te )?(falo|aviso|confirmo|vejo|respondo|entro em contato))\b/;
 
 /** Minúsculas, sem acento, sem pontuação nem emoji: o texto como os leitores de resposta o comparam. */
 function _rsNormal(texto: unknown): string {
@@ -3366,7 +3406,10 @@ function _rsNormal(texto: unknown): string {
 
 /** "Só um minuto", "vou ver e te falo", "aguarde": o paciente pediu tempo, não respondeu. */
 export function pedeParaEsperar(texto: unknown): boolean {
-  // "Fico no aguardo" não entra: ali quem espera é o paciente
+  // "Fico no aguardo" não entra: ali quem espera é o paciente.
+  // "Agendar te retorno com o Dr" também não (17/11, Jéh: quis dizer "agendar retorno com o
+  // Dr" e ouviu "Sem pressa! Fico no aguardo"): "te retorno com/do/da" é a consulta de
+  // retorno, não "eu te respondo depois". 1 das 157 mensagens que este leitor pegou em 60 dias.
   return _RS_ESPERA_RE.test(_rsNormal(texto));
 }
 
@@ -3618,7 +3661,10 @@ const _NAO_E_NOME_DE_MEDICO = new Set([
 ]);
 function _tokensDeMedico(nome: string): string[] {
   return stripAccents(String(nome || "").toLowerCase()).replace(/\b(dr|dra|doutor|doutora)\b\.?/g, " ")
-    .split(/[^a-z]+/).filter((w) => w.length >= 4 && !_NAO_E_NOME_DE_MEDICO.has(w));
+    .split(/[^a-z]+/).filter((w) => w.length >= 4 && !_NAO_E_NOME_DE_MEDICO.has(w))
+    // "Luís" e "Luiz" são o mesmo nome (17/11, Sol: "tenho horário com o Dr. Luís, não vou
+    // conseguir chegar" → "para trocar de médico, quem ajusta é a equipe")
+    .map((w) => w.replace(/z/g, "s"));
 }
 /** Mesmo médico? Basta um nome próprio (5 primeiras letras) em comum — "Cristina" ≈ "Cristian", "Stephanelli" ≈ "Estephanelli". */
 export function medicoParecido(a: string, b: string): boolean {
@@ -3636,10 +3682,20 @@ export function medicoCitadoNoTexto(texto: unknown): string {
   const m = /\b(?:dr|dra|doutor|doutora)\.?\s+([\p{L}]{3,}(?:\s+[\p{L}]{3,})?)/iu.exec(String(texto ?? ""));
   return m ? m[1].trim() : "";
 }
+/** Todos os médicos citados com "Dr./Dra." na mensagem, na ordem em que aparecem. */
+export function medicosCitadosNoTexto(texto: unknown): string[] {
+  const re = /\b(?:dr|dra|doutor|doutora)\.?\s+([\p{L}]{3,}(?:\s+[\p{L}]{3,})?)/giu;
+  return [...String(texto ?? "").matchAll(re)].map((m) => m[1].trim());
+}
+// Só é troca quando NENHUM dos médicos citados é o da consulta (17/11). Com um só olhar para o
+// primeiro, "o dr Hugo fez o relatório? E pode remarcar minha consulta com o dr Lucas" (Santa,
+// 11/11) virava troca de médico — a consulta era com o Dr. Lucas. Em 60 dias, 2 das 6 vezes
+// que a Julia disse "para trocar de médico, quem ajusta é a equipe" eram o mesmo médico.
 export function medicoCitadoDiferente(texto: unknown, medicoDaConsulta: string): string {
-  const citado = medicoCitadoNoTexto(texto);
-  if (!citado || !medicoDaConsulta || _tokensDeMedico(citado).length === 0) return "";
-  return medicoParecido(citado, medicoDaConsulta) ? "" : citado;
+  if (!medicoDaConsulta) return "";
+  const citados = medicosCitadosNoTexto(texto).filter((c) => _tokensDeMedico(c).length > 0);
+  if (!citados.length) return "";
+  return citados.some((c) => medicoParecido(c, medicoDaConsulta)) ? "" : citados[0];
 }
 
 // "NÃO CONSEGUI" LOGO DEPOIS DE UM SUCESSO DE VERDADE (15/10, Flavia e Mariana): duas
@@ -3775,6 +3831,20 @@ export function perguntaRegraDoRetorno(texto: unknown): boolean {
 
 export const TEXTO_REGRA_DO_RETORNO =
   "O retorno vale por até 30 dias depois da consulta: dentro desse prazo conta como retorno; depois disso, é uma nova consulta. 😊";
+
+// "O RETORNO É COBRADO?" (17/11, Paulo: "o valor específico do retorno não está informado no
+// sistema, fale com a recepção" — e ele foi ligar). A própria Julia já diz, no preço da
+// consulta, "com direito a retorno em até 30 dias". Em 60 dias a pergunta veio 6 vezes; nas 3
+// que a Julia respondeu, respondeu outra coisa. "Aguardando o retorno de vocês" (retorno =
+// resposta) e "quero marcar o retorno" não entram: precisa da cobrança ou do valor na frase.
+export function perguntaSeRetornoECobrado(texto: unknown): boolean {
+  const t = stripAccents(semMetadados(texto).toLowerCase()).replace(/\s+/g, " ").trim();
+  if (!t || t.length > 200) return false;
+  return /\bretorno\b[^.!?]{0,40}\b(cobrad[oa]s?|pag[oa]s?|gratuit[oa]|gratis|de graca)\b/.test(t) ||
+    /\b(cobra[mr]?|cobranca|valor|preco|custo|quanto custa|quanto e|quanto fica)\b[^.!?]{0,12}\b(o|do|pelo|de|no) retorno\b/.test(t);
+}
+export const TEXTO_RETORNO_COBRADO =
+  "A consulta particular dá direito a retorno em até 30 dias, sem nova cobrança. Depois desse prazo, é uma nova consulta. Pelo convênio, vale a regra do seu plano. 😊";
 
 /** Pergunta de preço/plano da nutróloga (16/10, Enzo: a Julia transferiu e não respondeu o valor). */
 export function perguntaPrecoNutrologa(texto: unknown): boolean {

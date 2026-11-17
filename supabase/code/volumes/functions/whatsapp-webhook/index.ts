@@ -155,6 +155,10 @@ import {
   TEXTO_SEM_ATENDIMENTO_DOMICILIAR,
   perguntaRegraDoRetorno,
   TEXTO_REGRA_DO_RETORNO,
+  perguntaSeRetornoECobrado,
+  TEXTO_RETORNO_COBRADO,
+  ofertaNovaDepoisDaMarcacao,
+  perguntaDiasDoMedico,
   perguntaPrecoNutrologa,
   precoDaNutrologa,
   textoPrecoNutrologa,
@@ -3748,6 +3752,16 @@ async function executeAction(
           } else if ((_janela.datas && _janela.datas.length > 1) || _janela.inicio || _janela.fim) {
             if (entities.date) console.log(`[Janela] período "${_janela.rotulo}" no texto — descartando date="${entities.date}" do classificador`);
             entities.date = "";
+          }
+        }
+        // PERGUNTA SOBRE OS DIAS DO MÉDICO (17/11) — ver perguntaDiasDoMedico em helpers.ts.
+        // "Ele só atende de segunda?" não é pedido de segunda-feira: com o dia lido como
+        // filtro, saía a mesma lista e o laço. Sem o filtro, a lista dos próximos horários
+        // mostra os outros dias. Janela com período ou data ("…na semana que vem?") fica.
+        if (_janela && perguntaDiasDoMedico(currentMessageText || "")) {
+          if (!_janela.inicio && !_janela.fim && !(_janela.datas && _janela.datas.length)) {
+            console.log(`[Janela] pergunta sobre os dias do médico — sem filtro de dia da semana`);
+            _janela = null;
           }
         }
 
@@ -15414,7 +15428,7 @@ Deno.serve(async (req) => {
           const cutoff5min = new Date(Date.now() - 10 * 60 * 1000).toISOString();
           const { data: recentSuccessBruto } = await supabase
             .from("webhook_messages")
-            .select("id, message_text, ai_entities")
+            .select("id, message_text, ai_entities, created_at")
             .eq("conversation_id", conversationId)
             .eq("direction", "incoming")
             .eq("action_status", "success")
@@ -15449,10 +15463,14 @@ Deno.serve(async (req) => {
             // Correcao cirurgica: se a ultima resposta nossa foi o link do widget, nada
             // foi marcado, entao o guard nao arma.
             let apenasLinkDoWidget = false;
+            // …e também não arma em cima de uma OFERTA NOVA (17/11, Gerson): marcou o Dr. Hugo,
+            // pediu o Dr. Lucas, recebeu a lista e a escolha "Ok. 9:20" virou "unknown". Ver
+            // ofertaNovaDepoisDaMarcacao em helpers.ts.
+            let ofertaNova = false;
             try {
               const { data: ultimaSaida } = await supabase
                 .from("webhook_messages")
-                .select("ai_intent")
+                .select("ai_intent, action_status, created_at")
                 .eq("conversation_id", conversationId)
                 .eq("direction", "outgoing")
                 .order("created_at", { ascending: false })
@@ -15462,12 +15480,16 @@ Deno.serve(async (req) => {
               // saída continua sendo o link — e a trava desarmava justo aí.
               apenasLinkDoWidget = String(ultimaSaida?.[0]?.ai_intent || "") === "widget_link_sent" &&
                 !recentSuccess.some((r: any) => String(r?.message_text || "").startsWith("Agendamento via widget"));
+              const _marcouEmMs = Math.max(...recentSuccess.map((r: any) => Date.parse(String(r?.created_at || "")) || 0));
+              ofertaNova = ofertaNovaDepoisDaMarcacao(ultimaSaida?.[0], _marcouEmMs);
             } catch { /* na duvida, mantem o guard armado */ }
 
             if (apenasLinkDoWidget) {
               console.log(
                 "[Webhook] \u21a9\ufe0f Recent 'agendar' era ENVIO DE LINK do widget, nao marcacao — guard NAO arma",
               );
+            } else if (ofertaNova) {
+              console.log("[Webhook] \u21a9\ufe0f a última saída é uma oferta nova do agendar, feita depois da marcação — guard NAO arma");
             } else {
               recentBookingCompleted = true;
               console.log(
@@ -16917,6 +16939,16 @@ Deno.serve(async (req) => {
           _limposDeProposito.add("date");
           _limposDeProposito.add("preferred_weekday");
         }
+        // PERGUNTA SOBRE OS DIAS DO MÉDICO (17/11, Gerson) — ver perguntaDiasDoMedico em
+        // helpers.ts. "Quais dias ele tem?" não traz dia nem data: a segunda-feira vinha DEPOIS,
+        // pela recuperação do histórico. Limpa sempre, para o dia grudado não voltar.
+        if (perguntaDiasDoMedico(finalMessage)) {
+          console.log(`[Webhook] 📅 pergunta sobre os dias do médico — sem date="${classification.date || ""}" nem preferred_weekday="${classification.preferred_weekday || ""}"`);
+          classification.date = "";
+          classification.preferred_weekday = "";
+          _limposDeProposito.add("date");
+          _limposDeProposito.add("preferred_weekday");
+        }
 
         // POST-CLASSIFICATION: Detect doctor switch mid-conversation and clear stale date/time
         if (classification.doctor_name && conversationId) {
@@ -17432,8 +17464,11 @@ Deno.serve(async (req) => {
         ["consultar", "falar_com_atendente", "unknown", "agendar", "listar_medicos"].includes(String(classification.intent || ""));
       const _regraRetorno = !_domiciliar && _semUrgClinica && perguntaRegraDoRetorno(finalMessage || "") &&
         ["consultar", "falar_com_atendente", "unknown", "agendar"].includes(String(classification.intent || ""));
-      if (_domiciliar || _regraRetorno) {
-        console.log(`[Webhook] pergunta com resposta pronta (${_domiciliar ? "domicílio" : "regra do retorno"})`);
+      // "O RETORNO É COBRADO?" (17/11, Paulo) — ver perguntaSeRetornoECobrado em helpers.ts
+      const _retornoCobrado = !_domiciliar && _semUrgClinica && perguntaSeRetornoECobrado(finalMessage || "") &&
+        ["consultar", "falar_com_atendente", "unknown", "agendar"].includes(String(classification.intent || ""));
+      if (_domiciliar || _regraRetorno || _retornoCobrado) {
+        console.log(`[Webhook] pergunta com resposta pronta (${_domiciliar ? "domicílio" : _retornoCobrado ? "retorno cobrado" : "regra do retorno"})`);
         classification.intent = "unknown";
       }
       // === RESPOSTA À PERGUNTA "… COMO PARTICULAR?" (16/11) ===
@@ -17658,7 +17693,7 @@ Deno.serve(async (req) => {
           //   31/08 07:43  "Sim, qual a proxima data q ele tem horario?"
           //   01/09 09:07  "Pra frente"
           // Pedir mais opções é tentativa nova, não recusa. Não conta.
-          if (pedeQualquerData(finalMessage)) {
+          if (pedeQualquerData(finalMessage) || perguntaDiasDoMedico(finalMessage)) {
             console.log(`[Regra7] paciente está PEDINDO mais datas — tentativa nova, não conta como negativa`);
             throw { _regra7Pula: true };
           }
@@ -18484,6 +18519,7 @@ Deno.serve(async (req) => {
           } catch { /* non-blocking */ }
         }
         if (_regraRetorno) replyText = TEXTO_REGRA_DO_RETORNO;
+        if (_retornoCobrado) replyText = TEXTO_RETORNO_COBRADO;
         // VALOR DA NUTRÓLOGA (19/10, Enzo): a pergunta vinha junto com outra (nota da
         // aplicação → Lidiane) e o valor, que está no script, ficou de fora.
         try {
