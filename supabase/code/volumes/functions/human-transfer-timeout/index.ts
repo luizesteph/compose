@@ -22,6 +22,8 @@ import {
   prazoDeRespostaEmMinutos,
   prazoDaDevolucao,
   menorPrazoDaDevolucao,
+  instanteEmQuePegouAFicha,
+  inicioDoPrazoDaDevolucao,
   JANELA_CONVERSA_ATIVA_MIN,
   decideLiberarFicha,
   expedienteAberto,
@@ -349,6 +351,7 @@ async function devolverInativosAFila(
     // atendente pode ter respondido por um caminho que não gerou webhook.
     let ticketId: number | null = null;
     let nome = "";
+    let pegouMs: number | null = null;
     try {
       const tel = String(c.phone || "").replace(/\D/g, "");
       const full = tel.length <= 11 ? `55${tel}` : tel;
@@ -375,6 +378,8 @@ async function devolverInativosAFila(
       nome = String(tk?.user?.name || "").trim();
       if (!nome) { pulou("open_sem_dona"); continue; }
       ticketId = Number(tk?.id ?? tk?.ticketId ?? 0) || null;
+      // quando ela pegou a ficha (17/11): é daí que o prazo dela conta, se foi depois da mensagem
+      pegouMs = instanteEmQuePegouAFicha(tk);
     } catch { pulou("showticket_erro"); continue; }
     if (!ticketId) { pulou("sem_ticket_id"); continue; }
 
@@ -390,7 +395,13 @@ async function devolverInativosAFila(
     // quem está de férias ou ausente hoje não segura o paciente (15/11)
     const _fora = await atendentesForaHoje(supabase, clinicTokenId);
     const prazoMin = prazoDaDevolucao({ nomeAtendente: nome, conversaAtiva, prazoPadrao, prazoEstendido, foraDaClinica: _fora });
-    if (esperandoMin < prazoMin) { pulou("dentro_do_prazo_da_dona"); continue; }
+    // DE QUANDO CONTA (17/11): do que aconteceu por último, o paciente escrever ou ela pegar a
+    // ficha. Contando só da mensagem, quem pegava de manhã uma ficha da véspera perdia a ficha
+    // na rodada seguinte, com menos de 2 min na mão (218 das 529 devoluções de 30 dias).
+    const _agoraMs = Date.now();
+    const _inicio = inicioDoPrazoDaDevolucao({ mensagemDoPacienteMs: _tPac, pegouAFichaMs: pegouMs, agoraMs: _agoraMs });
+    const contandoMin = (_agoraMs - _inicio.inicioMs) / 60000;
+    if (contandoMin < prazoMin) { pulou(_inicio.pegouDepois ? "dentro_do_prazo_de_quem_pegou" : "dentro_do_prazo_da_dona"); continue; }
 
     // CASO LONGO (pedido do dono, 15/09): a Vânia e a Lidiane perdem o paciente
     // para a fila UMA vez por caso. Se esta conversa já passou pela fila nos
@@ -454,7 +465,7 @@ async function devolverInativosAFila(
         initiated_by: "sistema",
         trigger: "inatividade",
         reason: "devolvido_a_fila",
-        detail: `ticket #${ticketId}: ${nome} sem responder ha ${Math.round(esperandoMin)}min (prazo ${prazoMin}min)`,
+        detail: `ticket #${ticketId}: ${nome} sem responder ha ${Math.round(esperandoMin)}min (prazo ${prazoMin}min)${_inicio.pegouDepois ? ` — pegou a ficha ha ${Math.round(contandoMin)}min` : ""}`,
       } as any).then(() => {}, () => {});   // auditoria nunca derruba a ação
     } catch (e) {
       out.detalhes.push(`ticket ${ticketId}: ${(e as Error).message.slice(0, 80)}`);

@@ -158,6 +158,60 @@ export function menorPrazoDaDevolucao(prazoPadrao?: number): number {
   return Math.max(Number(prazoPadrao) || 0, PRAZO_DEVOLUCAO_MIN);
 }
 
+// DE QUANDO CONTA O PRAZO DA DEVOLUÇÃO (17/11/2026, pedido do dono: "a atendente começa a
+// responder… aí você já transfere para pendentes de novo").
+//
+// O prazo era contado da MENSAGEM DO PACIENTE e nunca de quando a atendente pegou a ficha.
+// Mensagem de ontem às 18h, ficha na fila a noite toda, a Laiz pega às 07h55: na rodada
+// seguinte do cron (2 em 2 min) a ficha voltava para pendentes, porque "ela está sem responder
+// há 852 min (prazo 20 min)". Ela recebia menos de 2 minutos, não 20.
+//
+// Medido em 30 dias (18/10 a 17/11): 218 das 529 devoluções saíram com a mensagem vencida muito
+// além do prazo — a ficha tinha acabado de ser pega; em 121 delas a equipe respondeu ao paciente
+// nos 20 min seguintes (105 em até 5 min). Na manhã de 17/11: devolvida 07:56:01 e a Laiz
+// respondeu 07:56:45; 08:00:13 → 08:00:23; 08:08:01 → 08:09:35; 08:26:01 → 08:26:19. Uma mesma
+// conversa voltou 3 vezes no dia (o teto do freio) em 54 casos.
+//
+// O Z-PRO diz quando a ficha foi assumida: `startedAttendanceAt` (ms), no showticket e no
+// payload de cada mensagem. Ele muda a cada vez que alguém assume — conferido em 21 dias:
+// depois de uma devolução, a próxima vez que a ficha aparece aberta com dona o campo é
+// posterior à devolução em 204 de 210. Ficha aberta pela própria atendente vem sem o campo
+// (114 de 385 em 7 dias): aí vale a mensagem, como sempre foi.
+//
+// A regra: o prazo conta do que aconteceu por último — o paciente escrever ou a atendente pegar
+// a ficha. Quem já estava com a ficha quando o paciente escreveu não ganha nada.
+
+/** Tolerância entre o relógio do Z-PRO e o nosso. Além disso o dado não é confiável. */
+const FOLGA_DO_RELOGIO_MS = 2 * 60_000;
+
+/** Quando a ficha foi assumida pela última vez (ms), lido do ticket do Z-PRO. Sem o dado, null. */
+export function instanteEmQuePegouAFicha(ticket: unknown): number | null {
+  if (!ticket || typeof ticket !== "object") return null;
+  const v = (ticket as Record<string, unknown>).startedAttendanceAt;
+  if (typeof v !== "number" && typeof v !== "string") return null;
+  const n = Number(String(v).trim() || NaN);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * O instante de onde o prazo da devolução é contado: o mais recente entre a mensagem do
+ * paciente e o momento em que a atendente pegou a ficha.
+ */
+export function inicioDoPrazoDaDevolucao(a: {
+  mensagemDoPacienteMs: number;
+  /** de `instanteEmQuePegouAFicha` */
+  pegouAFichaMs?: number | null;
+  agoraMs: number;
+}): { inicioMs: number; pegouDepois: boolean } {
+  const msg = Number(a.mensagemDoPacienteMs);
+  const pegou = Number(a.pegouAFichaMs);
+  // Sem o dado (NaN) ou muito à frente do nosso relógio: não vale — um prazo que começa no
+  // futuro nunca venceria. Aí conta da mensagem, como sempre foi.
+  const confiavel = pegou <= a.agoraMs + FOLGA_DO_RELOGIO_MS;
+  const quando = confiavel ? Math.min(pegou, a.agoraMs) : 0;
+  return quando > msg ? { inicioMs: quando, pegouDepois: true } : { inicioMs: msg, pegouDepois: false };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CASO LONGO — Vânia e Lidiane vão para pendentes UMA vez (pedido do dono, 15/09)
 // ─────────────────────────────────────────────────────────────────────────────
