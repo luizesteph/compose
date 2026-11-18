@@ -179,6 +179,8 @@ import {
   ehAvisoDeAtraso,
   TEXTO_AVISO_DE_ATRASO,
   TEXTO_CANCELAMENTO_NAO_CONCLUIDO,
+  TEXTO_CONSULTA_JA_CANCELADA,
+  jaCanceladaNaConversa,
   respostaFalaDeFisioSemPedido,
   textoMarcacaoEmOutroNome,
   TEXTO_ACEITE_COM_ATENDENTE,
@@ -7134,6 +7136,36 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           }
           // "Não encontrei" não é instabilidade (19/09) — texto fixo, ver helpers.ts
           return { status: "failed", response: TEXTO_SEM_CONSULTA_PARA_CANCELAR, error: "Agendamento não encontrado para cancelar", bypassAiRewrite: true } as any;
+        }
+
+        // CONSULTA JÁ CANCELADA NESTA CONVERSA (18/11, relatório de 17/11 item 8 — ver
+        // jaCanceladaNaConversa em helpers.ts). "Pode cancelar" cancelou; o "Por favor" de 2 s
+        // depois recuperou o mesmo número de consulta, o Amigo deu 404 e a paciente ouviu "não
+        // consegui concluir o cancelamento". Sem PUT, sem equipe: já está cancelada.
+        {
+          const _convC = conversationIdParam || (globalThis as any).__currentConversationId || null;
+          if (_convC && supabaseClient) {
+            try {
+              const { data: _jaC } = await supabaseClient
+                .from("webhook_messages")
+                .select("ai_intent, action_status, ai_entities")
+                .eq("conversation_id", _convC)
+                .eq("direction", "incoming")
+                .eq("ai_intent", "cancelar")
+                .eq("action_status", "success")
+                .gte("created_at", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
+                .order("created_at", { ascending: false })
+                .limit(10);
+              if (jaCanceladaNaConversa(attId, _jaC || [])) {
+                console.log(`[Webhook] cancelar - consulta ${attId} já cancelada nesta conversa (24 h) — sem PUT, sem equipe`);
+                return {
+                  status: "success",
+                  response: TEXTO_CONSULTA_JA_CANCELADA,
+                  bypassAiRewrite: true,
+                } as any;
+              }
+            } catch (_e) { /* non-blocking: segue para o cancelamento de sempre */ }
+          }
         }
 
         // CANCELAR SÓ COM PEDIDO (23/09, caso Adriana — ver podeCancelarSemPerguntar em

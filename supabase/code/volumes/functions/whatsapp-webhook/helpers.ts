@@ -3192,6 +3192,29 @@ export const TEXTO_AVISO_DE_ATRASO =
 // ─────────────────────────────────────────────────────────────────────────────
 // CORREÇÕES DA AVALIAÇÃO DA SEMANA 28/09–02/10
 // ─────────────────────────────────────────────────────────────────────────────
+/**
+ * ESTA CONVERSA JÁ CANCELOU ESSA CONSULTA? (18/11, relatório de 17/11 item 8). "Pode cancelar"
+ * cancelou a consulta pela resposta à confirmação; o "Por favor" de 2 s depois virou outro
+ * `cancelar`, a recuperação do histórico trouxe o MESMO número de consulta, o Amigo respondeu
+ * 404 e a paciente ouviu "não consegui concluir o cancelamento". `linhas` são as mensagens de
+ * entrada da conversa nas últimas 24 h; vale só cancelamento que deu certo, da mesma consulta.
+ */
+export function jaCanceladaNaConversa(
+  attId: unknown,
+  linhas: Array<{ ai_intent?: unknown; action_status?: unknown; ai_entities?: unknown } | null> | null | undefined,
+): boolean {
+  const id = String(attId ?? "").trim();
+  if (!/^\d+$/.test(id)) return false;
+  return (linhas || []).some((l) => {
+    if (!l || l.ai_intent !== "cancelar" || l.action_status !== "success") return false;
+    const ent = (l.ai_entities || {}) as Record<string, unknown>;
+    return String(ent.attendance_id ?? "").trim() === id;
+  });
+}
+
+export const TEXTO_CONSULTA_JA_CANCELADA =
+  "Sua consulta já está cancelada, não precisa fazer mais nada. 😊 Se quiser marcar para outro dia, é só escrever aqui.";
+
 export const TEXTO_CANCELAMENTO_NAO_CONCLUIDO =
   "Não consegui concluir o cancelamento pelo sistema. Vou passar para a nossa equipe finalizar e te responder por aqui. 🙏";
 
