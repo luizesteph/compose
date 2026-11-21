@@ -1,3 +1,4 @@
+import { proximoDiaUtil } from "./confirmacao.ts";
 // _shared/atendimento.ts — regras de atendimento humano compartilhadas.
 //
 // Fica em _shared porque DUAS funções precisam da mesma decisão: o
@@ -638,14 +639,38 @@ export function pertoDoEncerramento(
  * Frase para a noite, a madrugada e o fim de semana. Com `nome`, a frase fala da
  * atendente ("ela te responde"); sem, da equipe.
  */
+// VÉSPERA DE FERIADO (21/11, Paulo e Melissa 19/11 18h47: "te respondem amanhã de manhã", e 20/11
+// era feriado). Com a data de hoje, a volta sai do calendário da confirmação (FERIADOS +
+// fim de semana); quando ela não é o dia de sempre (amanhã; segunda no fim de semana), a frase
+// diz o dia. Sem a data, igual a antes.
+const _NOME_DO_DIA = ["domingo", "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado"];
+function voltaForaDoComum(agora: { diaDaSemana: number; hora: number; minuto: number; hojeISO?: string }): string | null {
+  const hoje = agora.hojeISO;
+  if (!hoje || !/^\d{4}-\d{2}-\d{2}$/.test(hoje)) return null;
+  const m = agora.hora * 60 + agora.minuto;
+  if (m < 7 * 60 + 30) return null; // madrugada: "hoje de manhã" é o dia fechado, que tem fluxo próprio
+  const volta = proximoDiaUtil(hoje);
+  if (volta === proximoDiaDaSemana(hoje)) return null;
+  const dw = new Date(`${volta}T12:00:00Z`).getUTCDay();
+  return `na ${_NOME_DO_DIA[dw]}, ${volta.slice(8, 10)}/${volta.slice(5, 7)}, de manhã`;
+}
+/** O próximo dia de segunda a sexta, sem olhar feriado. */
+function proximoDiaDaSemana(hojeISO: string): string {
+  let d = new Date(`${hojeISO}T12:00:00Z`);
+  do { d = new Date(d.getTime() + 86400000); } while (d.getUTCDay() === 0 || d.getUTCDay() === 6);
+  return d.toISOString().slice(0, 10);
+}
+
 export function fraseForaDoExpediente(
-  agora: { diaDaSemana: number; hora: number; minuto: number },
+  agora: { diaDaSemana: number; hora: number; minuto: number; hojeISO?: string },
   nome?: string | null,
 ): string {
   const alvo = nome ? `a ${nome}` : "a nossa equipe";
   const m = agora.hora * 60 + agora.minuto;
   const fecha = 18 * 60 + 15;
   const abre = 7 * 60 + 30;
+  const _volta = voltaForaDoComum(agora);
+  if (_volta) return `Vou deixar seu caso com ${alvo} — o atendimento volta ${_volta}.`;
   const fimDeSemana = agora.diaDaSemana === 0 || agora.diaDaSemana === 6 || (agora.diaDaSemana === 5 && m >= fecha);
   if (fimDeSemana) return `Vou deixar seu caso com ${alvo} — o atendimento volta na segunda-feira de manhã.`;
   if (m < abre) {
@@ -655,8 +680,10 @@ export function fraseForaDoExpediente(
 }
 
 /** Quando a equipe volta a responder (fora do expediente); `null` com o atendimento aberto. 19/10, Daniella. */
-export function quandoAEquipeResponde(agora: { diaDaSemana: number; hora: number; minuto: number }): string | null {
+export function quandoAEquipeResponde(agora: { diaDaSemana: number; hora: number; minuto: number; hojeISO?: string }): string | null {
   if (expedienteAberto(agora)) return null;
+  const _volta = voltaForaDoComum(agora);
+  if (_volta) return _volta;
   const m = agora.hora * 60 + agora.minuto;
   const fimDeSemana = agora.diaDaSemana === 0 || agora.diaDaSemana === 6 || (agora.diaDaSemana === 5 && m >= 18 * 60 + 15);
   if (fimDeSemana) return "na segunda-feira de manhã";

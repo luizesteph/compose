@@ -458,8 +458,17 @@ const FRATURA_ANTIGA_RE = new RegExp(String.raw`\bfratur[\s\S]{0,80}\b${_TEMPO_A
 // Um único lugar decide se o padrão i realmente dispara — detectUrgency e
 // classificarUrgencia PRECISAM concordar, senão a mensagem diria uma coisa e o
 // roteamento faria outra.
+// CANCELAR PORQUE MELHOROU NÃO É URGÊNCIA (21/11, Fernando 19/11: "Gostaria de cancelar a
+// consulta… Acordei com muita dor hoje, mas de lá para cá melhorou" → "procure um pronto-socorro"
+// duas vezes e a consulta das 15h ficou de pé). Exige o pedido de cancelar E a melhora; piora ou
+// "não melhorou" na frase mantêm a urgência. Em 60 dias, 1 de 6 mensagens assim disparava.
+const PEDE_CANCELAR_URG_RE = /(?<![\p{L}])(cancel\p{L}*|desmarc\p{L}*|desist\p{L}*)(?![\p{L}])/iu;
+const MELHOROU_URG_RE = /(?<![\p{L}])(melhorou|melhorei|estou melhor|t[ôo] melhor|a dor passou|j[áa] passou)(?![\p{L}])/iu;
+const PIOROU_URG_RE = /(?<![\p{L}])(pior|piorou|piorando|n[ãa]o melhorou|n[ãa]o passou)(?![\p{L}])/iu;
+
 function padraoDeUrgenciaDispara(p: RegExp, i: number, t: string): boolean {
   if (!p.test(t)) return false;
+  if (PEDE_CANCELAR_URG_RE.test(t) && MELHOROU_URG_RE.test(t) && !PIOROU_URG_RE.test(t)) return false;
   // i === 0 é o padrão da palavra "urgente/urgência/emergência"
   if (i === 0 && URGENCIA_NEGADA_RE.test(t)) return false;
   // "consultando pra uma amiga que TEVE uma emergência" (13/10, Ellise): a emergência é

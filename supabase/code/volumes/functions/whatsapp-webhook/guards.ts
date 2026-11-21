@@ -856,7 +856,7 @@ function emPedacos(texto: string, sep: RegExp): Array<{ t: string; sep: string }
  */
 export function avisoDeEncerramento(
   texto: string,
-  agora: { diaDaSemana: number; hora: number; minuto: number },
+  agora: { diaDaSemana: number; hora: number; minuto: number; hojeISO?: string },
 ): string {
   if (typeof texto !== "string" || !texto.trim()) return texto;
   const noturno = !expedienteAberto(agora);

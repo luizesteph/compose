@@ -675,7 +675,7 @@ const corsHeaders = {
 // atendimento." Ver avisoDeEncerramento (guards.ts). Hora sempre de São Paulo.
 function comAvisoDeEncerramento(texto: string): string {
   const sp = getNowSPParts();
-  return avisoDeEncerramento(texto, { diaDaSemana: sp.weekday, hora: sp.hour, minuto: sp.minute });
+  return avisoDeEncerramento(texto, { diaDaSemana: sp.weekday, hora: sp.hour, minuto: sp.minute, hojeISO: getTodayISO_SP() });
 }
 
 function getNowSPParts(): {
@@ -18655,7 +18655,7 @@ Deno.serve(async (req) => {
         // com a nossa equipe, que responde por aqui" — sem dizer que é na segunda.
         try {
           const _spCL = getNowSPParts();
-          const _quandoCL = quandoAEquipeResponde({ diaDaSemana: _spCL.weekday, hora: _spCL.hour, minuto: _spCL.minute });
+          const _quandoCL = quandoAEquipeResponde({ diaDaSemana: _spCL.weekday, hora: _spCL.hour, minuto: _spCL.minute, hojeISO: getTodayISO_SP() });
           if ((actionResult as any)?.casoLongoSemNovaTransferencia && _quandoCL && !/segunda|amanh[ãa]|de manh[ãa]/i.test(replyText)) {
             console.log(`[CasoLongo] fora do expediente — dizendo quando a equipe responde (${_quandoCL})`);
             replyText = `${replyText.trim()} Como o atendimento está fechado agora, a equipe te responde ${_quandoCL}. 🙏`;
@@ -19623,7 +19623,7 @@ Deno.serve(async (req) => {
                   : _semResposta
                     ? { tipo: "com_a_equipe", jaAvisado: _jaDitas.some((t) => t.includes(MARCA_JA_ESTA_COM_A_EQUIPE)) }
                     : null,
-                quandoRespondem: quandoAEquipeResponde({ diaDaSemana: _spRep.weekday, hora: _spRep.hour, minuto: _spRep.minute }),
+                quandoRespondem: quandoAEquipeResponde({ diaDaSemana: _spRep.weekday, hora: _spRep.hour, minuto: _spRep.minute, hojeISO: getTodayISO_SP() }),
               });
             } catch (e) {
               console.log(`[Repeticao] leitura do estado falhou (segue como laço): ${(e as Error).message}`);
