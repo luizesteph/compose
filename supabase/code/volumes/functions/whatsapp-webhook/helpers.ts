@@ -3224,6 +3224,71 @@ export function jaCanceladaNaConversa(
 export const TEXTO_CONSULTA_JA_CANCELADA =
   "Sua consulta já está cancelada, não precisa fazer mais nada. 😊 Se quiser marcar para outro dia, é só escrever aqui.";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CADASTRO DUPLICADO (21/11/2026, avaliação da semana 16–21/11; pedido do dono: "Corrige o
+// cadastro duplicado"). A equipe marca pela tela do Amigo muitas vezes só com o NOME, sem CPF.
+// Depois a paciente manda o CPF para a Julia, o `patients/exists` não acha e a Julia criava um
+// segundo cadastro e marcava "CONSULTA 1° VEZ". Casos: Zildete (20/11, tinha acabado de
+// confirmar a consulta com o Dr. Lucas nesta mesma conversa) e Rosimar (19/11, consulta de 10/11
+// marcada pela equipe só pelo nome; na prática era retorno). Agora, antes de criar o paciente,
+// a Julia compara o nome dado com os nomes que esta conversa já conhece (as confirmações que ela
+// mandou, com "paciente *Nome*") e com o cadastro local do telefone. Se é o mesmo nome, ela não
+// cria: passa para a equipe com o horário escolhido. Nome diferente (filha, marido) segue como
+// antes — telefone é compartilhado e nunca decide QUEM é o paciente, só impede a duplicata.
+// ─────────────────────────────────────────────────────────────────────────────
+const _PARTICULAS_DO_NOME = new Set(["de", "da", "do", "das", "dos", "e"]);
+
+function _partesDoNome(nome: unknown): string[] {
+  return String(nome ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, " ")
+    .split(/\s+/)
+    .filter((t) => t.length > 1 && !_PARTICULAS_DO_NOME.has(t));
+}
+
+/** Mesmo primeiro nome e pelo menos um sobrenome em comum (acento e caixa não contam). */
+export function mesmoNomeDePaciente(a: unknown, b: unknown): boolean {
+  const x = _partesDoNome(a);
+  const y = _partesDoNome(b);
+  if (x.length < 2 || y.length < 2 || x[0] !== y[0]) return false;
+  const sobrenomes = new Set(y.slice(1));
+  return x.slice(1).some((t) => sobrenomes.has(t));
+}
+
+/** Nomes de paciente citados nas confirmações que a Julia mandou ("paciente *Nome*" e "• *Nome* com"). */
+export function nomesNasConfirmacoes(textos: unknown[] | null | undefined): string[] {
+  const nomes: string[] = [];
+  for (const t of textos || []) {
+    const s = String(t ?? "");
+    for (const m of s.matchAll(/paciente\s+\*([^*\n]{3,80})\*/giu)) nomes.push(m[1].trim());
+    for (const m of s.matchAll(/•\s*\*([^*\n]{3,80})\*\s+com\b/giu)) nomes.push(m[1].trim());
+  }
+  return nomes;
+}
+
+/** O nome que a Julia ia cadastrar já é de um paciente que esta conversa conhece? Devolve esse nome. */
+export function cadastroQueJaExiste(nomeNovo: unknown, conhecidos: unknown[] | null | undefined): string | null {
+  for (const c of conhecidos || []) {
+    if (mesmoNomeDePaciente(nomeNovo, c)) return String(c).trim();
+  }
+  return null;
+}
+
+export function textoCadastroJaExiste(p: { data?: unknown; hora?: unknown; medico?: unknown }): string {
+  const data = /^\d{4}-\d{2}-\d{2}$/.test(String(p.data ?? ""))
+    ? String(p.data).slice(8, 10) + "/" + String(p.data).slice(5, 7)
+    : "";
+  const hora = /^\d{1,2}:\d{2}$/.test(String(p.hora ?? "")) ? String(p.hora) : "";
+  const medico = String(p.medico ?? "").trim();
+  const horario = data && hora ? ` o horário de ${data} às ${hora}${medico ? ` com ${medico}` : ""}` : " o seu horário";
+  return (
+    "Achei na clínica um cadastro com o seu nome, mas o CPF que você mandou não aparece nele. " +
+    `Para não abrir um cadastro em dobro, vou passar para a nossa equipe concluir${horario} no seu cadastro de sempre. 🙏`
+  );
+}
+
 export const TEXTO_CANCELAMENTO_NAO_CONCLUIDO =
   "Não consegui concluir o cancelamento pelo sistema. Vou passar para a nossa equipe finalizar e te responder por aqui. 🙏";
 

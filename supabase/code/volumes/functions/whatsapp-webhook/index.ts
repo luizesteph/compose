@@ -181,6 +181,9 @@ import {
   TEXTO_CANCELAMENTO_NAO_CONCLUIDO,
   TEXTO_CONSULTA_JA_CANCELADA,
   jaCanceladaNaConversa,
+  nomesNasConfirmacoes,
+  cadastroQueJaExiste,
+  textoCadastroJaExiste,
   respostaFalaDeFisioSemPedido,
   textoMarcacaoEmOutroNome,
   TEXTO_ACEITE_COM_ATENDENTE,
@@ -8780,6 +8783,75 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           }
         } catch (checkErr) {
           console.log("[Webhook] cadastrar - CPF check error (will try create): " + (checkErr as Error).message);
+        }
+
+        // CADASTRO DUPLICADO (21/11, Zildete e Rosimar): o CPF não achou ninguém, mas esta
+        // conversa já conhece um paciente com ESSE nome (confirmação que a Julia mandou, ou o
+        // cadastro local do telefone) — a equipe o cadastrou pela tela só com o nome. Não cria
+        // um segundo cadastro: passa para a equipe com o horário escolhido. Nome diferente
+        // (filha, marido) segue como antes. Erro na leitura não muda nada (cadastra como sempre).
+        if (!existingPatientId && supabaseClient) {
+          try {
+            const _convCad = conversationIdParam || (globalThis as any).__currentConversationId || null;
+            const _ult8 = String(senderPhone || "").replace(/\D/g, "").slice(-8);
+            const [_confCad, _localCad] = await Promise.all([
+              _convCad
+                ? supabaseClient
+                    .from("webhook_messages")
+                    .select("message_text")
+                    .eq("conversation_id", _convCad)
+                    .eq("direction", "outgoing")
+                    .eq("ai_intent", "confirmacao_insistencia")
+                    .gte("created_at", new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString())
+                    .order("created_at", { ascending: false })
+                    .limit(20)
+                : Promise.resolve({ data: [] }),
+              _ult8.length === 8
+                ? supabaseClient.from("local_patients").select("name").like("phone", `%${_ult8}`).limit(20)
+                : Promise.resolve({ data: [] }),
+            ]);
+            const _conhecidos = [
+              ...nomesNasConfirmacoes((_confCad?.data || []).map((r: any) => r.message_text)),
+              ...((_localCad?.data || []).map((r: any) => r.name)),
+            ];
+            const _jaExiste = cadastroQueJaExiste(entities.patient_full_name, _conhecidos);
+            if (_jaExiste) {
+              console.log(`[Webhook] cadastrar - ⛔ cadastro duplicado evitado: o CPF não achou, mas a conversa já conhece este nome — passa para a equipe`);
+              const _txtCad = textoCadastroJaExiste({ data: entities.date, hora: entities.time, medico: entities.doctor_name });
+              if (avanceaiConfig && senderPhone && !isTestMode) {
+                try {
+                  let formattedPhone = senderPhone.replace(/\D/g, "");
+                  if (!formattedPhone.startsWith("55")) formattedPhone = "55" + formattedPhone;
+                  await transferTicketToHuman({
+                    baseUrl: avanceaiConfig.baseUrl,
+                    apiId: avanceaiConfig.apiId,
+                    bearerToken: avanceaiConfig.bearerToken,
+                    phone: formattedPhone,
+                    channelId: channelId || (avanceaiConfig as any).channelId || null,
+                  });
+                  await auditTransfer(supabaseClient, {
+                    clinicTokenId,
+                    conversationId: _convCad,
+                    phone: formattedPhone,
+                    initiatedBy: "julia",
+                    trigger: "cadastro_ja_existe",
+                    reason: "CPF não achado, mas o nome já é de paciente desta conversa — a equipe marca no cadastro de sempre",
+                    detail: `${String(entities.date || "")} ${String(entities.time || "")} ${String(entities.doctor_name || "")}`.trim(),
+                  });
+                } catch (transferErr) {
+                  console.log(`[Webhook] cadastrar - transferência do cadastro duplicado falhou (non-blocking): ${(transferErr as Error).message}`);
+                }
+              }
+              return {
+                status: "transferred_cadastro_existente",
+                response: _txtCad,
+                error: _txtCad,
+                bypassAiRewrite: true,
+              } as any;
+            }
+          } catch (_e) {
+            console.log("[Webhook] cadastrar - checagem de cadastro duplicado falhou (non-blocking): " + (_e as Error).message);
+          }
         }
 
         // Create patient in Amigo API (only if not already exists)
