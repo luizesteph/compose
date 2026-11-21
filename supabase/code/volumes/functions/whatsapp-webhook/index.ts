@@ -8794,6 +8794,10 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           try {
             const _convCad = conversationIdParam || (globalThis as any).__currentConversationId || null;
             const _ult8 = String(senderPhone || "").replace(/\D/g, "").slice(-8);
+            // cadastro local SÓ desta clínica (local_patients é por user_id, o dono da clínica)
+            const { data: _donoCad } = clinicTokenId
+              ? await supabaseClient.from("user_webhooks").select("user_id").eq("clinic_token_id", clinicTokenId).limit(1).maybeSingle()
+              : { data: null };
             const [_confCad, _localCad] = await Promise.all([
               _convCad
                 ? supabaseClient
@@ -8806,8 +8810,8 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                     .order("created_at", { ascending: false })
                     .limit(20)
                 : Promise.resolve({ data: [] }),
-              _ult8.length === 8
-                ? supabaseClient.from("local_patients").select("name").like("phone", `%${_ult8}`).limit(20)
+              _ult8.length === 8 && _donoCad?.user_id
+                ? supabaseClient.from("local_patients").select("name").eq("user_id", _donoCad.user_id).like("phone", `%${_ult8}`).limit(20)
                 : Promise.resolve({ data: [] }),
             ]);
             const _conhecidos = [
