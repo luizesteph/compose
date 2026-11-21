@@ -82,7 +82,9 @@ function somaDias(iso: string, n: number): string {
  * amanhã para as consultas de terça; na segunda não manda nada"). Dia de feriado não é
  * dia útil: a véspera mira o dia seguinte a ele e no feriado não sai nada.
  */
-export const FERIADOS = new Set<string>(["2026-11-02"]);
+// Os mesmos dias de clinic_closed_days (21/11: só havia 02/11, e as confirmações de segunda saíram
+// no feriado de 20/11). Ao cadastrar um dia fechado novo no painel, acrescente aqui também.
+export const FERIADOS = new Set<string>(["2026-11-02", "2026-11-20", "2026-12-25", "2027-01-01"]);
 export const ehFeriado = (iso: string) => FERIADOS.has(iso);
 
 /** Próximo dia útil (seg–sex, fora feriado) depois de hoje. Sexta → segunda. */
