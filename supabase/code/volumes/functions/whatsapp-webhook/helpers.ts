@@ -3178,7 +3178,7 @@ const _ATRASO_RE =
 const _VOLTA_DA_CONSULTA_RE =
   /\b(pra|para)\s+(eu\s+|a\s+gente\s+)?voltar\b|\bacabei\s+de\s+sair\b|\bj[aá]\s+sa[ií]\b|\bsa[ií]\s+(da[ií]|de\s+l[aá]|agora|agorinha)\b|\bdepois\s+da\s+consulta\b/iu;
 const _ATRASO_NAO_E_AVISO_RE =
-  /\?|\b(remarc|desmarc|cancel|reagend|antecip|adiant|outro\s+hor[aá]rio|mais\s+tarde|n[aã]o\s+(vou|vamos|irei)\s+(conseguir|poder)|n[aã]o\s+conseguirei|n[aã]o\s+consigo|gostaria\s+de\s+saber|queria\s+saber|ser[aá]\s+que|caso\s+eu|me\s+atende)/iu;
+  /\?|\b(remarc|desmarc|cancel|reagend|antecip|adiant|outro\s+hor[aá]rio|mais\s+tarde|n[aã]o\s+(vou|vamos|irei)\s+(conseguir|poder)|n[aã]o\s+conseguirei|n[aã]o\s+consigo\s+(ir|comparecer|mais|nesse|neste|nessa|nesta)\b|gostaria\s+de\s+saber|queria\s+saber|ser[aá]\s+que|caso\s+eu|me\s+atende)/iu;
 
 export function ehAvisoDeAtraso(texto: unknown): boolean {
   const t = String(texto ?? "").trim();

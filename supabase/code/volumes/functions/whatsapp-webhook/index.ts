@@ -16468,7 +16468,7 @@ Deno.serve(async (req) => {
         // avisar ninguém. Aviso sem pergunta nem pedido → texto pronto (case unknown).
         // 17/11 (Rafa): "Já estou a caminho / devo atrasar uns 15min" no meio de um remarcar
         // seguiu pedindo CPF e mostrando datas de dezembro — o aviso vale também ali.
-        if (["unknown", "confirmar", "consultar", "reagendar"].includes(String(classification.intent || "")) && ehAvisoDeAtraso(finalMessage || "")) {
+        if (["unknown", "confirmar", "consultar", "reagendar", "falar_com_atendente"].includes(String(classification.intent || "")) && ehAvisoDeAtraso(finalMessage || "")) {
           console.log(`[Atraso] aviso de atraso ("${String(finalMessage || "").slice(0, 40)}") — texto pronto`);
           classification.intent = "unknown";
         }
