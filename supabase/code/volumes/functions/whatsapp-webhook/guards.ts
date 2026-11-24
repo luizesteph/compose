@@ -4,7 +4,7 @@
 // horarios (tokens de agenda so saem com respaldo verificado), pre-book guard
 // (fim de semana / fora do expediente) e dedup de respostas quase-identicas.
 // Extraido byte a byte do index.ts — comportamento identico. Sem @ts-nocheck.
-import { stripAccents, PROMESSA_DE_HUMANO_RE, MARCA_LIBERACAO_CONFERIDA, soAckOuAgradecimento, falaEsperaResposta, formatDateLabel, respostaSimOuNao, mensagemCitaHora } from "./helpers.ts";
+import { stripAccents, PROMESSA_DE_HUMANO_RE, MARCA_LIBERACAO_CONFERIDA, soAckOuAgradecimento, falaEsperaResposta, formatDateLabel, respostaSimOuNao, mensagemCitaHora, horaDoTexto } from "./helpers.ts";
 import { ehOrigemDoSite } from "../_shared/origem.ts";
 import { FRASE_ENCERRAMENTO, pertoDoEncerramento, expedienteAberto, fraseForaDoExpediente } from "../_shared/atendimento.ts";
 
@@ -123,8 +123,8 @@ export type PendenciaDaConversa =
 
 export type DecisaoDaRepeticao =
   | { acao: "enviar"; motivo: "fatos_diferentes" }
-  | { acao: "calar"; motivo: "agradecimento_repetido" | "ja_avisado_que_esta_com_a_equipe" }
-  | { acao: "texto"; texto: string; motivo: "com_a_equipe" | "reserva_so_falta_cpf" }
+  | { acao: "calar"; motivo: "agradecimento_repetido" | "ja_avisado_que_esta_com_a_equipe" | "desculpa_sem_pedido" }
+  | { acao: "texto"; texto: string; motivo: "com_a_equipe" | "reserva_so_falta_cpf" | "hora_fora_da_lista" }
   | { acao: "laco" };
 
 export const MARCA_JA_ESTA_COM_A_EQUIPE = "já está com a nossa equipe";
@@ -142,6 +142,19 @@ export function textoReservaSoFaltaCpf(medico: string, dataISO: string, hora: st
     `ainda *não* está confirmado. Para eu fechar a marcação só falta o CPF. Pode me passar?`;
 }
 
+// DOIS CASOS QUE AINDA CAÍAM NO LAÇO (24/11; cinco "não estou conseguindo te ajudar" em dois dias):
+//  - "Desculpe" sozinho depois de uma lista que já respondia (Mercedes, 23/11): não pede nada.
+//  - Hora que não está na lista ("9hs" quando o dia só tinha 09:20 — Edwin, 23/11): a Julia
+//    repetia a lista sem dizer que aquela hora não existe. Agora diz, uma vez, e mostra a lista.
+//    O texto só afirma que a hora não está ENTRE AS QUE ELA MOSTRA — a lista pode ser um recorte.
+export const MARCA_HORA_FORA_DA_LISTA = "não está entre os que tenho aqui";
+export function textoHoraForaDaLista(hhmm: string, lista: string): string {
+  const [h, m] = hhmm.split(":");
+  const rotulo = `${Number(h)}h${m === "00" ? "" : m}`;
+  return `O horário das ${rotulo} ${MARCA_HORA_FORA_DA_LISTA}. 🙏\n\n${lista}`;
+}
+const _SO_DESCULPA_RE = /^(?:ah |opa |ops |nossa )?(?:me )?(?:desculp[ae]|perdao|foi mal)(?: (?:ai|viu|ta|mesmo|julia))?$/;
+
 /**
  * A resposta a enviar é "quase igual" a uma recente e NÃO é corrida (o paciente leu a
  * anterior e escreveu de novo). O que fazer — ver o bloco acima.
@@ -152,6 +165,8 @@ export function decidirRepeticao(a: {
   mensagemDoPaciente: string;
   pendencia: PendenciaDaConversa;
   quandoRespondem?: string | null;
+  /** a Julia já disse, nesta conversa, que a hora pedida não está na lista (o aviso sai uma vez) */
+  jaAvisouHoraFora?: boolean;
 }): DecisaoDaRepeticao {
   if (fatosDaResposta(a.anterior) !== fatosDaResposta(a.candidata)) return { acao: "enviar", motivo: "fatos_diferentes" };
   // só reconhecimento, e a fala anterior não perguntava nada: não há o que repetir
@@ -173,7 +188,33 @@ export function decidirRepeticao(a: {
       (/\bconfirm/.test(m) && !/\bnao\b/.test(m) && !m.includes("?"));
     if (aceitou) return { acao: "texto", texto: textoReservaSoFaltaCpf(p.medico, p.dataISO, p.hora), motivo: "reserva_so_falta_cpf" };
   }
+  const _fala = stripAccents(String(a.mensagemDoPaciente || "").toLowerCase()).replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+  if (_SO_DESCULPA_RE.test(_fala)) return { acao: "calar", motivo: "desculpa_sem_pedido" };
+  const _pedida = horaDoTexto(a.mensagemDoPaciente);
+  const _daLista = extrairHoras(a.candidata);
+  if (_pedida && _daLista.length > 0 && !_daLista.includes(_pedida) && !a.jaAvisouHoraFora && !a.anterior.includes(MARCA_HORA_FORA_DA_LISTA)) {
+    return { acao: "texto", texto: textoHoraForaDaLista(_pedida, a.candidata), motivo: "hora_fora_da_lista" };
+  }
   return { acao: "laco" };
+}
+
+// "SUA CONSULTA ESTÁ REGISTRADA COMO PARTICULAR" (24/11, Alessandra 23/11). No consultar o
+// modelo recebe a ficha do Amigo e deduziu "particular" porque o retorno que a equipe marca
+// não leva convênio — e disse "a mudança de convênio não altera"; a paciente corrigiu ("será
+// pelo Bradesco"). Não é dado, é dedução: a frase sai da resposta. 2 respostas em 60 dias.
+const _PARTICULAR_DEDUZIDO_RE =
+  /\b(registrad[oa]s?|cadastrad[oa]s?|marcad[oa]s?|agendad[oa]s?|lan[çc]ad[oa]s?|consta|constam)\s+como\s+(?:atendimento\s+|consulta\s+)?particular(?:es)?\b/i;
+export function semParticularDeduzido(resposta: unknown): { texto: string; mudou: boolean } {
+  const original = String(resposta ?? "");
+  if (!_PARTICULAR_DEDUZIDO_RE.test(original)) return { texto: original, mudou: false };
+  // a linha que ficou vazia por causa da frase retirada sai junto; as linhas em branco do texto ficam
+  const texto = original.split("\n")
+    .map((linha) => ({ antes: linha, depois: linha.split(/(?<=[.!?…])\s+/).filter((frase) => !_PARTICULAR_DEDUZIDO_RE.test(frase)).join(" ").trim() }))
+    .filter((l) => l.depois !== "" || l.antes.trim() === "")
+    .map((l) => l.depois)
+    .join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  // se a resposta inteira era essa frase, não há o que enviar no lugar: fica como estava
+  return texto.replace(/[^\p{L}]/gu, "").length >= 20 ? { texto, mudou: true } : { texto: original, mudou: false };
 }
 
 /**

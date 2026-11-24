@@ -233,5 +233,24 @@ export function desistiuDeMarcar(texto: unknown): boolean {
   return /\bnao\s+(?:vou|quero|irei|pretendo)\s+(?:mais\s+)?(?:prosseguir|agendar|marcar|seguir|continuar)\b|\bdeixa\s+(?:pra\s+la|para\s+la|quieto)\b|\bvou\s+(?:ver|procurar|tentar)\s+(?:em\s+)?outr[oa]\b|\bdesisto\b/.test(t);
 }
 
+// RECUSA DITA COM OUTRAS PALAVRAS (24/11, Rodrigo 23/11). A Julia (pelo modelo) disse "não
+// atende a Unimed Seguros diretamente… pode ser realizada no particular… Quer que eu veja um
+// horário?" e ele respondeu "o reembolso é muito pequeno, estou buscando alguém que atenda o
+// plano diretamente". Nem a pergunta terminava em "como particular?" nem a resposta dizia
+// "particular não": o modelo prometeu a equipe e a ficha foi para a fila. É a mesma recusa.
+export function ofereceuParticularPorNaoAtender(falaDaJulia: unknown): boolean {
+  const t = _normConvenio(falaDaJulia);
+  return /\bparticular\b/.test(t) && /\bnao\s+(?:atende|atendemos|esta\s+entre|e\s+atendid[oa]|aceita|aceitamos|trabalha|trabalhamos)\b/.test(t) && /\?\s*$/.test(String(falaDaJulia ?? "").trim());
+}
+export function recusaPorQuererOConvenio(texto: unknown): boolean {
+  const t = _normConvenio(texto);
+  if (t.includes("?")) return false;
+  // "o reembolso é pequeno, mas quero marcar mesmo assim" é aceite, não recusa
+  if (/\bmesmo\s+assim\b|\b(?:quero|vou|pode|podemos|vamos)\s+(?:sim|marcar|agendar|seguir|ver|ser)\b/.test(t)) return false;
+  return /\b(?:busc|procur)\p{L}*\b[^.!?\n]{0,40}\b(?:atend|aceit)\p{L}*\b[^.!?\n]{0,25}\b(?:plano|convenio|direto|diretamente)\b/u.test(t) ||
+    /\breembolso\b[^.!?\n]{0,25}\b(?:muito\s+)?(?:pequeno|baixo|pouco|nao\s+compensa|nao\s+vale)\b/.test(t) ||
+    /\bso\s+(?:pelo|pela|com\s+o|no|se\s+for\s+pelo)\s+(?:plano|convenio)\b/.test(t);
+}
+
 export const TEXTO_NAO_MARQUEI_SEM_PARTICULAR =
   "Sem problema — não marquei nada. 😊 Se mudar de ideia, ou se tiver outro convênio, é só me dizer por aqui.";

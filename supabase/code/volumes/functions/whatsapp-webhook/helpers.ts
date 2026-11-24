@@ -185,6 +185,11 @@ export const INTENCOES_DA_LISTA_DE_ESPERA = [
 ] as const;
 const _SAIR_NO_CONTEXTO_DA_LISTA_RE =
   /\b(sair|me tira|me tire|tira|tirar|remove|remover|retira|retirar|desisto|desistir|para(r)? de (me )?(mandar|enviar|avisar|chamar)|pare de (me )?(mandar|enviar|avisar)|nao (quero|preciso) mais|nao precisa mais|nao (me )?(mande|envie|avise|mandem|enviem|avisem) mais|cancela(r)? (a |essa |minha )?(lista|espera|fila))\b/;
+// "JÁ FUI ATENDIDO" EM RESPOSTA A UMA MENSAGEM DA LISTA (24/11, Wendler 20/11): atendido em
+// 18/11, respondeu isso a uma vaga e continuou na fila — mais duas vagas e um lembrete. Quem
+// na mesma linha aceita a vaga ou fala de uma consulta de antes não está saindo.
+const _JA_FOI_ATENDIDO_RE = /\b(ja fui atendid[oa]|ja passei (com|na|no|pelo|pela)|ja (me )?consultei|ja fiz (a |minha )?consulta|ja fui (na|a|em) consulta)\b/;
+const _JA_FOI_MAS_QUER_RE = /\b(quero|aceito|sim|pode ser|antecipar|antes|outra|retorno|de novo|novamente|mas|porem|ainda|dor|dores|doendo|continua|preciso|gostaria|agendar|marcar|exame|resultado)\b/;
 
 // Vale LINHA A LINHA (16/11): o lote junta as mensagens de uma rajada com quebra de linha.
 // "MOÇA / cancela meu cadastro nesse telefone / Vocês não atendem o meu plano, para de me
@@ -193,7 +198,7 @@ const _SAIR_NO_CONTEXTO_DA_LISTA_RE =
 export function pedeSairNoContextoDaLista(texto: unknown): boolean {
   return semMetadados(texto).split(/[\r\n]+/).some((linha) => {
     const t = stripAccents(linha.toLowerCase()).replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
-    return t.length > 0 && t.length <= 80 && _SAIR_NO_CONTEXTO_DA_LISTA_RE.test(t);
+    return t.length > 0 && t.length <= 80 && (_SAIR_NO_CONTEXTO_DA_LISTA_RE.test(t) || (_JA_FOI_ATENDIDO_RE.test(t) && !_JA_FOI_MAS_QUER_RE.test(t)));
   });
 }
 
@@ -210,6 +215,8 @@ export const WAITLIST_DECLINE_RE =
 // RESOLVIDO, não ficar pendente na fila das atendentes. Detecta agradecimento/
 // despedida curto SEM pergunta nem nova demanda. "Não, obrigado" (recusa) e
 // "obrigada, mas..." (continua) NÃO fecham.
+const _DESPEDIDA_RE =
+  /\b(bom descanso|otimo descanso|boa noite e bom descanso|ate (amanha|logo|mais|breve)|tchau|fi(ca|que|quem) com deus|deus (te |lhe |a |o |os |as )?abencoe|bom (fim de semana|fds|final de semana)|igualmente|(pra|para) (voce|vc|voces|vcs) tambem)\b/;
 export function isClosingThanks(text: string): boolean {
   const t = String(text || "").trim();
   if (!t || t.length > 60 || t.includes("?")) return false;
@@ -217,7 +224,11 @@ export function isClosingThanks(text: string): boolean {
   // dificuldade técnica, vou transferir você").
   if (/^[\p{Extended_Pictographic}\p{Emoji_Modifier}\u200d\ufe0f\s]+$/u.test(t)) return true;
   const norm = stripAccents(t.toLowerCase());
-  if (!/\b(obrigad[oa]s?|brigad[ao]u?|valeu|agradec\w*|gratidao)\b/.test(norm)) return false;
+  // DESPEDIDA SEM "OBRIGADA" (24/11, Laury 23/11: "Bom descanso / 🙏" foi ao modelo, que
+  // respondeu só um emoji; a guarda de resposta curta mandou "tive uma dificuldade técnica" e
+  // passou a ficha para a equipe às 22h). "Boa noite" e "bom dia" sozinhos NÃO entram: abrem
+  // conversa tanto quanto fecham.
+  if (!/\b(obrigad[oa]s?|brigad[ao]u?|valeu|agradec\w*|gratidao)\b/.test(norm) && !_DESPEDIDA_RE.test(norm)) return false;
   if (/\b(mas|porem|quando|onde|como|qual|quero|queria|preciso|pode|poderia|consigo|ainda|nao|cancelar|remarcar|mudar)\b/.test(norm)) return false;
   // PEDIDO JUNTO COM O OBRIGADA (27/09): em 60 dias a Regra 9 calou 5 pedidos —
   // o horário escolhido ("Gostaria do dia 30/09 - 11h00. Obrigada.", Kurwenlucia
@@ -542,7 +553,7 @@ export function campoPedidoNoCadastro(texto: unknown): "nome" | "cpf" | "nascime
 //
 // Os dois ultimos queriam GUIA do ortopedista, para fazer fisio em outro lugar.
 // Mandar tabela de preco para quem pede receita e' vender o que ninguem pediu.
-export type IntencaoFisio = "agendar" | "pedido_medico" | "falar_com_fisio" | "sessao_em_curso" | "nota_fiscal" | "trabalho" | "consulta_medica" | "convenio" | "pagamento" | "exame" | "outro";
+export type IntencaoFisio = "agendar" | "pedido_medico" | "documento_medico" | "falar_com_fisio" | "sessao_em_curso" | "nota_fiscal" | "trabalho" | "consulta_medica" | "convenio" | "pagamento" | "exame" | "outro";
 
 // 19/10 (Antônio): "tem como passar as imagens do RX que realizei ontem? O
 // fisioterapeuta pediu para ver" recebeu a tabela de preço. Imagem/resultado/laudo de
@@ -643,6 +654,13 @@ const FISIO_PEDIDO_ESQUECIDO_RE =
 const FISIO_RECADO_RE =
   /\bfisioterapeuta\s+\p{L}+[\s\S]{0,80}\b(perguntar|comprometeu|ficou\s+de|orientou|repass\w+|retorno)\b/iu;
 
+const FISIO_DOCUMENTO_RE =
+  /\b(relat[óo]rios?|laudos?|atestados?|declara[çc][ãa]o|declara[çc][õo]es)\s+m[ée]dic[oa]s?\b|\b(relat[óo]rio|laudo|atestado|declara[çc][ãa]o)\b[^.!?\n]{0,80}\b(empresa|rh|trabalho|per[íi]cia|inss|seguradora|escola|faculdade)\b/i;
+const FISIO_DOCUMENTO_DE_SESSOES_RE =
+  /\b(guias?|renova\p{L}*|autoriza\p{L}*|libera\p{L}*|mais\s+(\d+\s+)?sess[õo]es|pedidos?\s+(de|da|para|pra|pro)\s+(a\s+|as\s+)?(fisio|sess))/iu;
+export const TEXTO_FISIO_DOCUMENTO_MEDICO =
+  "Relatório, laudo ou atestado quem emite é o médico. 🙏 Vou passar para a nossa equipe ver isso com o doutor e te responder por aqui.";
+
 export function classificarPedidoDeFisioterapia(texto: unknown): IntencaoFisio {
   const t = String(texto ?? "");
   if (!t) return "agendar";
@@ -656,6 +674,12 @@ export function classificarPedidoDeFisioterapia(texto: unknown): IntencaoFisio {
   // o recado do fisioterapeuta ao médico vem antes do resto: é conversa com a fisio
   if (FISIO_RECADO_RE.test(t)) return "falar_com_fisio";
   if (FISIO_CONSULTA_MEDICA_RE.test(t)) return "consulta_medica";
+  // RELATÓRIO, LAUDO OU ATESTADO DO MÉDICO (24/11, Ricardo Junior 23/11): pediu "um relatório
+  // médico atualizado… para apresentar à empresa" numa mensagem que citava a fisioterapia que
+  // faz em outra clínica e ouviu "pedido, guia ou renovação de sessões quem emite é o médico".
+  // Documento do médico tem texto próprio; quando o relatório é para liberar sessões (guia,
+  // renovação, autorização), continua sendo o pedido da fisioterapia.
+  if (FISIO_DOCUMENTO_RE.test(t) && !FISIO_DOCUMENTO_DE_SESSOES_RE.test(t)) return "documento_medico";
   // O pedido vem antes da sessão em curso: "já concluí as 10 sessões, me envie um
   // novo pedido" é pedido. "remarcar minha sessão" não casa nenhum padrão de pedido.
   if (FISIO_PEDIDO_MEDICO_RE.test(t) || FISIO_MAIS_SESSOES_RE.test(t) || FISIO_PEDIR_AO_MEDICO_RE.test(t) || FISIO_PEDIDO_AMPLO_RE.test(t) || FISIO_PEDIDO_ESQUECIDO_RE.test(t)) {
@@ -1259,6 +1283,13 @@ export function horaDoTexto(texto: unknown): string | null {
   // 1040h
   m = t.match(/(?<![\d/])([01]?\d|2[0-3])([0-5]\d)\s*h(?:rs?|s)?(?![a-z\d])/);
   if (m) return ok(+m[1], +m[2]);
+  // "8 40" · "27/11 , 8 40" (24/11): hora e minuto separados por espaço. Só quando a LINHA é
+  // isso (com a data na frente, se houver) e o minuto é de agenda (00, 10, … 50) — "2 20" no
+  // meio de uma frase é outra coisa. A lista voltou igual duas vezes e a ficha foi para a equipe.
+  for (const linha of t.split(/[\r\n]+/)) {
+    m = linha.trim().match(/^(?:(?:dia\s+)?\d{1,2}\s*\/\s*\d{1,2}(?:\s*\/\s*\d{2,4})?\s*,?\s*)?(?:[aà]s\s+)?(\d{1,2})\s+([0-5]0)$/);
+    if (m && ok(+m[1], +m[2])) return ok(+m[1], +m[2]);
+  }
   // "às 9" sem o h: não vale em pergunta ("conseguiria as 13?") nem em intervalo
   // ("o almoço das 13 às 14") — ali a hora não é a escolha do paciente.
   if (t.includes("?") || /\bd[ao]s?\s+\d{1,2}\s*(?:h\w*)?\s+(?:a|as)\s+\d/.test(t)) return null;
@@ -3524,7 +3555,7 @@ const _RS_ABERTURA = "(?:oi+|ola+|opa|bom dia|boa tarde|boa noite|ah|entao|olha|
 const _RS_SIM_RE = new RegExp(`^(?:${_RS_ABERTURA} )*${_RS_SIM}(?: (?:${_RS_SIM}|${_RS_CORTESIA}))*$`);
 const _RS_NAO_RE = new RegExp(`^(?:${_RS_ABERTURA} )*${_RS_NAO}(?: (?:${_RS_NAO}|${_RS_CORTESIA}))*$`);
 const _RS_ESPERA_RE =
-  /\b(so um (minuto|momento|instante|segundo|pouco|minutinho|momentinho)|(um|1) (minuto|momento|instante|segundo|minutinho|momentinho)|aguarde|aguarda ai|espere|espera(r)? (ai|um pouco|so um)|pera|perai|pera ai|ja (te )?(falo|respondo|retorno|volto|aviso|confirmo|digo)|vou (ver|verificar|confirmar|checar|pensar|conversar|falar|perguntar|olhar|conferir)|estou vendo|deixa eu (ver|verificar|confirmar|pensar|olhar|conferir)|te (aviso|falo|confirmo|respondo|retorno(?! (?:com|d[aeo]s?)\b))|depois (eu )?(te )?(falo|aviso|confirmo|vejo|respondo|entro em contato))\b/;
+  /\b(so um (minuto|momento|instante|segundo|pouco|minutinho|momentinho)|(um|1) (minuto|momento|instante|segundo|minutinho|momentinho)|aguarde|aguarda ai|espere|espera(r)? (ai|um pouco|so um)|pera|perai|pera ai|ja (te )?(falo|respondo|retorno|volto|aviso|confirmo|digo)|vou (ver|verificar|confirmar|checar|pensar|conversar|falar|perguntar|olhar|conferir)|(estou|to|tou) (vendo|verificando|olhando|conferindo|checando)|deixa eu (ver|verificar|confirmar|pensar|olhar|conferir)|te (aviso|falo|confirmo|respondo|retorno(?! (?:com|d[aeo]s?)\b))|depois (eu )?(te )?(falo|aviso|confirmo|vejo|respondo|entro em contato))\b/;
 
 /** Minúsculas, sem acento, sem pontuação nem emoji: o texto como os leitores de resposta o comparam. */
 function _rsNormal(texto: unknown): string {
@@ -3860,6 +3891,11 @@ const _VENDA_RE = [
   /\baqui\s+[ée]\s+(a|o)\s+consultor[ae]?\b/i, /\bparcelas\s+fixas\b/i, /\bsem\s+entrada\b/i, /\bpurificador/i,
   /\b\d+\s+anos\s+(cuidando|no\s+mercado|de\s+experi[êe]ncia)\b/i, /\b(rotina|carga)\s+operacional\b/i,
   /\b(da|de\s+sua|da\s+sua)\s+secret[áa]ria\b/i, /\bpotencial\s+real\b/i, /\bcomo\s+voc[êe]s\s+trazem\s+paciente/i,
+  // 24/11 (Doctoralia virou "pedido de encaixe"; MediCo virou fisioterapia com "valor e pix"):
+  // convite de plataforma e de diretório de saúde
+  /\bperfil\s+gratuito\b/i, /\bmilh[õo]es\s+de\s+pacientes\b/i, /\besteja\s+vis[íi]vel\b/i, /\bportal\s+de\s+sa[úu]de\b/i,
+  /\bpacientes\s+(buscam|procuram)\s+(seus|os\s+seus|por\s+seus)\s+servi[çc]os\b/i, /(?:^|\s)[ée]\s+uma\s+plataforma\b/i,
+  /\bcadastro\s+[ée]\s+gratuito\b/i, /\bsem\s+mensalidade\b/i, /\bol[áa],?\s+equipe\s+d[ao]\b/i, /\bvimos\s+que\s+(a|o|voc[êe]s|sua)\b/i,
 ];
 export function propostaComercial(texto: unknown): boolean {
   const t = String(texto ?? "");
@@ -3867,6 +3903,27 @@ export function propostaComercial(texto: unknown): boolean {
 }
 export const TEXTO_PROPOSTA_COMERCIAL =
   "Obrigada pelo contato! 😊 Este WhatsApp é o atendimento de pacientes da clínica. Deixei sua mensagem registrada aqui para a administração avaliar — se houver interesse, entram em contato.";
+
+// "NÃO É POSSÍVEL CONFIRMAR UM ATENDIMENTO CONFIRMADO" (24/11, Santa 23/11): ela disse "vou
+// manter o de hoje", o Amigo respondeu 400 com essa frase — a consulta JÁ estava confirmada —
+// e a Julia disse "não consegui registrar a confirmação" e passou para a equipe. É confirmada.
+export function amigoDizQueJaEstavaConfirmado(resposta: { status?: unknown; data?: unknown } | null | undefined): boolean {
+  if (!resposta || Number(resposta.status) !== 400) return false;
+  let corpo = "";
+  try { corpo = typeof resposta.data === "string" ? resposta.data : JSON.stringify(resposta.data ?? ""); } catch { corpo = ""; }
+  return /confirmar\s+um\s+atendimento\s+(j[áa]\s+)?confirmado/i.test(corpo);
+}
+
+// O LINK DO SITE NÃO RESPONDE ISTO (24/11). Em 60 dias, 7 de 7 pessoas que vieram do botão da
+// PÁGINA DE AGENDAMENTO do site ("Vim pelo site da CBT (agendamento)…") receberam de volta o
+// link da mesma página; e quem pergunta por horário ou período ("ainda teria algum desses
+// horários pela manhã?", Maria do Rosário 23/11) também recebia só o link. Nesses dois casos
+// a Julia segue a conversa (pergunta o médico ou a região) em vez de mandar o link.
+export function linkDoSiteNaoResponde(texto: unknown): boolean {
+  const t = stripAccents(semMetadados(texto).toLowerCase());
+  if (/\bvim\s+pelo\s+site\b[^\n]{0,20}\(\s*agendamento\s*\)/.test(t)) return true;
+  return t.includes("?") && /\b(horarios?|vagas?)\b/.test(t) && /\b(manha|tarde|cedo|hoje|amanha|semana|segunda|terca|quarta|quinta|sexta|desses|destes)\b/.test(t);
+}
 
 // "VOCÊS TÊM ATENDIMENTO DE URGÊNCIA HOJE?" (15/10, Rosana): a palavra "urgência"
 // disparou a Regra 4 com pronto-socorro; a resposta que a Laiz deu 1h26 depois foi

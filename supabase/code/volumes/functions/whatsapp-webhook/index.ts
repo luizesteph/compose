@@ -241,6 +241,9 @@ import {
   textoConsultaJaFeita,
   textoHorarioPreenchido,
   propostaComercial,
+  amigoDizQueJaEstavaConfirmado,
+  linkDoSiteNaoResponde,
+  TEXTO_FISIO_DOCUMENTO_MEDICO,
   TEXTO_PROPOSTA_COMERCIAL,
   perguntaSobreProntoAtendimento,
   TEXTO_SEM_PRONTO_ATENDIMENTO,
@@ -297,6 +300,8 @@ import {
   isDuplicateReply,
   ehCorrida,
   decidirRepeticao,
+  MARCA_HORA_FORA_DA_LISTA,
+  semParticularDeduzido,
   MARCA_JA_ESTA_COM_A_EQUIPE,
   MARCA_RESERVA_CONTINUA,
   nearDuplicate,
@@ -338,6 +343,8 @@ import {
   jaExplicouParticular,
   particularAutorizado,
   pacienteRecusouParticular,
+  ofereceuParticularPorNaoAtender,
+  recusaPorQuererOConvenio,
   TEXTO_NAO_MARQUEI_SEM_PARTICULAR,
   PERGUNTA_COMO_PARTICULAR_RE,
   PERGUNTA_PARTICULAR_DO_CADASTRO_RE,
@@ -4073,6 +4080,8 @@ async function executeAction(
                 citaConvenio(currentMessageText || "") ||
                 // 20/10 (M7sato: "Estou tentando agendar mas dá erro" recebeu o link do site)
                 siteDeuErro(currentMessageText || "") ||
+                // 24/11: veio da página de agendamento do site, ou pergunta por horário/período
+                linkDoSiteNaoResponde(currentMessageText || "") ||
                 // 15/10 (Emerson: "Tem consulta disponível para hoje?" recebeu o link): o dia
                 // pedido é contexto — segue por aqui procurando a agenda
                 !!(janelaDeDatas(currentMessageText || "", getTodayISO_SP())?.datas?.length)
@@ -7559,7 +7568,8 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
           }
         }
 
-        if (finalResult.status >= 200 && finalResult.status < 300) {
+        // 24/11 (Santa): "Não é possível confirmar um atendimento confirmado" é consulta confirmada
+        if ((finalResult.status >= 200 && finalResult.status < 300) || amigoDizQueJaEstavaConfirmado(finalResult)) {
           if (_daConfirmacao?.linha && supabaseClient) {
             try {
               await supabaseClient.from("confirmacao_insistencia")
@@ -11081,6 +11091,9 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             : _intFisio === "exame"
               // 19/10 (Antônio): imagens/resultado de exame — a equipe envia
               ? TEXTO_FISIO_EXAME
+            : _intFisio === "documento_medico"
+              // 24/11 (Ricardo Junior): relatório, laudo ou atestado do médico não é guia de sessões
+              ? TEXTO_FISIO_DOCUMENTO_MEDICO
             : _intFisio === "pedido_medico"
             ? "Pedido, guia ou renovação de sessões quem emite é o médico. 🙏 Vou te passar para nossa equipe verificar isso com o doutor."
             : _intFisio === "nota_fiscal"
@@ -15331,6 +15344,16 @@ Deno.serve(async (req) => {
         }
       }
 
+      // === PROPOSTA COMERCIAL VEM ANTES DA URGÊNCIA E DAS PALAVRAS-CHAVE (24/11) ===
+      // A Doctoralia ("dê o 1º passo agora mesmo") virou pedido de encaixe e a MediCo (cita
+      // "fisioterapia") virou fisioterapia com "te mandar o valor e o pix": as duas regras
+      // rodavam antes do leitor de proposta comercial. Urgência clínica continua na frente.
+      const _comercialCedo = propostaComercial(finalMessage || "") && classificarUrgencia(finalMessage || "") !== "clinica";
+      if (_comercialCedo && keywordForcedIntent) {
+        console.log(`[PropostaComercial] palavra-chave (${keywordForcedIntent.intent}) ignorada — é proposta comercial`);
+        keywordForcedIntent = null;
+      }
+
       // === URGENCY DETECTION (P-relatorio 23/06 Conv. 35 Fabiano) ===
       // Termos de emergencia/crise/dor aguda interrompem o fluxo de agendamento e
       // forçam transferencia humana IMEDIATA. Caso Fabiano: relatou "crise na lombar"
@@ -15339,7 +15362,7 @@ Deno.serve(async (req) => {
       //
       // Pre-classifier deterministico (regex) por ser literalmente questao de
       // saude — nao podemos depender do LLM acertar.
-      if (!keywordForcedIntent) {
+      if (!keywordForcedIntent && !_comercialCedo) {
         // Tema 5: usa helper compartilhado (mesmo regex roda no channel-disabled guard
         // pra cobrir Amostra 3 do relatorio 24/06).
         // "clinica" | "agenda" | null. O roteamento é IGUAL nos dois primeiros
@@ -17685,6 +17708,12 @@ Deno.serve(async (req) => {
             _recusouParticular = true;
             classification.intent = "unknown";
           }
+        } else if (ofereceuParticularPorNaoAtender(_ultClinConv) && recusaPorQuererOConvenio(finalMessage || "") &&
+          classificarUrgencia(finalMessage || "") !== "clinica") {
+          // 24/11 (Rodrigo): "estou buscando alguém que atenda o plano diretamente" — sem fila
+          console.log(`[Convenio] paciente quer só pelo convênio — encerra sem transferir`);
+          _recusouParticular = true;
+          classification.intent = "unknown";
         }
       }
       console.log(`[Webhook] Executing action: ${classification.intent}`);
@@ -18573,6 +18602,15 @@ Deno.serve(async (req) => {
                 .update({ action_error: `Guard de convênio: ${_vConv.convenio} (${_vConv.motivo}) — afirmação substituída` })
                 .eq("id", messageId);
             } catch { /* non-blocking */ }
+          }
+        }
+
+        // 24/11 (Alessandra): "sua consulta está registrada como particular" é dedução do modelo
+        if (["consultar", "consultar_convenios"].includes(String(classification.intent || ""))) {
+          const _semPart = semParticularDeduzido(replyText);
+          if (_semPart.mudou) {
+            console.log(`[Guard] "registrada como particular" retirado da resposta do ${classification.intent}`);
+            replyText = _semPart.texto;
           }
         }
 
@@ -19688,6 +19726,7 @@ Deno.serve(async (req) => {
                 anterior: dupCheck.matchedText || "",
                 candidata: replyText,
                 mensagemDoPaciente: finalMessage || "",
+                jaAvisouHoraFora: _jaDitas.some((t) => t.includes(MARCA_HORA_FORA_DA_LISTA)),
                 pendencia: _daAcao?.tipo === "reserva"
                   ? {
                     tipo: "reserva",
