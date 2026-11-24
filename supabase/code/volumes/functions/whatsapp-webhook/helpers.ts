@@ -469,6 +469,11 @@ const PIOROU_URG_RE = /(?<![\p{L}])(pior|piorou|piorando|n[ãa]o melhorou|n[ãa]
 function padraoDeUrgenciaDispara(p: RegExp, i: number, t: string): boolean {
   if (!p.test(t)) return false;
   if (PEDE_CANCELAR_URG_RE.test(t) && MELHOROU_URG_RE.test(t) && !PIOROU_URG_RE.test(t)) return false;
+  // CANCELAR POR IMPOSSIBILIDADE DE DESLOCAMENTO (23/11, Santa 22/11: "Pode cancelar
+  // mesmo pois aonde moro está alagado" virou urgência). Alagamento (i 11) e "não
+  // consigo chegar" (i 12) com pedido de cancelar = logística, não emergência médica.
+  // Em 60 dias, 2 mensagens com alagamento; 1 era este falso positivo.
+  if ((i === 11 || i === 12) && PEDE_CANCELAR_URG_RE.test(t)) return false;
   // i === 0 é o padrão da palavra "urgente/urgência/emergência"
   if (i === 0 && URGENCIA_NEGADA_RE.test(t)) return false;
   // "consultando pra uma amiga que TEVE uma emergência" (13/10, Ellise): a emergência é
