@@ -474,6 +474,7 @@ const FRATURA_ANTIGA_RE = new RegExp(String.raw`\bfratur[\s\S]{0,80}\b${_TEMPO_A
 // duas vezes e a consulta das 15h ficou de pé). Exige o pedido de cancelar E a melhora; piora ou
 // "não melhorou" na frase mantêm a urgência. Em 60 dias, 1 de 6 mensagens assim disparava.
 const PEDE_CANCELAR_URG_RE = /(?<![\p{L}])(cancel\p{L}*|desmarc\p{L}*|desist\p{L}*)(?![\p{L}])/iu;
+const PEDE_REMARCAR_URG_RE = /(?<![\p{L}])(remarc\p{L}*|reagend\p{L}*|desmarc\p{L}*|cancel\p{L}*)(?![\p{L}])/iu;
 const MELHOROU_URG_RE = /(?<![\p{L}])(melhorou|melhorei|estou melhor|t[ôo] melhor|a dor passou|j[áa] passou)(?![\p{L}])/iu;
 const PIOROU_URG_RE = /(?<![\p{L}])(pior|piorou|piorando|n[ãa]o melhorou|n[ãa]o passou)(?![\p{L}])/iu;
 
@@ -485,11 +486,18 @@ function padraoDeUrgenciaDispara(p: RegExp, i: number, t: string): boolean {
   // consigo chegar" (i 12) com pedido de cancelar = logística, não emergência médica.
   // Em 60 dias, 2 mensagens com alagamento; 1 era este falso positivo.
   if ((i === 11 || i === 12) && PEDE_CANCELAR_URG_RE.test(t)) return false;
+  // QUEM JÁ ESTÁ INDO AO PS E QUER REMARCAR (24/11, Fabio: "terei de levar agora minha filha
+  // no PS, remarco mais tarde" → "procure um pronto-socorro"). O PS (i 1) com pedido de
+  // remarcar/cancelar e sem dor na frase é agenda; dor, fratura, febre seguem disparando
+  // nos outros padrões. Em 60 dias, 2 mensagens assim: esta, e uma com "muita dor" (fica).
+  if (i === 1 && PEDE_REMARCAR_URG_RE.test(t) && !_DOR_NA_FRASE_RE.test(t)) return false;
   // i === 0 é o padrão da palavra "urgente/urgência/emergência"
   if (i === 0 && URGENCIA_NEGADA_RE.test(t)) return false;
   // "consultando pra uma amiga que TEVE uma emergência" (13/10, Ellise): a emergência é
   // de outra pessoa / já passou — não é a pessoa da conversa em crise agora
-  if (i === 0 && /\b(teve|tive|tivemos|tiveram|houve|passou\s+por)\s+(uma\s+|um\s+)?(emerg[eê]ncia|urg[eê]ncia)/i.test(t)) return false;
+  // "Tive uma CERTA emergência hj pela manha, precisamos reagendar" (24/11, Fabio) — o
+  // adjetivo no meio escondia o passado
+  if (i === 0 && /\b(teve|tive|tivemos|tiveram|houve|passou\s+por)\s+(uma\s+|um\s+)?((certa|pequena|leve|baita|grande|nova|outra)\s+)?(emerg[eê]ncia|urg[eê]ncia)/i.test(t)) return false;
   // ...a não ser que fale de dor: "bastante dor no pé… raio-X ainda hoje… um pouco de
   // urgência… precisa de pedido médico?" (06/10) continua indo para gente na hora
   if (i === 0 && URGENCIA_ADMINISTRATIVA_RE.test(t) && !/(?<![\p{L}])(dor|dores|doendo|d[oó]i|machuc\p{L}*|inchad\p{L}*|inchou)(?![\p{L}])/iu.test(t)) return false;
@@ -2174,6 +2182,15 @@ function ehAConsultaAtual(t: string, indice: number): boolean {
   );
 }
 
+// A JANELA PEDE UMA DATA? (24/11, Ale: "preciso agendar na última semana de dezembro de manhã
+// terça ou quinta" recebeu só o link do site). Até aqui só contava data exata ("dia 29"); semana,
+// mês e dia da semana também são contexto — a Julia segue procurando a agenda. Em 60 dias, 10 dos
+// 346 links do site iam para quem já tinha dito a semana, o mês ou o dia da semana.
+export function janelaPedeData(j: JanelaDeDatas | null | undefined): boolean {
+  if (!j) return false;
+  return !!(j.datas?.length || j.inicio || j.diasDaSemana?.length);
+}
+
 export function janelaDeDatas(texto: unknown, hoje: string): JanelaDeDatas | null {
   const bruto = typeof texto === "string" ? texto : "";
   if (!bruto.trim() || !/^\d{4}-\d{2}-\d{2}$/.test(String(hoje))) return null;
@@ -2380,9 +2397,10 @@ export function janelaDeDatas(texto: unknown, hoje: string): JanelaDeDatas | nul
     const mesQueVem = /\b(mes\s+que\s+vem|proximo\s+mes|mes\s+seguinte|mes\s+q\s+vem)\b/.exec(t);
     const esteMes = /\b(este|esse|neste|nesse)\s+mes\b/.exec(t);
     const fimDoMes = /\b(fim|final)\s+do\s+mes\b/.exec(t);
-    const comNome = new RegExp(`\\b(?:(primeira|segunda)\\s+quinzena\\s+de\\s+|(inicio|comeco)\\s+de\\s+|(meados|metade|meio)\\s+de\\s+|(fim|final)\\s+de\\s+)?${MESES_RE}\\b`, "g");
+    // "última semana de dezembro" (24/11, Ale: virou "em dezembro" e a lista começou em 02/12)
+    const comNome = new RegExp(`\\b(?:(primeira|segunda)\\s+quinzena\\s+de\\s+|(inicio|comeco)\\s+de\\s+|(meados|metade|meio)\\s+de\\s+|(fim|final)\\s+de\\s+|(primeira|ultima)\\s+semana\\s+de\\s+)?${MESES_RE}\\b`, "g");
     let mes: { y: number; m: number } | null = null;
-    let parte: "toda" | "q1" | "q2" | "inicio" | "meio" | "fim" = "toda";
+    let parte: "toda" | "q1" | "q2" | "inicio" | "meio" | "fim" | "sem1" | "semUlt" = "toda";
     let nome = "";
     if (mesQueVem && !ehNegado(t, mesQueVem.index, mesQueVem[0].length)) {
       mes = { y: hm === 12 ? hy + 1 : hy, m: hm === 12 ? 1 : hm + 1 }; nome = MESES[mes.m - 1];
@@ -2395,18 +2413,19 @@ export function janelaDeDatas(texto: unknown, hoje: string): JanelaDeDatas | nul
         // "16 de outubro" já virou data; "em agosto" (passado) não é janela
         if (/\d\s+de\s*$/.test(t.slice(Math.max(0, m.index! - 8), m.index!)) || ehPassado(t, m.index!) || ehNegado(t, m.index!, m[0].length)) continue;
         // "Marco Aurélio" não é março: sem cedilha, só com preposição na frente
-        if (m[5] === "marco" && !/mar[çc]o/.test(bruto.toLowerCase().normalize("NFC")) && !/\b(em|para|pra|de|no|ate|durante)\s+$/.test(t.slice(Math.max(0, m.index! - 10), m.index!))) continue;
-        if (m[5] === "marco" && !/ç/.test(bruto) && !/\b(em|para|pra|de|no|ate|durante)\s+$/.test(t.slice(Math.max(0, m.index! - 10), m.index!))) continue;
-        const mp = mesPedido(m[5], hoje);
+        if (m[6] === "marco" && !/mar[çc]o/.test(bruto.toLowerCase().normalize("NFC")) && !/\b(em|para|pra|de|no|ate|durante)\s+$/.test(t.slice(Math.max(0, m.index! - 10), m.index!))) continue;
+        if (m[6] === "marco" && !/ç/.test(bruto) && !/\b(em|para|pra|de|no|ate|durante)\s+$/.test(t.slice(Math.max(0, m.index! - 10), m.index!))) continue;
+        const mp = mesPedido(m[6], hoje);
         if (!mp) continue;
-        mes = mp; nome = m[5];
-        parte = m[1] === "primeira" ? "q1" : m[1] === "segunda" ? "q2" : m[2] ? "inicio" : m[3] ? "meio" : m[4] ? "fim" : "toda";
+        mes = mp; nome = m[6];
+        parte = m[1] === "primeira" ? "q1" : m[1] === "segunda" ? "q2" : m[2] ? "inicio" : m[3] ? "meio" : m[4] ? "fim"
+          : m[5] === "primeira" ? "sem1" : m[5] === "ultima" ? "semUlt" : "toda";
         break;
       }
     }
     if (mes) {
       const ultimo = ultimoDiaDoMes(mes.y, mes.m);
-      const faixas = { toda: [1, ultimo], q1: [1, 15], q2: [16, ultimo], inicio: [1, 10], meio: [11, 20], fim: [21, ultimo] } as const;
+      const faixas = { toda: [1, ultimo], q1: [1, 15], q2: [16, ultimo], inicio: [1, 10], meio: [11, 20], fim: [21, ultimo], sem1: [1, 7], semUlt: [ultimo - 6, ultimo] } as const;
       const [a, b] = faixas[parte];
       const nomeBonito = nome === "marco" ? "março" : nome;
       let inicio = isoDe(mes.y, mes.m, a);
@@ -2415,7 +2434,8 @@ export function janelaDeDatas(texto: unknown, hoje: string): JanelaDeDatas | nul
       if (fim >= hoje) {
         j.inicio = inicio; j.fim = fim;
         j.rotulo = parte === "q1" ? `na primeira quinzena de ${nomeBonito}` : parte === "q2" ? `na segunda quinzena de ${nomeBonito}`
-          : parte === "inicio" ? `no início de ${nomeBonito}` : parte === "meio" ? `em meados de ${nomeBonito}` : parte === "fim" ? `no fim de ${nomeBonito}` : `em ${nomeBonito}`;
+          : parte === "inicio" ? `no início de ${nomeBonito}` : parte === "meio" ? `em meados de ${nomeBonito}` : parte === "fim" ? `no fim de ${nomeBonito}`
+          : parte === "sem1" ? `na primeira semana de ${nomeBonito}` : parte === "semUlt" ? `na última semana de ${nomeBonito}` : `em ${nomeBonito}`;
       }
     }
   }
@@ -3639,6 +3659,22 @@ export function respostaAPerguntaDoPaciente(texto: unknown): "sim" | "nao" | nul
 }
 
 export const TEXTO_PEDE_CPF_DO_PACIENTE = "Tudo bem! 🙏 Me passa, por favor, o nome completo e o CPF de quem vai ser atendido.";
+
+// "LISTA" É SIM AO CONVITE DA LISTA DE ESPERA (24/11, Mauricio: a marcação terminou com "se
+// quiser eu te coloco na lista de espera… É só responder lista de espera", ele respondeu
+// "Lista" e foi para a fila "verificar a inclusão"; ninguém respondeu e o atendimento foi
+// encerrado). Só vale logo depois do convite (o webhook confere). Em 60 dias, 115 primeiras
+// respostas ao convite: "Lista" era a única que dizia sim e não entrava.
+export function aceitaConviteDaListaDeEspera(texto: unknown): boolean {
+  if (respostaAPerguntaDoPaciente(texto) === "sim") return true;
+  const t = stripAccents(String(texto ?? "").toLowerCase())
+    .replace(/[\p{Extended_Pictographic}!.,;]+/gu, " ").replace(/\s+/g, " ").trim();
+  if (!t) return false;
+  const fecho = "(?: sim| por favor| pf| por gentileza)?";
+  return new RegExp(`^(?:sim |quero |pode )?(?:a |na )?lista${fecho}$`).test(t) ||
+    new RegExp(`^(?:sim )?(?:pode|podem) (?:me )?(?:colocar|incluir|por)${fecho}$`).test(t) ||
+    new RegExp(`^(?:sim )?(?:me )?(?:coloca|coloque|inclui|inclua)${fecho}$`).test(t);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CORREÇÕES DO RELATÓRIO DE 08/10

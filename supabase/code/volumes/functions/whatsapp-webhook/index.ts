@@ -243,6 +243,8 @@ import {
   propostaComercial,
   amigoDizQueJaEstavaConfirmado,
   linkDoSiteNaoResponde,
+  aceitaConviteDaListaDeEspera,
+  janelaPedeData,
   TEXTO_FISIO_DOCUMENTO_MEDICO,
   TEXTO_PROPOSTA_COMERCIAL,
   perguntaSobreProntoAtendimento,
@@ -4084,7 +4086,9 @@ async function executeAction(
                 linkDoSiteNaoResponde(currentMessageText || "") ||
                 // 15/10 (Emerson: "Tem consulta disponível para hoje?" recebeu o link): o dia
                 // pedido é contexto — segue por aqui procurando a agenda
-                !!(janelaDeDatas(currentMessageText || "", getTodayISO_SP())?.datas?.length)
+                // 25/11 (Ale: "última semana de dezembro de manhã terça ou quinta" recebeu o
+                // link): semana, mês e dia da semana também contam
+                janelaPedeData(janelaDeDatas(currentMessageText || "", getTodayISO_SP()))
               );
 
               // Tema 6 (relatorio 24/06 Amostra 1): paciente confirmou "dia 25/06 as 14:00",
@@ -16438,7 +16442,7 @@ Deno.serve(async (req) => {
         // quis repetir a consulta (9h, 21/10), a guarda barrou e saiu "Vou conferir os
         // horários reais…". "Sim" logo depois da marcação do site com convite = entrar.
         try {
-          if (conversationId && respostaAPerguntaDoPaciente(finalMessage || "") === "sim" && classification.intent !== "entrar_lista_espera") {
+          if (conversationId && aceitaConviteDaListaDeEspera(finalMessage || "") && classification.intent !== "entrar_lista_espera") {
             const { data: _antes } = await supabase
               .from("webhook_messages")
               .select("id, direction, message_text, ai_entities, created_at")
