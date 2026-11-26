@@ -653,6 +653,12 @@ const FISIO_CONVENIO_RE =
 // pediu" recebeu a tabela): "um/o/meu retorno", "retorno com o dr" também são consulta.
 const FISIO_CONSULTA_MEDICA_RE =
   /\b(marcar|agendar|remarcar)\s+(uma\s+|um\s+|a\s+|o\s+)?(consulta|retorno)\b(?!\s+com\s+(o|a)\s+fisio)|\b(um|o|meu|de|para|pra|pro)\s+retorno\b(?!\s+(d[ao]s?\s+)?(sess|fisio))|\bretorno\s+(com|no|na|ao)\s+(o\s+|a\s+)?(dr\.?a?|doutora?|m[ée]dic[oa])\b|\b(retornar|voltar|passar)\s+(n[oa]|com\s+[oa])\s+(dr\.?a?|doutora?|m[ée]dic[oa])\b|\bencaixe\b|\bpassar\s+(por|em|numa|na)\s+(uma\s+)?consulta\b|\balgum\s+m[ée]dico\s+dispon[ií]vel\b/iu;
+// 26/11 (Ivana 25/11: "ele me falou que sairia dia 18 e preciso retomar / após minhas sessões
+// de fisio" recebeu a tabela e foi para a fisioterapia; queria o retorno com o Dr. Arnaldo).
+// Retomar, retornar ou voltar DEPOIS das sessões é a consulta com o médico. 60 dias: 2
+// mensagens, as 2 de retorno ao médico.
+const FISIO_RETORNO_DEPOIS_DAS_SESSOES_RE =
+  /\b(retomar|retornar|voltar)\b[^.!?]{0,20}?\b(apos|após)\b[^.!?]{0,30}?\b(sess|fisio)/iu;
 // 08/10 (Omar: "Passei agora pouco com o Dr Felipe e acho que esqueceu de imprimir a
 // fisioterapia do COTOVELO DIREITO!" recebeu a tabela de preço): o médico esqueceu
 // o PEDIDO. "esqueceu/faltou/não me deu/imprimir … fisio" e "pedido para o cotovelo"
@@ -681,7 +687,7 @@ export function classificarPedidoDeFisioterapia(texto: unknown): IntencaoFisio {
   if (FISIO_EXAME_RE.test(t)) return "exame";
   // o recado do fisioterapeuta ao médico vem antes do resto: é conversa com a fisio
   if (FISIO_RECADO_RE.test(t)) return "falar_com_fisio";
-  if (FISIO_CONSULTA_MEDICA_RE.test(t)) return "consulta_medica";
+  if (FISIO_CONSULTA_MEDICA_RE.test(t) || FISIO_RETORNO_DEPOIS_DAS_SESSOES_RE.test(t)) return "consulta_medica";
   // RELATÓRIO, LAUDO OU ATESTADO DO MÉDICO (24/11, Ricardo Junior 23/11): pediu "um relatório
   // médico atualizado… para apresentar à empresa" numa mensagem que citava a fisioterapia que
   // faz em outra clínica e ouviu "pedido, guia ou renovação de sessões quem emite é o médico".
@@ -4347,11 +4353,21 @@ export function horaDaConsultaDeHoje(textos: unknown[], hojeISO: string): string
   return null;
 }
 
-/** Minutos de atraso: "atrasar uns 15 minutos", ou a hora de chegada contra a da consulta. Negativo = chega antes. */
-export function minutosDeAtraso(texto: unknown, horaConsulta: string | null): number | null {
+/** Minutos de atraso: "atrasar uns 15 minutos", ou a hora de chegada contra a da consulta. Negativo = chega antes.
+ *  `agora` ("HH:MM", São Paulo): "chego em 10" / "chego daqui 15 min" é a chegada daqui a N minutos
+ *  (26/11, J.B 25/11: "Chego em 10 / Desculpe" às 16h10, consulta às 16h, foi para a recepção). */
+export function minutosDeAtraso(texto: unknown, horaConsulta: string | null, agora?: string | null): number | null {
   const t = stripAccents(String(texto ?? "").toLowerCase());
   // passado ("eu ia chegar uns 20 min atrasada… tentei contato") não é aviso de agora
   if (/\b(ia|tinha|tentei|cheguei|atrasei|chegou|atrasou)\b/.test(t)) return null;
+  const daqui = /\b(?:chego|chegando|chegarei|estou\s+ai|to\s+ai|estarei\s+ai)\s+(?:em|daqui(?:\s+a)?)\s+(?:uns\s+|umas\s+)?(\d{1,2})(?![\d/:.,h])\s*(?:min|mins|minutos|minutinhos)?\b/.exec(t);
+  if (daqui) {
+    const n = Number(daqui[1]);
+    const hm = /^\d{2}:\d{2}$/;
+    if (!agora || !horaConsulta || !hm.test(agora) || !hm.test(horaConsulta)) return n;
+    const mm = (x: string) => Number(x.slice(0, 2)) * 60 + Number(x.slice(3, 5));
+    return mm(agora) + n - mm(horaConsulta);
+  }
   const min = /\b(\d{1,2})\s*(min|mins|minutos|minutinhos)\b/.exec(t);
   if (min && /\b(atras|chego|chegar|chegando|transito)/.test(t)) return Number(min[1]);
   if (!horaConsulta || !/^\d{2}:\d{2}$/.test(horaConsulta)) return null;

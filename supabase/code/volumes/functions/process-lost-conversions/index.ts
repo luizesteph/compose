@@ -14,7 +14,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 import { chamadaDeCronAutorizada } from "../_shared/cron.ts";
 import { situacaoDoTicket } from "../_shared/zpro.ts";
-import { CATEGORIA_ABANDONO, ehPerguntaDeAgenda, falaDeProcedimento, recusouSeguir, RECUSA_ANTES_DO_CASO_MIN, precoParaARecuperacao, textoDaRecuperacao } from "../_shared/recuperacao.ts";
+import { CATEGORIA_ABANDONO, ehPerguntaDeAgenda, ehPerguntaDePreco, falaDeProcedimento, recusouSeguir, RECUSA_ANTES_DO_CASO_MIN, precoParaARecuperacao, textoDaRecuperacao } from "../_shared/recuperacao.ts";
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-cron-secret",
@@ -317,6 +317,8 @@ Deno.serve(async (req) => {
       // crédito mandou um texto de apresentação com "valor" e recebeu "Vi que você
       // perguntou sobre valores mais cedo".
       if (String(r.message_text || "").length > 300) continue;
+      // "por conta do valor menor" não é pergunta de preço (26/11, ver ehPerguntaDePreco)
+      if (!ehPerguntaDePreco(r.message_text)) continue;
       // se a MESMA conversa já é caso de falha, o caso de falha cobre (não duplicar pessoa)
       if (seen.has(`${r.conversation_id}|falha_agendamento`)) continue;
       seen.add(key);

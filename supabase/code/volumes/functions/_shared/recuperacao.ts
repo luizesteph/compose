@@ -63,6 +63,21 @@ export function precoParaARecuperacao(pergunta: unknown, notasDaClinica: unknown
 }
 
 /**
+ * A mensagem pergunta preço? (26/11, Raphael 25/11: "essa bota serve, no lugar da Aircast…
+ * Por conta do valor menor"; 4 h depois recebeu
+ * "Vi que você perguntou sobre valores mais cedo: a consulta é R$ 500"). A busca no banco
+ * pega todo "valor"/"preço"; aqui sai só o valor como comparação ou anúncio, sem pergunta.
+ */
+export function ehPerguntaDePreco(texto: unknown): boolean {
+  const t = String(texto ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  if (!t.trim()) return false;
+  const pergunta = /\bquanto\s+(custa|sai|fica|e\b|seria|cobra|ta\b|esta\b)|\bqual\s+(e\s+|seria\s+)?(o\s+)?(valor|preco)|\b(valor|preco)(es|s)?\s+(d[aoe]s?|para|pra|por)\s+(a\s+|o\s+|uma\s+|um\s+)?(consulta|retorno|sessao|sessoes|infiltra|fisio|atendimento|exame|cirurg|avaliac|particular|pacote|medico|dr)|^\W*(valor|valores|preco|precos)\W*$|\b(saber|informar|informa|passar|passa|me\s+diz)\s+(o\s+|os\s+)?(valor|preco)/;
+  if (pergunta.test(t)) return true;
+  const comparacaoOuAnuncio = /\b(valor|preco)(es)?\s+(menor|maior|mais\s+(baixo|alto|barato|em\s+conta|acessivel)|inferior|superior|abaixo|acima)\b|\bpor\s+conta\s+do\s+(valor|preco)\b|\bmais\s+barat/;
+  return !comparacaoOuAnuncio.test(t);
+}
+
+/**
  * A conversa é de procedimento (infiltração, fisioterapia, cirurgia)? Esses casos
  * são da equipe (Lidiane, Vânia, a fisio), não de marcação de consulta: "Ficou
  * faltando fechar o seu agendamento" foi para o André (26/09 19h), que espera a

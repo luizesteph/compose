@@ -690,6 +690,12 @@ function comAvisoDeEncerramento(texto: string): string {
   return avisoDeEncerramento(texto, { diaDaSemana: sp.weekday, hora: sp.hour, minuto: sp.minute, hojeISO: getTodayISO_SP() });
 }
 
+// Hora de agora em São Paulo, "HH:MM" (26/11: "chego em 10" conta a partir de agora).
+function _agoraHHMM(): string {
+  const sp = getNowSPParts();
+  return `${String(sp.hour).padStart(2, "0")}:${String(sp.minute).padStart(2, "0")}`;
+}
+
 function getNowSPParts(): {
   year: number;
   month: number;
@@ -11351,7 +11357,7 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
                 .limit(20);
               _horaCons = horaDaConsultaDeHoje((_lemb || []).map((r: any) => r.message_text), getTodayISO_SP());
             }
-            const _min = minutosDeAtraso(currentMessageText || "", _horaCons);
+            const _min = minutosDeAtraso(currentMessageText || "", _horaCons, _agoraHHMM());
             if (_min !== null && _min <= 20) {
               console.log(`[Atraso] ${_min} min (consulta ${_horaCons || "?"}) — pode vir`);
               return { status: "success", response: textoAtrasoPodeVir(_horaCons, _min), bypassAiRewrite: true } as any;

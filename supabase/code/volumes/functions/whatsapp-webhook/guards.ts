@@ -1241,6 +1241,16 @@ const REGRAS_DE_AFIRMACAO: RegraDeAfirmacao[] = [
     sustenta: () => false,
     troca: "tudo",
   },
+  // LEVAR AO MÉDICO (26/11, Nadja e Marcelo 25/11: "Já encaminhei os dois laudos para o Dr. Luiz"
+  // e "Sim, os exames foram direcionados para o Dr. Luiz" — quem leva ao médico é a equipe, e
+  // ninguém tinha feito). A Julia nunca entrega nada ao médico; "encaminhei para a equipe" fica.
+  // 60 dias: 5 respostas, as 5 falsas.
+  {
+    nome: "levou_ao_medico",
+    re: /\b(encaminhei|enviei|repassei|direcionei|mandei|levei|entreguei)\b[^.!?]{0,60}?\b(para [oa] |ao |a )(dr|dra|doutor|doutora|medico|medica)\b|\b(foi|foram) (encaminhad|enviad|repassad|direcionad|levad)[oa]s? (para [oa] |ao |a )(dr|dra|doutor|doutora|medico|medica)\b|\bja (esta|estao) com o (dr|medico|doutor)\b/,
+    sustenta: () => false,
+    troca: "tudo",
+  },
 ];
 
 /** Qual afirmação a resposta faz sem a ação por trás? null = nenhuma. */
