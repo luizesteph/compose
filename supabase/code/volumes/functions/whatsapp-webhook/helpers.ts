@@ -561,7 +561,7 @@ export function campoPedidoNoCadastro(texto: unknown): "nome" | "cpf" | "nascime
 //
 // Os dois ultimos queriam GUIA do ortopedista, para fazer fisio em outro lugar.
 // Mandar tabela de preco para quem pede receita e' vender o que ninguem pediu.
-export type IntencaoFisio = "agendar" | "pedido_medico" | "documento_medico" | "falar_com_fisio" | "sessao_em_curso" | "nota_fiscal" | "trabalho" | "consulta_medica" | "convenio" | "pagamento" | "exame" | "outro";
+export type IntencaoFisio = "agendar" | "pedido_medico" | "documento_medico" | "duvida_medica" | "falar_com_fisio" | "sessao_em_curso" | "nota_fiscal" | "trabalho" | "consulta_medica" | "convenio" | "pagamento" | "exame" | "outro";
 
 // 19/10 (Antônio): "tem como passar as imagens do RX que realizei ontem? O
 // fisioterapeuta pediu para ver" recebeu a tabela de preço. Imagem/resultado/laudo de
@@ -672,6 +672,11 @@ const FISIO_DOCUMENTO_RE =
   /\b(relat[óo]rios?|laudos?|atestados?|declara[çc][ãa]o|declara[çc][õo]es)\s+m[ée]dic[oa]s?\b|\b(relat[óo]rio|laudo|atestado|declara[çc][ãa]o)\b[^.!?\n]{0,80}\b(empresa|rh|trabalho|per[íi]cia|inss|seguradora|escola|faculdade)\b/i;
 const FISIO_DOCUMENTO_DE_SESSOES_RE =
   /\b(guias?|renova\p{L}*|autoriza\p{L}*|libera\p{L}*|mais\s+(\d+\s+)?sess[õo]es|pedidos?\s+(de|da|para|pra|pro)\s+(a\s+|as\s+)?(fisio|sess))/iu;
+const FISIO_DUVIDA_PARA_O_MEDICO_RE =
+  /\b(verificar|perguntar|consultar|checar|confirmar|ver)\s+(isso\s+)?(com\s+[oa]|ao|a|pro|pra|para\s+[oa])\s+(dr|dra|doutor|doutora|medico|medica)\b/;
+const FISIO_DUVIDA_NAO_E_PEDIDO_RE = /\b(pedidos?|guias?|renova\p{L}*|relat[óo]rios?|laudos?|atestados?|receitas?)\b/iu;
+export const TEXTO_FISIO_DUVIDA_MEDICA =
+  "Essa dúvida é para o médico. 🙏 Vou passar para a nossa equipe verificar com o doutor e te responder por aqui.";
 export const TEXTO_FISIO_DOCUMENTO_MEDICO =
   "Relatório, laudo ou atestado quem emite é o médico. 🙏 Vou passar para a nossa equipe ver isso com o doutor e te responder por aqui.";
 
@@ -694,6 +699,13 @@ export function classificarPedidoDeFisioterapia(texto: unknown): IntencaoFisio {
   // Documento do médico tem texto próprio; quando o relatório é para liberar sessões (guia,
   // renovação, autorização), continua sendo o pedido da fisioterapia.
   if (FISIO_DOCUMENTO_RE.test(t) && !FISIO_DOCUMENTO_DE_SESSOES_RE.test(t)) return "documento_medico";
+  // DÚVIDA PARA O MÉDICO (27/11, Laura 26/11 13h44: "estou fazendo fisioterapia… surgiu uma nova
+  // questão e gostaria de verificar com o dr" sobre uma dor lombar nova ouviu "Sobre a
+  // fisioterapia, vou passar para a equipe"; em 11/11, "verificar com o dr Cristian se é
+  // adequado eu tomar algum medicamento" ouviu "pedido, guia ou renovação de sessões quem emite
+  // é o médico"). Pedido, guia, relatório e receita continuam com o texto deles. 60 dias: 2
+  // mensagens, as 2 da Laura.
+  if (FISIO_DUVIDA_PARA_O_MEDICO_RE.test(stripAccents(t.toLowerCase())) && !FISIO_DUVIDA_NAO_E_PEDIDO_RE.test(t)) return "duvida_medica";
   // O pedido vem antes da sessão em curso: "já concluí as 10 sessões, me envie um
   // novo pedido" é pedido. "remarcar minha sessão" não casa nenhum padrão de pedido.
   if (FISIO_PEDIDO_MEDICO_RE.test(t) || FISIO_MAIS_SESSOES_RE.test(t) || FISIO_PEDIR_AO_MEDICO_RE.test(t) || FISIO_PEDIDO_AMPLO_RE.test(t) || FISIO_PEDIDO_ESQUECIDO_RE.test(t)) {
@@ -727,6 +739,11 @@ export function querComecarFisioterapia(texto: unknown): boolean {
   // pergunta do preço: a tabela é a resposta, mesmo de quem já é paciente
   if (/\b(?:valor(?:es)?|preco|quanto\s+(?:custa|fica|e|sai|ficaria)|orcamento|como\s+funciona)\b/.test(n)) return true;
   if (/\b(?:passar|mandar|enviar|dar|ter|obter|saber|quero|queria|gostaria\s+de|preciso\s+de|mais)\s+(?:mais\s+|as\s+|algumas\s+)?informac/.test(n)) return true;
+  // MENSAGEM PARA A ATENDENTE OU PARA O FISIOTERAPEUTA (27/11, Mauro 26/11 13h32: "Glaucia, boa
+  // tarde Podemos marcar um horario para fisio amanhã às 12 h" recebeu a tabela e "avaliação
+  // gratuita"; já faz fisio). Quem chama alguém da equipe pelo nome já está em contato. 60 dias: 2
+  // mensagens saem da tabela, as 2 de quem já faz fisio (Mauro e Laura, 18/11).
+  if (/(?<![a-z])(vania|lidiane|glaucia|laiz|lais|mardila|mardilla|andrew)(?![a-z])/.test(n)) return false;
   // quem já faz, fala de sessão marcada, de atestado ou de cobrança, ou só avisa, não está começando
   if (/\b(?:minhas?|meus?|nossas?|del[ea])\s+(?:consulta\s+(?:com|de)\s+)?(?:fisio|sess)|\b(?:repor|reposicao|trocar|troca|alterar|mudar|cancelar|desmarcar|remarcar|faltar|faltei|adiar)\b|\bestou\s+(?:agendad|fazendo|marcad)|\b(?:comecei|iniciei|terminei|ja\s+faco|ja\s+fiz|ja\s+realizou|ja\s+realizei)\b|\batestado\b|\bcobranca\b|\bnao\s+vou\s+(?:conseguir|poder)\s+ir\b|\bestou\s+ai\b|\bsou\s+paciente\b|\bpara\s+avisar\b|\bantes\s+de\s+(?:iniciar|comecar)\b/.test(n)) {
     return false;

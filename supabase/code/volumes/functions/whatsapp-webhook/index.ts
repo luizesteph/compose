@@ -246,6 +246,7 @@ import {
   aceitaConviteDaListaDeEspera,
   janelaPedeData,
   TEXTO_FISIO_DOCUMENTO_MEDICO,
+  TEXTO_FISIO_DUVIDA_MEDICA,
   TEXTO_PROPOSTA_COMERCIAL,
   perguntaSobreProntoAtendimento,
   TEXTO_SEM_PRONTO_ATENDIMENTO,
@@ -11104,6 +11105,9 @@ Responda APENAS com o nome da subespecialidade, sem explicações.`,
             : _intFisio === "documento_medico"
               // 24/11 (Ricardo Junior): relatório, laudo ou atestado do médico não é guia de sessões
               ? TEXTO_FISIO_DOCUMENTO_MEDICO
+            : _intFisio === "duvida_medica"
+              // 27/11 (Laura): dúvida para o médico ("verificar com o dr") não é fisioterapia
+              ? TEXTO_FISIO_DUVIDA_MEDICA
             : _intFisio === "pedido_medico"
             ? "Pedido, guia ou renovação de sessões quem emite é o médico. 🙏 Vou te passar para nossa equipe verificar isso com o doutor."
             : _intFisio === "nota_fiscal"
